@@ -186,7 +186,7 @@ noa.on("beforeRender", () => {
 
 const hud = document.createElement("div");
 hud.style.cssText =
-  "position: fixed; top: 10px; left: 10px; z-index: 10; padding: 8px 12px;" +
+  "position: fixed; top: 10px; right: 10px; z-index: 10; padding: 8px 12px;" +
   "font: 13px/1.5 system-ui, sans-serif; color: #fff; background: rgba(0,0,0,0.55);" +
   "border-radius: 6px; pointer-events: none; white-space: pre;";
 document.body.appendChild(hud);
@@ -336,9 +336,11 @@ declare global {
     __voxels?: {
       noa: Engine;
       remoteCount(): number;
+      remotes(): { id: string; name: string; x: number; y: number; z: number }[];
       playerPosition(): number[];
       connectionState(): string;
       blockAt(x: number, y: number, z: number): number;
+      setBlockAt(block: number, x: number, y: number, z: number): void;
       digTargeted(): void;
     };
   }
@@ -347,9 +349,15 @@ declare global {
 window.__voxels = {
   noa,
   remoteCount: () => remotePlayers.size,
+  remotes: () =>
+    [...remotePlayers.entries()].map(([id, remote]) => {
+      const [x, y, z] = noa.entities.getPosition(remote.entityId);
+      return { id, name: remote.name, x, y, z };
+    }),
   playerPosition: () => [...noa.entities.getPosition(noa.playerEntity)],
   connectionState: () => connectionState,
   blockAt: (x, y, z) => noa.getBlock(x, y, z),
+  setBlockAt: (block, x, y, z) => sendEdit(block, x, y, z),
   digTargeted: () => {
     if (noa.targetedBlock) {
       const [x, y, z] = noa.targetedBlock.position;

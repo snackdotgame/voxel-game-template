@@ -1,0 +1,214 @@
+// Multiplayer smoke test driven through the Minion dev host shell.
+//
+// Prereqs: `npm run dev` (vite on :3031, minion dev on :3030) and a Playwright
+// install to borrow. Point PLAYWRIGHT_RESOLVE_FROM at any package.json whose
+// node_modules contains playwright, then run: node scripts/playtest.mjs
+import { createRequire } from "node:module";
+import { mkdirSync } from "node:fs";
+
+const resolveFrom =
+  process.env.PLAYWRIGHT_RESOLVE_FROM ?? new URL("../package.json", import.meta.url).pathname;
+const require = createRequire(resolveFrom);
+const { chromium } = require("playwright");
+
+const SHELL_URL = process.env.MINION_SHELL_URL ?? "http://127.0.0.1:3030/";
+const SHOTS = new URL("../.playtest-shots/", import.meta.url).pathname;
+mkdirSync(SHOTS, { recursive: true });
+
+function log(...args) {
+  console.log("[playtest]", ...args);
+}
+
+async function openPlayer(browser, label) {
+  const context = await browser.newContext({
+    ignoreHTTPSErrors: true,
+    viewport: { width: 1100, height: 750 },
+  });
+  const page = await context.newPage();
+  const errors = [];
+  page.on("console", (msg) => {
+    if (msg.type() === "error") errors.push(`[${label}] ${msg.text()}`);
+  });
+  page.on("pageerror", (err) => errors.push(`[${label} pageerror] ${err.message}`));
+  await page.goto(SHELL_URL, { waitUntil: "domcontentloaded" });
+
+  let frame;
+  for (let i = 0; i < 120; i++) {
+    frame = page.frames().find((f) => f.url().includes(":3031"));
+    if (frame) break;
+    await page.waitForTimeout(250);
+  }
+  if (!frame) throw new Error(`${label}: game iframe never appeared`);
+
+  await frame.waitForFunction(
+    () => window.__voxels && window.__voxels.connectionState() === "connected",
+    null,
+    { timeout: 30000 },
+  );
+  log(`${label}: connected to minion server`);
+  return { context, page, frame, errors, label };
+}
+
+async function dump(players) {
+  for (const p of players) {
+    try {
+      const state = await p.frame.evaluate(() => ({
+        conn: window.__voxels.connectionState(),
+        remotes: window.__voxels.remotes(),
+        pos: window.__voxels.playerPosition().map((n) => Math.round(n * 10) / 10),
+      }));
+      log(`state ${p.label}:`, JSON.stringify(state));
+    } catch (e) {
+      log(`state ${p.label}: <unavailable: ${e.message.split("\n")[0]}>`);
+    }
+  }
+}
+
+async function waitFor(frame, fn, arg, label, timeout = 15000) {
+  // interval polling: rAF-based polling can throttle in occluded headless pages
+  await frame.waitForFunction(fn, arg, { timeout, polling: 100 });
+  log(`OK: ${label}`);
+}
+
+const browser = await chromium.launch({ headless: true });
+const live = [];
+try {
+  const p1 = await openPlayer(browser, "player1");
+  const p2 = await openPlayer(browser, "player2");
+  live.push(p1, p2);
+
+  await waitFor(
+    p1.frame,
+    () => window.__voxels.remoteCount() === 1,
+    null,
+    "player1 sees 1 remote player",
+  );
+  await waitFor(
+    p2.frame,
+    () => window.__voxels.remoteCount() === 1,
+    null,
+    "player2 sees 1 remote player",
+  );
+
+  await waitFor(
+    p1.frame,
+    () => {
+      const [, y] = window.__voxels.playerPosition();
+      return y > 0 && y < 10;
+    },
+    null,
+    "player1 landed on terrain after falling",
+    20000,
+  );
+
+  // keyboard movement: click canvas, hold W
+  await p1.page.mouse.click(550, 375);
+  const before = await p1.frame.evaluate(() => window.__voxels.playerPosition());
+  await p1.page.keyboard.down("w");
+  await p1.page.waitForTimeout(1200);
+  await p1.page.keyboard.up("w");
+  const after = await p1.frame.evaluate(() => window.__voxels.playerPosition());
+  const moved = Math.hypot(after[0] - before[0], after[2] - before[2]);
+  if (moved < 1) throw new Error(`keyboard movement did not move player (distance ${moved})`);
+  log(`OK: player1 moved ${moved.toFixed(1)} blocks with W key`);
+
+  // position sync: player2's rendered remote should converge near player1's position
+  await p1.page.waitForTimeout(600);
+  const p1pos = await p1.frame.evaluate(() => window.__voxels.playerPosition());
+  await waitFor(
+    p2.frame,
+    (expected) => {
+      const remotes = window.__voxels.remotes();
+      if (remotes.length !== 1) return false;
+      const r = remotes[0];
+      return Math.hypot(r.x - expected[0], r.y - expected[1], r.z - expected[2]) < 1.5;
+    },
+    p1pos,
+    `player2 renders player1 near ${p1pos.map((n) => n.toFixed(1))}`,
+  );
+
+  // block placement propagates p1 -> p2
+  await p1.frame.evaluate(() => window.__voxels.setBlockAt(2, 3, 10, 3));
+  await waitFor(
+    p2.frame,
+    () => window.__voxels.blockAt(3, 10, 3) === 2,
+    null,
+    "block placed by player1 appears for player2",
+  );
+
+  // digging propagates p2 -> p1
+  const digTarget = await p2.frame.evaluate(() => {
+    for (let y = 8; y >= -8; y--) {
+      if (window.__voxels.blockAt(5, y, 5) !== 0) return y;
+    }
+    return null;
+  });
+  if (digTarget === null) throw new Error("no terrain found at (5, *, 5)");
+  await p2.frame.evaluate((y) => window.__voxels.setBlockAt(0, 5, y, 5), digTarget);
+  await waitFor(
+    p1.frame,
+    (y) => window.__voxels.blockAt(5, y, 5) === 0,
+    digTarget,
+    `block dug by player2 at (5,${digTarget},5) disappears for player1`,
+  );
+
+  // late joiner receives the edit log via welcome replay
+  const p3 = await openPlayer(browser, "player3");
+  live.push(p3);
+  await waitFor(
+    p3.frame,
+    () => window.__voxels.blockAt(3, 10, 3) === 2,
+    null,
+    "late-joining player3 received replayed block edit",
+    20000,
+  );
+  await waitFor(
+    p3.frame,
+    () => window.__voxels.remoteCount() === 2,
+    null,
+    "player3 sees 2 remote players",
+  );
+  await waitFor(
+    p1.frame,
+    () => window.__voxels.remoteCount() === 2,
+    null,
+    "player1 sees 2 remote players",
+  );
+
+  // screenshots while all three are in-world
+  await p1.page.waitForTimeout(400);
+  await p1.page.screenshot({ path: `${SHOTS}player1.png` });
+  await p2.page.screenshot({ path: `${SHOTS}player2.png` });
+  log(`screenshots saved to ${SHOTS}`);
+
+  // disconnect: close player3, others should drop to 1 remote
+  await p3.context.close();
+  live.pop();
+  const t0 = Date.now();
+  await waitFor(
+    p1.frame,
+    () => window.__voxels.remoteCount() === 1,
+    null,
+    "player1 sees player3 leave",
+    30000,
+  );
+  await waitFor(
+    p2.frame,
+    () => window.__voxels.remoteCount() === 1,
+    null,
+    "player2 sees player3 leave",
+    30000,
+  );
+  log(`leave detected in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+
+  for (const p of [p1, p2]) {
+    if (p.errors.length) log("console errors:", p.errors.slice(0, 10));
+  }
+  log("ALL CHECKS PASSED");
+} catch (err) {
+  log("FAILURE:", err.message.split("\n")[0]);
+  await dump(live);
+  process.exitCode = 1;
+} finally {
+  await browser.close();
+}
