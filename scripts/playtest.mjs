@@ -110,7 +110,20 @@ try {
   const after = await p1.frame.evaluate(() => window.__voxels.playerPosition());
   const moved = Math.hypot(after[0] - before[0], after[2] - before[2]);
   if (moved < 1) throw new Error(`keyboard movement did not move player (distance ${moved})`);
-  log(`OK: player1 moved ${moved.toFixed(1)} blocks with W key`);
+  log(`OK: player1 moved ${moved.toFixed(1)} blocks with W key (predicted locally)`);
+
+  // jump: predicted y should rise immediately after pressing space
+  const groundY = (await p1.frame.evaluate(() => window.__voxels.playerPosition()))[1];
+  await p1.page.keyboard.down("Space");
+  await waitFor(
+    p1.frame,
+    (y) => window.__voxels.playerPosition()[1] > y + 0.5,
+    groundY,
+    "player1 jumped (predicted y rose)",
+    5000,
+  );
+  await p1.page.keyboard.up("Space");
+  await p1.page.waitForTimeout(800);
 
   // position sync: player2's rendered remote should converge near player1's position
   await p1.page.waitForTimeout(600);
@@ -180,6 +193,56 @@ try {
   await p1.page.screenshot({ path: `${SHOTS}player1.png` });
   await p2.page.screenshot({ path: `${SHOTS}player2.png` });
   log(`screenshots saved to ${SHOTS}`);
+
+  // prediction rollback: degrade the network (latency + jitter + datagram
+  // loss) via the dev shell debug menu, run around, and check that lost or
+  // reordered inputs produce server corrections the client rolls back from.
+  await p1.page.getByRole("button", { name: "Open Minion debug menu" }).click();
+  await p1.page.getByLabel("Latency ms").fill("150");
+  await p1.page.getByLabel("Jitter ms").fill("40");
+  await p1.page.getByLabel("Datagram loss %").fill("20");
+  await p1.page.getByRole("button", { name: "Apply" }).click();
+  await p1.page.getByRole("button", { name: "Close Minion debug menu" }).click();
+  log("network simulation on: 150ms latency, 40ms jitter, 20% datagram loss");
+
+  const rollbacksBefore = await p1.frame.evaluate(() => window.__voxels.rollbacks());
+  await p1.page.mouse.click(550, 375);
+  for (const key of ["w", "a", "s", "d", "w"]) {
+    await p1.page.keyboard.down(key);
+    await p1.page.keyboard.down("Space");
+    await p1.page.waitForTimeout(700);
+    await p1.page.keyboard.up("Space");
+    await p1.page.keyboard.up(key);
+  }
+  const rollbacksAfter = await p1.frame.evaluate(() => window.__voxels.rollbacks());
+  if (rollbacksAfter <= rollbacksBefore) {
+    throw new Error(
+      `expected rollbacks under packet loss (before=${rollbacksBefore}, after=${rollbacksAfter})`,
+    );
+  }
+  log(
+    `OK: prediction rollbacks fired under packet loss (${rollbacksAfter - rollbacksBefore} rollbacks)`,
+  );
+
+  // after movement stops, client prediction and the server view converge
+  await p1.page.waitForTimeout(2500);
+  const settled = await p1.frame.evaluate(() => window.__voxels.playerPosition());
+  await waitFor(
+    p2.frame,
+    (expected) =>
+      window.__voxels
+        .remotes()
+        .some((r) => Math.hypot(r.x - expected[0], r.y - expected[1], r.z - expected[2]) < 0.8),
+    settled,
+    "player2's view of player1 converged after rollbacks",
+    15000,
+  );
+
+  // restore a clean network before the disconnect test
+  await p1.page.getByRole("button", { name: "Open Minion debug menu" }).click();
+  await p1.page.getByRole("button", { name: "None" }).click();
+  await p1.page.getByRole("button", { name: "Close Minion debug menu" }).click();
+  log("network simulation reset to none");
 
   // disconnect: close player3, others should drop to 1 remote
   await p3.context.close();

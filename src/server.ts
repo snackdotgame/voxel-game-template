@@ -1,34 +1,54 @@
 import { server, type Connection, type DatagramEvent, type StreamEvent } from "minion:server";
 import {
   type BlockEdit,
-  type PlayerState,
+  type PlayerSnapshot,
   parseEditMessage,
-  parsePosMessage,
+  parseInputMessage,
 } from "./shared/messages.js";
+import {
+  SIM_TICK_MS,
+  type CharState,
+  spawnState,
+  stepCharacter,
+  type IsSolid,
+} from "./shared/sim.js";
+import { editKey, makeIsSolid } from "./shared/terrain.js";
 
-const TICK_MS = 50;
 const MAX_EDITS = 50_000;
-// Drop players whose position updates stop, without waiting for the
+// Allow short input bursts (catch-up after jitter) but bound per-player CPU.
+const MAX_STEPS_PER_TICK = 8;
+// Drop players whose input datagrams stop, without waiting for the
 // transport-level disconnect timeout. They rejoin when datagrams resume.
 const STALE_MS = 5_000;
 
+type Player = {
+  name: string;
+  char: CharState;
+  heading: number;
+  lastSeq: number;
+  stepsThisTick: number;
+};
+
 type World = {
-  players: Map<string, PlayerState>;
+  players: Map<string, Player>;
   lastSeen: Map<string, number>;
   edits: Map<string, BlockEdit>;
+  isSolid: IsSolid;
 };
 
 export async function main() {
+  const edits = new Map<string, BlockEdit>();
   const world: World = {
     players: new Map(),
     lastSeen: new Map(),
-    edits: new Map(),
+    edits,
+    isSolid: makeIsSolid(edits),
   };
 
   // recv() rejects when the runtime is shutting down; the pumps ending is
   // the signal to unwind the tick loop and return from main().
   let stopped = false;
-  const pumps = Promise.all([pumpPositions(world), pumpEdits(world)]).then(() => {
+  const pumps = Promise.all([pumpInputs(world), pumpEdits(world)]).then(() => {
     stopped = true;
   });
 
@@ -37,20 +57,28 @@ export async function main() {
     dropStalePlayers(world);
 
     if (world.players.size > 0) {
-      server.datagrams.broadcast({
-        type: "players",
-        players: [...world.players.values()],
-      });
+      const players: PlayerSnapshot[] = [];
+      for (const [id, player] of world.players) {
+        player.stepsThisTick = 0;
+        players.push({
+          id,
+          name: player.name,
+          lastSeq: player.lastSeq,
+          heading: player.heading,
+          state: player.char,
+        });
+      }
+      server.datagrams.broadcast({ type: "players", players });
     }
 
-    await Promise.race([server.sleep(TICK_MS), pumps]);
+    await Promise.race([server.sleep(SIM_TICK_MS), pumps]);
   }
 }
 
-async function pumpPositions(world: World) {
+async function pumpInputs(world: World) {
   try {
     while (true) {
-      handlePosition(world, await server.datagrams.recv());
+      handleInput(world, await server.datagrams.recv());
     }
   } catch {
     // runtime is shutting down
@@ -67,8 +95,8 @@ async function pumpEdits(world: World) {
   }
 }
 
-function handlePosition(world: World, event: DatagramEvent) {
-  const message = parsePosMessage(safeJson(event));
+function handleInput(world: World, event: DatagramEvent) {
+  const message = parseInputMessage(safeJson(event));
   if (!message) {
     return;
   }
@@ -82,10 +110,15 @@ function handlePosition(world: World, event: DatagramEvent) {
   if (!player) {
     return;
   }
-  player.x = message.x;
-  player.y = message.y;
-  player.z = message.z;
+  // Old or duplicated datagrams are ignored; gaps from lost datagrams are
+  // fine — the client detects the resulting divergence and rolls back.
+  if (message.seq <= player.lastSeq || player.stepsThisTick >= MAX_STEPS_PER_TICK) {
+    return;
+  }
+  player.char = stepCharacter(player.char, message, world.isSolid);
   player.heading = message.heading;
+  player.lastSeq = message.seq;
+  player.stepsThisTick += 1;
 }
 
 function handleEdit(world: World, event: StreamEvent) {
@@ -94,7 +127,7 @@ function handleEdit(world: World, event: StreamEvent) {
     return;
   }
 
-  world.edits.set(`${message.x},${message.y},${message.z}`, {
+  world.edits.set(editKey(message.x, message.y, message.z), {
     block: message.block,
     x: message.x,
     y: message.y,
@@ -105,12 +138,11 @@ function handleEdit(world: World, event: StreamEvent) {
 
 function addPlayer(world: World, connection: Connection) {
   world.players.set(connection.id, {
-    id: connection.id,
     name: connection.userName,
-    x: 0,
-    y: 0,
-    z: 0,
+    char: spawnState(),
     heading: 0,
+    lastSeq: 0,
+    stepsThisTick: 0,
   });
   world.lastSeen.set(connection.id, server.elapsedMs());
   server.streams.broadcast(
@@ -153,7 +185,7 @@ function dropStalePlayers(world: World) {
   const now = server.elapsedMs();
   for (const [id, seenAt] of world.lastSeen) {
     if (world.players.has(id) && now - seenAt > STALE_MS) {
-      // Keep lastSeen so a resumed connection re-adds via handlePosition.
+      // Keep lastSeen so a resumed connection re-adds via handleInput.
       world.players.delete(id);
       server.streams.broadcast({ type: "leave", id });
     }

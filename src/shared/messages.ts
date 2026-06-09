@@ -1,12 +1,15 @@
+import type { CharInput, CharState } from "./sim.js";
+
 export const READY_MESSAGE = "ready";
 
-export type PlayerState = {
+export type PlayerSnapshot = {
   id: string;
   name: string;
-  x: number;
-  y: number;
-  z: number;
+  // last input sequence number the server has applied for this player;
+  // clients use it to ack prediction history and reconcile
+  lastSeq: number;
   heading: number;
+  state: CharState;
 };
 
 export type BlockEdit = {
@@ -16,14 +19,9 @@ export type BlockEdit = {
   z: number;
 };
 
-// Client -> server, sent as datagrams (frequent, loss-tolerant).
-export type PosMessage = {
-  type: "pos";
-  x: number;
-  y: number;
-  z: number;
-  heading: number;
-};
+// Client -> server, sent as datagrams every sim tick (frequent, loss-tolerant;
+// a lost input shows up as a prediction mismatch and gets rolled back).
+export type InputMessage = { type: "input" } & CharInput;
 
 // Client -> server, sent as reliable stream messages.
 export type EditMessage = {
@@ -34,10 +32,10 @@ export type EditMessage = {
   z: number;
 };
 
-// Server -> client, datagram snapshot of all player states.
+// Server -> client, datagram snapshot of authoritative player states.
 export type PlayersMessage = {
   type: "players";
-  players: PlayerState[];
+  players: PlayerSnapshot[];
 };
 
 // Server -> client stream messages.
@@ -68,16 +66,24 @@ function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
-export function parsePosMessage(value: unknown): PosMessage | undefined {
+export function parseInputMessage(value: unknown): InputMessage | undefined {
   if (
     isRecord(value) &&
-    value.type === "pos" &&
-    isFiniteNumber(value.x) &&
-    isFiniteNumber(value.y) &&
-    isFiniteNumber(value.z) &&
+    value.type === "input" &&
+    Number.isInteger(value.seq) &&
     isFiniteNumber(value.heading)
   ) {
-    return { type: "pos", x: value.x, y: value.y, z: value.z, heading: value.heading };
+    return {
+      type: "input",
+      seq: value.seq as number,
+      heading: value.heading,
+      fwd: value.fwd === true,
+      back: value.back === true,
+      left: value.left === true,
+      right: value.right === true,
+      jump: value.jump === true,
+      sprint: value.sprint === true,
+    };
   }
   return undefined;
 }
@@ -102,35 +108,59 @@ export function parseEditMessage(value: unknown): EditMessage | undefined {
   return undefined;
 }
 
-export function parsePlayerState(value: unknown): PlayerState | undefined {
+function parseCharState(value: unknown): CharState | undefined {
   if (
     isRecord(value) &&
-    typeof value.id === "string" &&
-    typeof value.name === "string" &&
     isFiniteNumber(value.x) &&
     isFiniteNumber(value.y) &&
     isFiniteNumber(value.z) &&
-    isFiniteNumber(value.heading)
+    isFiniteNumber(value.vx) &&
+    isFiniteNumber(value.vy) &&
+    isFiniteNumber(value.vz)
   ) {
     return {
-      id: value.id,
-      name: value.name,
       x: value.x,
       y: value.y,
       z: value.z,
-      heading: value.heading,
+      vx: value.vx,
+      vy: value.vy,
+      vz: value.vz,
+      onGround: value.onGround === true,
     };
   }
   return undefined;
+}
+
+export function parsePlayerSnapshot(value: unknown): PlayerSnapshot | undefined {
+  if (
+    !isRecord(value) ||
+    typeof value.id !== "string" ||
+    typeof value.name !== "string" ||
+    !Number.isInteger(value.lastSeq) ||
+    !isFiniteNumber(value.heading)
+  ) {
+    return undefined;
+  }
+  const state = parseCharState(value.state);
+  if (!state) {
+    return undefined;
+  }
+  return {
+    id: value.id,
+    name: value.name,
+    lastSeq: value.lastSeq as number,
+    heading: value.heading,
+    state,
+  };
 }
 
 export function parsePlayersMessage(value: unknown): PlayersMessage | undefined {
   if (!isRecord(value) || value.type !== "players" || !Array.isArray(value.players)) {
     return undefined;
   }
-  const players: PlayerState[] = [];
+  const players: PlayerSnapshot[] = [];
   for (const entry of value.players) {
-    const player = parsePlayerState(entry);
+    const player = parsePlayerSnapshot(entry);
     if (player) {
       players.push(player);
     }
