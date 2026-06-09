@@ -1,0 +1,34 @@
+{
+  "name": "noa-voxel-game",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "turbo run dev:client dev:server --parallel",
+    "dev:client": "vite",
+    "dev:server": "minion dev",
+    "tc": "tsgo --project tsconfig.client.json --noEmit && tsgo --project tsconfig.server.json --noEmit",
+    "typecheck": "tsgo --project tsconfig.client.json --noEmit && tsgo --project tsconfig.server.json --noEmit",
+    "lint": "oxlint .",
+    "format": "oxfmt --write .",
+    "check": "oxfmt --check . && tsgo --project tsconfig.client.json --noEmit && tsgo --project tsconfig.server.json --noEmit && oxlint .",
+    "build:client": "vite build",
+    "build:server": "minion build",
+    "build": "vite build && minion build",
+    "deploy": "vite build && minion deploy",
+    "publish": "vite build && minion publish"
+  },
+  "dependencies": {
+    "@babylonjs/core": "^6.49.0",
+    "noa-engine": "^0.33.0"
+  },
+  "devDependencies": {
+    "@minion-game/cli": "latest",
+    "@typescript/native-preview": "7.0.0-dev.20260513.1",
+    "esbuild": "0.27.3",
+    "oxfmt": "0.47.0",
+    "oxlint": "1.62.0",
+    "turbo": "2.7.2",
+    "vite": "7.3.0"
+  },
+  "packageManager": "npm@11.12.1"
+}
