@@ -29,6 +29,7 @@ import {
   type BlockEdit,
   type PlaceMessage,
   type PlayerSnapshot,
+  type ThrowMessage,
   type RosterEntry,
   parseAttackMessage,
   parseEditMessage,
@@ -148,6 +149,9 @@ type Parked = {
 type World = {
   players: Map<string, Player>;
   lastSeen: Map<string, number>;
+  // connections that have been sent their welcome (lastSeen can't double
+  // as this marker: handleInput touches it before the first greet pass)
+  greeted: Set<string>;
   // inventories are keyed by userId so they survive reconnects and AFK
   inventories: Map<string, InvSlot[]>;
   // characters of removed players, keyed by userId, for seamless resume
@@ -178,6 +182,7 @@ export async function main() {
   const world: World = {
     players: new Map(),
     lastSeen: new Map(),
+    greeted: new Set(),
     inventories: new Map(),
     parked: new Map(),
     drops: new Map(),
@@ -397,7 +402,7 @@ function handleStream(world: World, event: StreamEvent) {
   const throwMsg = parseThrowMessage(value);
   if (throwMsg) {
     broadcastSwing(world, event.connection.id);
-    handleThrow(world, event.connection.id, throwMsg.slot, throwMsg.dx, throwMsg.dy, throwMsg.dz);
+    handleThrow(world, event.connection.id, throwMsg);
     return;
   }
   const hit = parseHitMessage(value);
@@ -448,7 +453,11 @@ function handleStream(world: World, event: StreamEvent) {
   }
   const move = parseInvMoveMessage(value);
   if (move) {
-    handleInvMove(world, event.connection.id, move.from, move.to);
+    // require a materialized player: resolving the inventory through a
+    // playerless connection would mint an orphan keyed by connection id
+    if (world.players.has(event.connection.id)) {
+      handleInvMove(world, event.connection.id, move.from, move.to);
+    }
     return;
   }
   handleEdit(world, event, value);
@@ -747,34 +756,28 @@ function tickDrops(world: World) {
  *      Projectiles: server-authoritative ballistics
  */
 
-function handleThrow(
-  world: World,
-  ownerId: string,
-  slot: number,
-  dx: number,
-  dy: number,
-  dz: number,
-) {
+function handleThrow(world: World, ownerId: string, msg: ThrowMessage) {
+  const { item, slot, dx, dy, dz } = msg;
   const player = world.players.get(ownerId);
-  if (!player || !isThrowable(player.item) || world.projectiles.size >= MAX_PROJECTILES) {
+  if (!player || !isThrowable(item) || world.projectiles.size >= MAX_PROJECTILES) {
     return;
   }
   const len = Math.hypot(dx, dy, dz);
   if (len < 1e-6) {
     return;
   }
-  if (!tryConsume(world, ownerId, slot, player.item)) {
+  if (!tryConsume(world, ownerId, slot, item)) {
     return;
   }
   const nx = dx / len;
   const ny = dy / len;
   const nz = dz / len;
-  const speed = throwSpeed(player.item);
+  const speed = throwSpeed(item);
   const id = world.nextProjectileId;
   world.nextProjectileId = (world.nextProjectileId + 1) % 65536 || 1;
   world.projectiles.set(id, {
     id,
-    item: player.item,
+    item,
     owner: ownerId,
     // spawn at eye height, pushed forward clear of the thrower's AABB
     x: player.char.x + nx * 0.9,
@@ -872,7 +875,10 @@ function handleInput(world: World, event: DatagramEvent) {
       continue;
     }
     if (player.stepsThisTick >= MAX_STEPS_PER_TICK) {
-      if (player.inputQueue.length < MAX_QUEUED_INPUTS) {
+      // redundant packets re-carry seqs that are already queued; only
+      // queue past the tail or duplicates crowd out genuinely new inputs
+      const tail = player.inputQueue[player.inputQueue.length - 1];
+      if ((!tail || message.seq > tail.seq) && player.inputQueue.length < MAX_QUEUED_INPUTS) {
         player.inputQueue.push(message);
       }
       continue;
@@ -957,7 +963,7 @@ function syncConnections(world: World) {
 
   for (const connection of server.connections) {
     connected.add(connection.id);
-    if (world.lastSeen.has(connection.id)) {
+    if (world.greeted.has(connection.id)) {
       continue;
     }
 
@@ -965,7 +971,10 @@ function syncConnections(world: World) {
     // materialize on the first input (handleInput), so connections that
     // never send anything (mid-load reloads, dead sessions) never leave a
     // phantom floating at spawn
-    world.lastSeen.set(connection.id, server.elapsedMs());
+    world.greeted.add(connection.id);
+    if (!world.lastSeen.has(connection.id)) {
+      world.lastSeen.set(connection.id, server.elapsedMs());
+    }
     const roster: RosterEntry[] = [];
     for (const [id, player] of world.players) {
       roster.push({ id, name: player.name });
@@ -976,6 +985,7 @@ function syncConnections(world: World) {
   for (const id of world.lastSeen.keys()) {
     if (!connected.has(id)) {
       removePlayer(world, id);
+      world.greeted.delete(id);
     }
   }
 }

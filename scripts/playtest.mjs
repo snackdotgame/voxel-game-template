@@ -280,12 +280,7 @@ try {
     "moveItem returned the stack to the hotbar",
   );
   await p1.page.keyboard.press("e");
-  await waitFor(
-    p1.frame,
-    () => !window.__voxels.inventoryOpen(),
-    null,
-    "E closed the inventory",
-  );
+  await waitFor(p1.frame, () => !window.__voxels.inventoryOpen(), null, "E closed the inventory");
 
   // first-person toggle
   await p1.page.keyboard.press("v");

@@ -20,7 +20,7 @@
 // Snapshot packet 'VS':
 //   0  u8   0x56 'V'
 //   1  u8   0x53 'S'
-//   2  u8   version = 1
+//   2  u8   version (NET_CODEC_VERSION)
 //   3  u8   record count
 //   then per player:
 //     u8   id length, followed by that many bytes of UTF-8 connection id
@@ -100,7 +100,7 @@ export function decodeInputs(bytes: Uint8Array): CharInput[] | undefined {
     return undefined;
   }
   const count = bytes[3];
-  if (bytes.length < INPUT_HEADER_BYTES + count * INPUT_RECORD_BYTES) {
+  if (bytes.length !== INPUT_HEADER_BYTES + count * INPUT_RECORD_BYTES) {
     return undefined;
   }
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);

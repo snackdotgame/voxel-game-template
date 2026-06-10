@@ -166,10 +166,13 @@ export type InventoryMessage = {
   slots: ({ i: number; n: number } | null)[];
 };
 
-// Client -> server: throw the item held in an inventory slot along a view
-// direction.
+// Client -> server: throw an item from an inventory slot along a view
+// direction. Carries the item (like place) because stream messages ride
+// separate uni streams with no cross-message ordering: a throw racing
+// ahead of its equip must not be validated against the stale held item.
 export type ThrowMessage = {
   type: "throw";
+  item: number;
   slot: number;
   dx: number;
   dy: number;
@@ -180,12 +183,20 @@ export function parseThrowMessage(value: unknown): ThrowMessage | undefined {
   if (
     isRecord(value) &&
     value.type === "throw" &&
+    Number.isInteger(value.item) &&
     Number.isInteger(value.slot) &&
     isFiniteNumber(value.dx) &&
     isFiniteNumber(value.dy) &&
     isFiniteNumber(value.dz)
   ) {
-    return { type: "throw", slot: value.slot as number, dx: value.dx, dy: value.dy, dz: value.dz };
+    return {
+      type: "throw",
+      item: value.item as number,
+      slot: value.slot as number,
+      dx: value.dx,
+      dy: value.dy,
+      dz: value.dz,
+    };
   }
   return undefined;
 }

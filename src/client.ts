@@ -808,7 +808,7 @@ noa.inputs.down.on("mid-fire", () => {
   swingT = 1;
   const dir = noa.rendering.camera.getForwardRay().direction;
   void client.streams
-    .send({ type: "throw", slot: selectedSlot, dx: dir.x, dy: dir.y, dz: dir.z })
+    .send({ type: "throw", item: held.item, slot: selectedSlot, dx: dir.x, dy: dir.y, dz: dir.z })
     .catch(() => {});
 });
 
@@ -1000,15 +1000,17 @@ pumpWorker.onmessage = () => {
 
 // when the page thaws from a freeze or becomes visible again, catch up
 // immediately instead of waiting for the next worker tick
-for (const eventName of ["resume", "visibilitychange", "pageshow"]) {
-  document.addEventListener(eventName, () => {
-    const sinceFrame = performance.now() - lastFrameAt;
-    if (sinceFrame > 150) {
-      lastFrameAt = performance.now();
-      pumpSim(Math.min(sinceFrame, 1000));
-    }
-  });
+function pumpAfterThaw(): void {
+  const sinceFrame = performance.now() - lastFrameAt;
+  if (sinceFrame > 150) {
+    lastFrameAt = performance.now();
+    pumpSim(Math.min(sinceFrame, 1000));
+  }
 }
+document.addEventListener("resume", pumpAfterThaw);
+document.addEventListener("visibilitychange", pumpAfterThaw);
+// pageshow (bfcache restore) dispatches at window, not document
+window.addEventListener("pageshow", pumpAfterThaw);
 
 // dev/test: simulate a fully-frozen tab (no sim, no inputs) until this time
 let inputSuspendedUntil = 0;
@@ -1031,7 +1033,21 @@ let lastDeath: { victim: string; attacker: string } | null = null;
 let lastServerDebug: Record<string, unknown> | null = null;
 let remoteSwingsSeen = 0;
 
+// self-heal equip desync: our own snapshot carries the server's view of
+// what we hold, which can go stale in either direction (reload during the
+// parking window resumes the old item before the client can equip; park
+// expiry resets the server to bare hand while the client still shows a
+// tool). syncEquipped only sends on change, so re-assert here.
+let lastEquipAssertAt = 0;
+
 function reconcile(snap: PlayerSnapshot) {
+  if (snap.item !== equippedItem) {
+    const now = performance.now();
+    if (now - lastEquipAssertAt > 500) {
+      lastEquipAssertAt = now;
+      void client.streams.send({ type: "equip", item: equippedItem }).catch(() => {});
+    }
+  }
   if (snap.hp !== myHp) {
     myHp = snap.hp;
     updateHearts();
@@ -1286,7 +1302,10 @@ noa.on("beforeRender", () => {
     while (buf.length > 2 && buf[1].at <= renderTime) {
       buf.shift();
     }
-    let shown = buf.length > 0 ? buf[buf.length - 1] : undefined;
+    // during warmup (all samples newer than renderTime) hold the OLDEST
+    // sample: holding the newest would pop backward once interpolation
+    // catches up and replays the same motion
+    let shown = buf.length > 0 ? buf[0] : undefined;
     if (buf.length >= 2 && buf[0].at <= renderTime) {
       const [a, b] = buf;
       const span = b.at - a.at;
@@ -1326,7 +1345,6 @@ noa.on("beforeRender", () => {
 
 const UI_FONT = "12px/1.4 system-ui, sans-serif";
 
-// the block item that right-click places: follows the last block you hit,
 function uiDiv(css: string): HTMLDivElement {
   const el = document.createElement("div");
   el.style.cssText = `position: fixed; z-index: 10; pointer-events: none; ${css}`;
@@ -1659,6 +1677,10 @@ function updateInventoryPanel(): void {
   }
 }
 
+// after the panel closes, a fire that arrives while the pointer is still
+// unlocked is the user's re-lock click, not an attack
+let fireSuppressedUntil = 0;
+
 function setInventoryOpen(on: boolean): void {
   inventoryOpen = on;
   invBackdrop.style.display = on ? "flex" : "none";
@@ -1667,7 +1689,17 @@ function setInventoryOpen(on: boolean): void {
     updateInventoryPanel();
   } else {
     endDrag(null);
+    // the E keypress is a user gesture, so this usually succeeds; when the
+    // browser refuses, the grace window below swallows the re-lock click
+    noa.container.setPointerLock(true);
+    fireSuppressedUntil = performance.now() + 1500;
   }
+}
+
+function fireSuppressed(): boolean {
+  return (
+    inventoryOpen || (!noa.container.hasPointerLock && performance.now() < fireSuppressedUntil)
+  );
 }
 
 // the same merge-or-swap rule the server applies, run optimistically
@@ -1728,7 +1760,17 @@ function endDrag(ev: PointerEvent | null): void {
   dragGhost = null;
 }
 
+invBackdrop.addEventListener("contextmenu", (ev) => ev.preventDefault());
+
 invBackdrop.addEventListener("pointerdown", (ev) => {
+  // a drag still armed here lost its pointerup (context menu, window
+  // blur): cancel it instead of letting this click complete it
+  if (dragFrom !== -1 || dragGhost) {
+    endDrag(null);
+  }
+  if (ev.button !== 0) {
+    return;
+  }
   const slotEl = (ev.target as HTMLElement).closest?.("[data-inv-slot]") as HTMLElement | null;
   const index = slotEl ? Number(slotEl.dataset.invSlot) : -1;
   if (index < 0 || !invSlots[index]) {
@@ -1754,6 +1796,7 @@ document.addEventListener("pointermove", (ev) => {
 });
 
 document.addEventListener("pointerup", (ev) => endDrag(ev));
+document.addEventListener("pointercancel", () => endDrag(null));
 
 updateHud();
 
@@ -1803,6 +1846,9 @@ function findAttackTarget(): string | null {
 }
 
 function primaryAction(fromHold: boolean): void {
+  if (fireSuppressed()) {
+    return;
+  }
   swingT = 1;
   const target = findAttackTarget();
   if (target) {
@@ -1842,7 +1888,7 @@ setInterval(() => {
 noa.inputs.unbind("alt-fire");
 noa.inputs.bind("alt-fire", "Mouse3");
 noa.inputs.down.on("alt-fire", () => {
-  if (inventoryOpen) {
+  if (fireSuppressed()) {
     return;
   }
   swingT = 1;
@@ -1949,7 +1995,9 @@ function handleStreamEvent(event: { bytes: Uint8Array; json<T = unknown>(): T })
         flashHurt(1);
       }
     } else if (message.type === "inventory") {
-      invSlots = message.slots.map((entry) => (entry ? { item: entry.i, count: entry.n } : null));
+      invSlots = message.slots
+        .slice(0, INV_SLOTS)
+        .map((entry) => (entry ? { item: entry.i, count: entry.n } : null));
       while (invSlots.length < INV_SLOTS) {
         invSlots.push(null);
       }
