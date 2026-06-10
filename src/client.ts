@@ -912,6 +912,11 @@ ents.addComponent(noa.playerEntity, ents.names.mesh, {
 
 noa.camera.zoomDistance = 6;
 noa.on("tick", () => {
+  // scroll zoom is a third-person control; in first person the camera is
+  // pinned to the eyes (any zoom would float it behind the hidden body)
+  if (firstPerson) {
+    return;
+  }
   const scroll = noa.inputs.pointerState.scrolly;
   if (scroll !== 0) {
     noa.camera.zoomDistance += scroll > 0 ? 1 : -1;
