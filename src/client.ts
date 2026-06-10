@@ -125,6 +125,12 @@ noa.registry.registerBlock(WATER_ID, { material: "water", fluid: true, opaque: f
 // makeIsSolid.
 const editBuckets = new Map<string, Map<string, BlockEdit>>();
 
+// Optimistic edits, layered over the confirmed state exactly like movement
+// prediction: applied to the world instantly, superseded by the server's
+// canonical echo for that coordinate, reverted if never confirmed.
+const pendingEdits = new Map<string, { edit: BlockEdit; at: number }>();
+const PENDING_EDIT_TIMEOUT_MS = 4000;
+
 function editBucket(cx: number, cz: number): Map<string, BlockEdit> {
   const key = chunkKey(cx, cz);
   let bucket = editBuckets.get(key);
@@ -136,8 +142,30 @@ function editBucket(cx: number, cz: number): Map<string, BlockEdit> {
 }
 
 function lookupEdit(x: number, y: number, z: number): BlockEdit | undefined {
+  const pending = pendingEdits.get(editKey(x, y, z));
+  if (pending) {
+    return pending.edit;
+  }
   return editBuckets.get(chunkKey(chunkCoord(x), chunkCoord(z)))?.get(editKey(x, y, z));
 }
+
+function predictEdit(block: number, x: number, y: number, z: number): void {
+  pendingEdits.set(editKey(x, y, z), { edit: { block, x, y, z }, at: performance.now() });
+  noa.setBlock(block, x, y, z);
+}
+
+// revert predictions the server never confirmed (e.g. rejected placements)
+setInterval(() => {
+  const now = performance.now();
+  for (const [key, pending] of pendingEdits) {
+    if (now - pending.at > PENDING_EDIT_TIMEOUT_MS) {
+      pendingEdits.delete(key);
+      const { x, y, z } = pending.edit;
+      const confirmed = editBuckets.get(chunkKey(chunkCoord(x), chunkCoord(z)))?.get(key);
+      noa.setBlock(confirmed ? confirmed.block : baseVoxelID(x, y, z), x, y, z);
+    }
+  }
+}, 1000);
 
 const isSolid = makeIsSolid(lookupEdit);
 const isFluid = makeIsFluid(lookupEdit);
@@ -165,22 +193,45 @@ noa.world.on("worldDataNeeded", (id: string, data: ChunkData, x: number, y: numb
       }
     }
   }
+  for (const { edit } of pendingEdits.values()) {
+    const j = edit.y - y;
+    if (
+      chunkCoord(edit.x) === chunkCoord(x) &&
+      chunkCoord(edit.z) === chunkCoord(z) &&
+      j >= 0 &&
+      j < data.shape[1]
+    ) {
+      data.set(edit.x - x, j, edit.z - z, edit.block);
+    }
+  }
   noa.world.setChunkData(id, data);
 });
 
 function applyEdit(edit: BlockEdit) {
   editBucket(chunkCoord(edit.x), chunkCoord(edit.z)).set(editKey(edit.x, edit.y, edit.z), edit);
+  // the authoritative timeline has reached this coordinate; any local
+  // prediction for it is superseded (our own echo arrives in order too)
+  pendingEdits.delete(editKey(edit.x, edit.y, edit.z));
   noa.setBlock(edit.block, edit.x, edit.y, edit.z);
 }
 
 // A chunk-state packet carries the chunk's full current overrides, so the
 // first (non-append) packet replaces whatever we had for that chunk.
 function applyChunkState(state: ChunkState) {
+  const bucket = editBucket(state.cx, state.cz);
   if (!state.append) {
-    editBuckets.get(chunkKey(state.cx, state.cz))?.clear();
+    bucket.clear();
   }
   for (const edit of state.edits) {
-    applyEdit(edit);
+    bucket.set(editKey(edit.x, edit.y, edit.z), edit);
+    noa.setBlock(edit.block, edit.x, edit.y, edit.z);
+  }
+  // chunk state is a snapshot, not the live ordered stream — keep local
+  // predictions in this chunk layered on top until their echo arrives
+  for (const { edit } of pendingEdits.values()) {
+    if (chunkCoord(edit.x) === state.cx && chunkCoord(edit.z) === state.cz) {
+      noa.setBlock(edit.block, edit.x, edit.y, edit.z);
+    }
   }
 }
 
@@ -1284,9 +1335,10 @@ noa.inputs.down.on("cycle-block", () => {
   showNotice(`Placing: ${itemName(placeItem)}`);
 });
 
-// dev/test backdoor: raw edits go through the server like everything else
-// so all clients (including this one) apply them in identical order
+// dev/test backdoor: predicted locally like placement, confirmed by the
+// server echo so all clients converge on the same order
 function sendEdit(block: number, x: number, y: number, z: number): void {
+  predictEdit(block, x, y, z);
   void client.streams.send({ type: "edit", block, x, y, z }).catch(() => {});
 }
 
@@ -1319,6 +1371,8 @@ noa.inputs.down.on("alt-fire", () => {
     return;
   }
   const [x, y, z] = noa.targetedBlock.adjacent;
+  // optimistic placement, reconciled by the server's echo (or reverted)
+  predictEdit(itemToBlock(placeItem), x, y, z);
   void client.streams.send({ type: "place", item: placeItem, x, y, z }).catch(() => {});
 });
 

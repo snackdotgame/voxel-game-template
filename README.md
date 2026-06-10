@@ -49,6 +49,13 @@ along x, split to fit the stream message limit). Live edits broadcast only to pl
 currently have that chunk. Players never receive — or store — edit state for parts of the
 world they aren't near, so join cost and memory scale with local activity, not world history.
 
+Block edits are **predicted like movement**: your placement appears instantly as a pending
+overlay on the confirmed state (collision included, so you can stand on it), the server
+echoes every edit to everyone — including the actor — in one canonical order, each echo
+supersedes the matching prediction, and unconfirmed predictions revert after a few seconds.
+Conflicting writes from multiple players converge on every client because everyone replays
+the same authoritative sequence.
+
 ### World
 
 Deterministic value-noise terrain with biomes (plains, forest, desert, snow-capped

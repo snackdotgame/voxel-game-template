@@ -158,6 +158,16 @@ try {
     "block placed by player1 appears for player2",
   );
 
+  // optimistic prediction: the acting client sees its own edit instantly,
+  // before any server round-trip
+  const instant = await p1.frame.evaluate(() => {
+    window.__voxels.setBlockAt(2, 3, 12, 3);
+    return window.__voxels.blockAt(3, 12, 3);
+  });
+  if (instant !== 2) throw new Error(`optimistic edit not instant (read ${instant})`);
+  log("OK: optimistic edit visible instantly on the acting client");
+  await p1.frame.evaluate(() => window.__voxels.setBlockAt(0, 3, 12, 3));
+
   // digging propagates p2 -> p1
   const digTarget = await p2.frame.evaluate(() => {
     for (let y = 8; y >= -8; y--) {
