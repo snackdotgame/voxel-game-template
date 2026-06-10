@@ -4,7 +4,9 @@ import {
   Color,
   Group,
   Mesh,
+  MeshBasicMaterial,
   type MeshLambertMaterial,
+  MultiplyBlending,
   NearestFilter,
   type Object3D,
 } from "three";
@@ -223,6 +225,8 @@ function applyEdit(edit: BlockEdit) {
   // the authoritative timeline has reached this coordinate; any local
   // prediction for it is superseded (our own echo arrives in order too)
   pendingEdits.delete(editKey(edit.x, edit.y, edit.z));
+  // the block changed, so any breaking overlay on it is stale
+  clearBlockDamage(editKey(edit.x, edit.y, edit.z));
   noa.setBlock(edit.block, edit.x, edit.y, edit.z);
 }
 
@@ -245,6 +249,124 @@ function applyChunkState(state: ChunkState) {
     }
   }
 }
+
+/*
+ *      Block damage "breaking" overlay
+ *
+ *  Minecraft shows destroy_stage_0..9 crack textures over a block as it
+ *  takes damage, picked by breaking progress, drawn with a multiplicative
+ *  blend (neutral gray leaves the block unchanged, dark texels darken).
+ *  Our texture pack ships no crack stages, so they're generated
+ *  procedurally: a fixed set of seeded random-walk fractures, drawn
+ *  cumulatively so every extra hit adds cracks. White is the neutral
+ *  color under three's MultiplyBlending.
+ */
+
+const CRACK_STAGES = 8;
+
+// deterministic LCG so every client draws identical fractures
+function makeCrackMaterials(): MeshBasicMaterial[] {
+  let seed = 1337;
+  const rand = () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 0xffffffff;
+  };
+  // precompute one fracture path per stage; stage N renders paths 0..N
+  const paths: [number, number][][] = [];
+  for (let i = 0; i < CRACK_STAGES; i++) {
+    const path: [number, number][] = [];
+    let x = 3 + Math.floor(rand() * 10);
+    let y = 3 + Math.floor(rand() * 10);
+    const steps = 8 + Math.floor(rand() * 8);
+    for (let s = 0; s < steps; s++) {
+      path.push([x & 15, y & 15]);
+      // bias the walk outward from where it started so cracks spread
+      x += rand() < 0.5 ? 1 : -1;
+      if (rand() < 0.7) y += rand() < 0.5 ? 1 : -1;
+    }
+    paths.push(path);
+  }
+  const materials: MeshBasicMaterial[] = [];
+  for (let stage = 0; stage < CRACK_STAGES; stage++) {
+    const canvas = document.createElement("canvas");
+    canvas.width = 16;
+    canvas.height = 16;
+    const ctx = canvas.getContext("2d")!;
+    ctx.fillStyle = "#ffffff"; // neutral under multiply
+    ctx.fillRect(0, 0, 16, 16);
+    for (let i = 0; i <= stage; i++) {
+      for (const [px, py] of paths[i]) {
+        ctx.fillStyle = (px + py) % 2 === 0 ? "#3c3c3c" : "#6e6e6e";
+        ctx.fillRect(px, py, 1, 1);
+      }
+    }
+    const texture = new CanvasTexture(canvas);
+    texture.magFilter = NearestFilter;
+    texture.minFilter = NearestFilter;
+    const material = new MeshBasicMaterial({
+      map: texture,
+      blending: MultiplyBlending,
+      // required by three for MultiplyBlending; with opaque texels the
+      // blend is then exactly dst * src (white = neutral)
+      premultipliedAlpha: true,
+      transparent: true,
+      depthWrite: false,
+    });
+    material.userData.shared = true;
+    materials.push(material);
+  }
+  return materials;
+}
+
+const crackMaterials = makeCrackMaterials();
+// slightly inflated so the overlay sits in front of the block's faces
+const crackGeometry = new BoxGeometry(1.01, 1.01, 1.01);
+
+type DamageView = { mesh: Mesh; lastHitAt: number };
+const blockDamageViews = new Map<string, DamageView>();
+// matches the server's heal-after-10s; overlays on healed blocks fade out
+const BLOCK_DAMAGE_TTL_MS = 10_000;
+
+function updateBlockDamage(x: number, y: number, z: number, hp: number, maxHp: number): void {
+  const key = editKey(x, y, z);
+  if (hp <= 0 || hp >= maxHp) {
+    clearBlockDamage(key);
+    return;
+  }
+  const stage = Math.min(CRACK_STAGES - 1, Math.floor((1 - hp / maxHp) * CRACK_STAGES));
+  let view = blockDamageViews.get(key);
+  if (!view) {
+    const mesh = new Mesh(crackGeometry, crackMaterials[stage]);
+    mesh.name = `crack-${key}`;
+    noa.rendering.addMeshToScene(mesh, false, [x + 0.5, y + 0.5, z + 0.5]);
+    view = { mesh, lastHitAt: 0 };
+    blockDamageViews.set(key, view);
+  } else {
+    view.mesh.material = crackMaterials[stage];
+  }
+  // reposition every update: cheap, and keeps the overlay correct if the
+  // world origin rebased since the mesh was created
+  const lpos = noa.globalToLocal([x + 0.5, y + 0.5, z + 0.5], null, []);
+  view.mesh.position.set(lpos[0], lpos[1], -lpos[2]);
+  view.lastHitAt = performance.now();
+}
+
+function clearBlockDamage(key: string): void {
+  const view = blockDamageViews.get(key);
+  if (view) {
+    view.mesh.removeFromParent();
+    blockDamageViews.delete(key);
+  }
+}
+
+setInterval(() => {
+  const now = performance.now();
+  for (const [key, view] of blockDamageViews) {
+    if (now - view.lastHitAt > BLOCK_DAMAGE_TTL_MS) {
+      clearBlockDamage(key);
+    }
+  }
+}, 1000);
 
 /*
  *      Minecraft-style voxel character rig
@@ -2016,6 +2138,7 @@ function handleStreamEvent(event: { bytes: Uint8Array; json<T = unknown>(): T })
     if (message.type === "edit") {
       applyEdit(message);
     } else if (message.type === "damage") {
+      updateBlockDamage(message.x, message.y, message.z, message.hp, message.maxHp);
       showNotice(
         `${itemName(blockToItem(noa.getBlock(message.x, message.y, message.z)))}: ${message.maxHp - message.hp}/${message.maxHp}`,
       );
