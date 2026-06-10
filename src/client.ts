@@ -934,11 +934,11 @@ type ItemSpriteConfig = {
 };
 
 const ITEM_SPRITES: Record<number, ItemSpriteConfig> = {
-  [PICKAXE]: { url: "/assets/items/pickaxe.png", size: 0.85, grip: [4.5, 11.5], diagonal: true },
-  [AXE]: { url: "/assets/items/axe.png", size: 0.85, grip: [4.5, 11.5], diagonal: true },
+  [PICKAXE]: { url: "/assets/items/pickaxe.png", size: 0.85, grip: [3.5, 12.5], diagonal: true },
+  [AXE]: { url: "/assets/items/axe.png", size: 0.85, grip: [3.5, 12.5], diagonal: true },
   [SHOVEL]: { url: "/assets/items/shovel.png", size: 0.85, grip: [3.5, 12.5], diagonal: true },
-  [ROCK]: { url: "/assets/items/rock.png", size: 0.3 },
-  [SNOWBALL]: { url: "/assets/items/snowball.png", size: 0.28 },
+  [ROCK]: { url: "/assets/items/rock.png", size: 0.34 },
+  [SNOWBALL]: { url: "/assets/items/snowball.png", size: 0.3 },
 };
 
 function loadImageData(url: string): Promise<ImageData> {

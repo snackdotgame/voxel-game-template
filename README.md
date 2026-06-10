@@ -172,8 +172,9 @@ as browsers require.
 Block textures and the character skin are from
 [Soothing 32](https://content.luanti.org/packages/Zughy/soothing32/) by Zughy and
 contributors, licensed CC BY-SA 4.0 — see `assets/textures/LICENSE-soothing32.txt`. Ore and
-grass/snow side tiles are composited from the pack's base + overlay textures. The item
-sprites in `assets/items` are original pixel art made for this project. Sound effects
+grass/snow side tiles are composited from the pack's base + overlay textures. The tool and
+throwable sprites in `assets/items` are the pack's steel tool / lump / snowball art — see
+`assets/items/LICENSE-items.txt`. Sound effects
 are from [Kenney's Impact Sounds](https://kenney.nl/assets/impact-sounds), CC0 — see
 `assets/sounds/LICENSE-kenney-impact-sounds.txt`.
 
