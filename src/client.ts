@@ -1,5 +1,7 @@
 import {
   BoxGeometry,
+  BufferAttribute,
+  BufferGeometry,
   CanvasTexture,
   Color,
   Group,
@@ -911,11 +913,237 @@ function hueForId(id: string): number {
 }
 
 /*
+ *      3D items from pixel art (the way Minecraft renders held items)
+ *
+ *  Any pixel-art image becomes an item mesh: every opaque pixel is
+ *  extruded one pixel deep — front and back faces everywhere, side
+ *  walls only at silhouette boundaries — with the pixel colors baked
+ *  into vertex colors (walls slightly darkened so edges read in 3D).
+ *  Drop a PNG of any size into assets/items and register it below.
+ */
+
+type ItemSpriteConfig = {
+  url: string;
+  /** world-space size of the sprite's larger image dimension */
+  size: number;
+  /** pixel coords (x right, y down) of the grip — becomes the mesh origin */
+  grip?: [number, number];
+  /** rotate so the sprite's up-right diagonal becomes vertical (for
+   *  tools drawn diagonally but held by a vertical handle) */
+  diagonal?: boolean;
+};
+
+const ITEM_SPRITES: Record<number, ItemSpriteConfig> = {
+  [PICKAXE]: { url: "/assets/items/pickaxe.png", size: 0.85, grip: [4.5, 11.5], diagonal: true },
+  [AXE]: { url: "/assets/items/axe.png", size: 0.85, grip: [4.5, 11.5], diagonal: true },
+  [SHOVEL]: { url: "/assets/items/shovel.png", size: 0.85, grip: [3.5, 12.5], diagonal: true },
+  [ROCK]: { url: "/assets/items/rock.png", size: 0.3 },
+  [SNOWBALL]: { url: "/assets/items/snowball.png", size: 0.28 },
+};
+
+function loadImageData(url: string): Promise<ImageData> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = img.width;
+      canvas.height = img.height;
+      const ctx = canvas.getContext("2d")!;
+      ctx.drawImage(img, 0, 0);
+      resolve(ctx.getImageData(0, 0, img.width, img.height));
+    };
+    img.onerror = () => reject(new Error(`failed to load item sprite ${url}`));
+    img.src = url;
+  });
+}
+
+// Build the extruded geometry. Art x maps to local -z and art y (up) to
+// local +y, so the sprite lies in the character's fore-aft (swing) plane
+// with its thickness sideways; `diagonal` then rolls the up-right
+// diagonal onto +y so handle-based hold transforms apply unchanged.
+function extrudePixelArt(img: ImageData, config: ItemSpriteConfig): BufferGeometry {
+  const w = img.width;
+  const h = img.height;
+  const px = config.size / Math.max(w, h);
+  const depth = px;
+  const [gripX, gripY] = config.grip ?? [w / 2, h / 2];
+
+  const opaque = (c: number, r: number) =>
+    c >= 0 && c < w && r >= 0 && r < h && img.data[(r * w + c) * 4 + 3] >= 128;
+  const colorOf = (c: number, r: number) => {
+    const o = (r * w + c) * 4;
+    return [img.data[o] / 255, img.data[o + 1] / 255, img.data[o + 2] / 255] as const;
+  };
+
+  const positions: number[] = [];
+  const normals: number[] = [];
+  const colors: number[] = [];
+  const indices: number[] = [];
+
+  // art-pixel corner -> local point (y up, art-x toward -z)
+  const X = depth / 2;
+  const zAt = (c: number) => -(c - gripX) * px;
+  const yAt = (r: number) => (gripY - r) * px;
+
+  type Vec = [number, number, number];
+  const pushQuad = (corners: Vec[], normal: Vec, rgb: readonly number[], shade: number) => {
+    const base = positions.length / 3;
+    for (const [vx, vy, vz] of corners) {
+      positions.push(vx, vy, vz);
+      normals.push(normal[0], normal[1], normal[2]);
+      colors.push(rgb[0] * shade, rgb[1] * shade, rgb[2] * shade);
+    }
+    indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+  };
+
+  for (let r = 0; r < h; r++) {
+    for (let c = 0; c < w; c++) {
+      if (!opaque(c, r)) {
+        continue;
+      }
+      const rgb = colorOf(c, r);
+      const z0 = zAt(c); // art-left edge (larger z)
+      const z1 = zAt(c + 1);
+      const y0 = yAt(r + 1); // bottom
+      const y1 = yAt(r); // top
+      // front (+x) and back (-x) faces, CCW seen from outside
+      pushQuad(
+        [
+          [X, y0, z0],
+          [X, y0, z1],
+          [X, y1, z1],
+          [X, y1, z0],
+        ],
+        [1, 0, 0],
+        rgb,
+        1,
+      );
+      pushQuad(
+        [
+          [-X, y0, z1],
+          [-X, y0, z0],
+          [-X, y1, z0],
+          [-X, y1, z1],
+        ],
+        [-1, 0, 0],
+        rgb,
+        1,
+      );
+      // boundary walls, darkened so the extrusion reads
+      if (!opaque(c, r - 1)) {
+        pushQuad(
+          [
+            [-X, y1, z0],
+            [X, y1, z0],
+            [X, y1, z1],
+            [-X, y1, z1],
+          ],
+          [0, 1, 0],
+          rgb,
+          0.9,
+        );
+      }
+      if (!opaque(c, r + 1)) {
+        pushQuad(
+          [
+            [-X, y0, z1],
+            [X, y0, z1],
+            [X, y0, z0],
+            [-X, y0, z0],
+          ],
+          [0, -1, 0],
+          rgb,
+          0.6,
+        );
+      }
+      if (!opaque(c - 1, r)) {
+        pushQuad(
+          [
+            [-X, y0, z0],
+            [X, y0, z0],
+            [X, y1, z0],
+            [-X, y1, z0],
+          ],
+          [0, 0, 1],
+          rgb,
+          0.75,
+        );
+      }
+      if (!opaque(c + 1, r)) {
+        pushQuad(
+          [
+            [X, y0, z1],
+            [-X, y0, z1],
+            [-X, y1, z1],
+            [X, y1, z1],
+          ],
+          [0, 0, -1],
+          rgb,
+          0.75,
+        );
+      }
+    }
+  }
+
+  const geometry = new BufferGeometry();
+  geometry.setAttribute("position", new BufferAttribute(new Float32Array(positions), 3));
+  geometry.setAttribute("normal", new BufferAttribute(new Float32Array(normals), 3));
+  geometry.setAttribute("color", new BufferAttribute(new Float32Array(colors), 3));
+  geometry.setIndex(indices);
+  if (config.diagonal) {
+    geometry.rotateX(Math.PI / 4);
+  }
+  geometry.computeBoundingSphere();
+  // shared across every mesh using this item; never dispose with a mesh
+  geometry.userData.shared = true;
+  return geometry;
+}
+
+const itemGeometries = new Map<number, BufferGeometry>();
+const itemGeometryLoads = new Map<number, Promise<BufferGeometry>>();
+
+function withItemGeometry(item: number, use: (geometry: BufferGeometry) => void): void {
+  const cached = itemGeometries.get(item);
+  if (cached) {
+    use(cached);
+    return;
+  }
+  let load = itemGeometryLoads.get(item);
+  if (!load) {
+    const config = ITEM_SPRITES[item];
+    load = loadImageData(config.url).then((img) => {
+      const geometry = extrudePixelArt(img, config);
+      itemGeometries.set(item, geometry);
+      return geometry;
+    });
+    itemGeometryLoads.set(item, load);
+  }
+  void load.then(use).catch((error: unknown) => console.error(error));
+}
+
+// kick the loads at startup so first equips aren't empty-handed
+for (const item of Object.keys(ITEM_SPRITES)) {
+  withItemGeometry(Number(item), () => {});
+}
+
+let itemSpriteMaterial: MeshLambertMaterial | null = null;
+
+function getItemSpriteMaterial(): MeshLambertMaterial {
+  if (!itemSpriteMaterial) {
+    itemSpriteMaterial = noa.rendering.makeStandardMaterial("item-sprite");
+    itemSpriteMaterial.vertexColors = true;
+    itemSpriteMaterial.userData.shared = true;
+  }
+  return itemSpriteMaterial;
+}
+
+/*
  *      Tools and equipment
  *
- *  Procedural box models held in the right hand. The equipped item id is
- *  sent to the server over the reliable stream and rebroadcast in the
- *  binary snapshots, so remote rigs hold the same tool.
+ *  Items are pixel-art sprites extruded into 3D (see above), held in the
+ *  right hand. The equipped item id is sent to the server over the
+ *  reliable stream and rebroadcast in the binary snapshots, so remote
+ *  rigs hold the same tool.
  */
 
 const materialCache = new Map<string, MeshLambertMaterial>();
@@ -949,7 +1177,7 @@ const BLOCK_COLORS: readonly string[] = [
   "#4d7fd9", // water
 ];
 
-function buildToolMesh(name: string, item: number): Group | null {
+function buildToolMesh(name: string, item: number, forViewModel = false): Group | null {
   if (item === HAND) {
     return null;
   }
@@ -966,49 +1194,21 @@ function buildToolMesh(name: string, item: number): Group | null {
     root.add(mesh);
     return root;
   }
-  const wood = colorMaterial("tool-wood", "#8a5a2b");
-  const metal = colorMaterial("tool-metal", "#aab4be");
-  const part = (
-    label: string,
-    w: number,
-    h: number,
-    d: number,
-    material: ReturnType<typeof colorMaterial>,
-    x: number,
-    y: number,
-    z: number,
-    tiltZ = 0,
-    tiltX = 0,
-  ) => {
-    const mesh = new Mesh(new BoxGeometry(w, h, d), material);
-    mesh.name = `${name}-${label}`;
+  // tools and throwables are extruded pixel-art sprites; the sprite plane
+  // is the fore-aft swing plane, with diagonal tools rolled so the handle
+  // runs along local +y (the geometry arrives async on first use)
+  withItemGeometry(item, (geometry) => {
+    const mesh = new Mesh(geometry, getItemSpriteMaterial());
+    mesh.name = `${name}-sprite`;
+    if (forViewModel) {
+      mesh.frustumCulled = false;
+    }
+    if (isLumpItem(item)) {
+      // angle flat lumps slightly so they don't show edge-on
+      mesh.rotation.y = -0.6;
+    }
     root.add(mesh);
-    mesh.position.set(x, y, z);
-    mesh.rotation.z = tiltZ;
-    mesh.rotation.x = tiltX;
-  };
-
-  if (item === ROCK) {
-    part("rock", 0.22, 0.18, 0.2, colorMaterial("tool-rock", "#7d756b"), 0, 0, 0, 0.3);
-    return root;
-  }
-  if (item === SNOWBALL) {
-    part("snowball", 0.18, 0.18, 0.18, colorMaterial("tool-snow", "#eef3f6"), 0, 0, 0, 0.78);
-    return root;
-  }
-  part("handle", 0.06, 0.55, 0.06, wood, 0, 0, 0);
-  // tool heads live in the local Y-Z plane — the vertical swing plane once
-  // held — so spikes/blades point fore-aft, not sideways (a pickaxe held
-  // with a horizontal head reads as a hammer)
-  if (item === PICKAXE) {
-    part("hub", 0.07, 0.09, 0.14, metal, 0, 0.26, 0);
-    part("tip-f", 0.06, 0.07, 0.2, metal, 0, 0.24, 0.15, 0, 0.45);
-    part("tip-b", 0.06, 0.07, 0.2, metal, 0, 0.24, -0.15, 0, -0.45);
-  } else if (item === AXE) {
-    part("blade", 0.06, 0.2, 0.14, metal, 0, 0.23, 0.1);
-  } else if (item === SHOVEL) {
-    part("scoop", 0.13, 0.2, 0.06, metal, 0, 0.33, 0);
-  }
+  });
   return root;
 }
 
@@ -1091,12 +1291,9 @@ function refreshViewModel(): void {
   // into the scene (toward -z)
   arm.position.set(0, -0.1, 0.12);
   arm.rotation.x = 1.15;
-  const tool = buildToolMesh("view", equippedItem);
+  const tool = buildToolMesh("view", equippedItem, true);
   if (tool) {
     root.add(tool);
-    tool.traverse((mesh) => {
-      mesh.frustumCulled = false;
-    });
     if (isLumpItem(equippedItem)) {
       // cupped on top of the fist (the hand ends up near (0, -0.2, -0.11))
       tool.position.set(0, -0.08, -0.16);
@@ -1804,78 +2001,6 @@ const toast = uiDiv(
     "border-radius: 6px; opacity: 0; transition: opacity 0.25s;",
 );
 
-// pixel-art icons for the tool items, drawn once onto small canvases
-const ICON_PALETTE: Record<string, string> = {
-  b: "#8a5a2b",
-  g: "#aab4be",
-  r: "#7d756b",
-  d: "#5c564e",
-  w: "#f2f7fa",
-  s: "#e0ac69",
-};
-
-const TOOL_ICONS: Record<number, string[]> = {
-  [HAND]: ["", "", "..s.s.s.", ".sssssss", "ssssssss", ".sssssss", ".ssssss.", "..sssss."],
-  [PICKAXE]: [
-    "..gggggg..",
-    ".gg....ggg",
-    "g.....b..g",
-    "......b...",
-    ".....b....",
-    "....b.....",
-    "...b......",
-    "..b.......",
-    ".b........",
-    "b.........",
-  ],
-  [AXE]: [
-    "..ggg.....",
-    ".ggggg....",
-    ".gggggb...",
-    ".ggg.b....",
-    "..g.b.....",
-    "....b.....",
-    "...b......",
-    "..b.......",
-    ".b........",
-    "b.........",
-  ],
-  [SHOVEL]: [
-    "....gg....",
-    "...gggg...",
-    "...gggg...",
-    "....gg....",
-    "....b.....",
-    "....b.....",
-    "...b......",
-    "...b......",
-    "..b.......",
-    "..b.......",
-  ],
-  [ROCK]: [
-    "",
-    "",
-    "...rrr....",
-    "..rrrrrr..",
-    ".rrrdrrrr.",
-    ".rrrrrrdr.",
-    ".rdrrrrrr.",
-    "..rrrrrr..",
-    "...rrrr...",
-  ],
-  [SNOWBALL]: [
-    "",
-    "...wwww...",
-    "..wwwwww..",
-    ".wwwwwwww.",
-    ".wwwswwww.",
-    ".wwwwwwsw.",
-    ".wswwwwww.",
-    "..wwwwww..",
-    "...wwww...",
-  ],
-};
-
 const BLOCK_TEXTURE_FILES: readonly string[] = [
   "",
   "grass.png",
@@ -1892,34 +2017,26 @@ const BLOCK_TEXTURE_FILES: readonly string[] = [
   "",
 ];
 
+// the HUD icons are the same sprites the 3D items are extruded from
+const ITEM_ICON_FILES: Record<number, string> = {
+  [HAND]: "/assets/items/hand.png",
+  [PICKAXE]: "/assets/items/pickaxe.png",
+  [AXE]: "/assets/items/axe.png",
+  [SHOVEL]: "/assets/items/shovel.png",
+  [ROCK]: "/assets/items/rock.png",
+  [SNOWBALL]: "/assets/items/snowball.png",
+};
+
 function makeIconElement(item: number): Node {
+  const img = document.createElement("img");
+  img.style.cssText = "width: 28px; height: 28px; image-rendering: pixelated;";
   if (isBlockItem(item)) {
     const file = BLOCK_TEXTURE_FILES[itemToBlock(item)];
-    if (file) {
-      const img = document.createElement("img");
-      img.src = `${TEX}/${file}`;
-      img.style.cssText = "width: 28px; height: 28px; image-rendering: pixelated;";
-      return img;
-    }
+    img.src = file ? `${TEX}/${file}` : "";
+  } else {
+    img.src = ITEM_ICON_FILES[item] ?? "";
   }
-  const canvas = document.createElement("canvas");
-  canvas.width = 10;
-  canvas.height = 10;
-  canvas.style.cssText = "width: 30px; height: 30px; image-rendering: pixelated;";
-  const ctx = canvas.getContext("2d");
-  const rows = TOOL_ICONS[item];
-  if (ctx && rows) {
-    for (let y = 0; y < rows.length; y++) {
-      for (let x = 0; x < rows[y].length; x++) {
-        const color = ICON_PALETTE[rows[y][x]];
-        if (color) {
-          ctx.fillStyle = color;
-          ctx.fillRect(x, y, 1, 1);
-        }
-      }
-    }
-  }
-  return canvas;
+  return img;
 }
 
 type Slot = {

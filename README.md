@@ -138,10 +138,14 @@ toast feed. Death respawns you at spawn with full HP and 2s of protection; HP re
 ### Equipment and views
 
 V toggles first/third person (first person gets a camera-attached arm + held-item view
-model). The hotbar (keys 1-6) equips hand, pickaxe, axe, shovel, rock, or snowball as
-procedural box models held in the right hand, with a swing animation on dig/place. Stone and
-ores require the pickaxe. The equipped item id rides in the binary snapshots, so everyone
-sees what everyone is holding.
+model). The hotbar (keys 1-6) equips hand, pickaxe, axe, shovel, rock, or snowball. Items
+are rendered the way Minecraft renders them: a 16x16 pixel-art sprite (assets/items)
+extruded one pixel deep into a 3D mesh — front/back faces per opaque pixel, side walls at
+silhouette boundaries, edges slightly darkened — and the same sprites are the HUD icons.
+Any pixel-art PNG dropped into assets/items and registered in the client's ITEM_SPRITES
+table becomes a 3D item, with a configurable size, grip point, and diagonal-handle roll.
+Tools swing on dig/place; stone and ores require the pickaxe. The equipped item id rides
+in the binary snapshots, so everyone sees what everyone is holding.
 
 ### Projectiles
 
@@ -168,7 +172,8 @@ as browsers require.
 Block textures and the character skin are from
 [Soothing 32](https://content.luanti.org/packages/Zughy/soothing32/) by Zughy and
 contributors, licensed CC BY-SA 4.0 — see `assets/textures/LICENSE-soothing32.txt`. Ore and
-grass/snow side tiles are composited from the pack's base + overlay textures. Sound effects
+grass/snow side tiles are composited from the pack's base + overlay textures. The item
+sprites in `assets/items` are original pixel art made for this project. Sound effects
 are from [Kenney's Impact Sounds](https://kenney.nl/assets/impact-sounds), CC0 — see
 `assets/sounds/LICENSE-kenney-impact-sounds.txt`.
 
