@@ -12,6 +12,9 @@ const require = createRequire(resolveFrom);
 const { chromium } = require("playwright");
 
 const SHELL_URL = process.env.MINION_SHELL_URL ?? "http://127.0.0.1:3030/";
+// the vite client port inside the host shell iframe; set alongside
+// MINION_SHELL_URL when testing an isolated dev stack on other ports
+const CLIENT_PORT = process.env.MINION_CLIENT_PORT ?? "3031";
 const SHOTS = new URL("../.playtest-shots/", import.meta.url).pathname;
 mkdirSync(SHOTS, { recursive: true });
 
@@ -34,7 +37,7 @@ async function openPlayer(browser, label) {
 
   let frame;
   for (let i = 0; i < 120; i++) {
-    frame = page.frames().find((f) => f.url().includes(":3031"));
+    frame = page.frames().find((f) => f.url().includes(`:${CLIENT_PORT}`));
     if (frame) break;
     await page.waitForTimeout(250);
   }

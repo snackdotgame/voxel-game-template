@@ -11,6 +11,9 @@ const require = createRequire(resolveFrom);
 const { chromium } = require("playwright");
 
 const SHELL_URL = process.env.MINION_SHELL_URL ?? "http://127.0.0.1:3030/";
+// the vite client port inside the host shell iframe; set alongside
+// MINION_SHELL_URL when testing an isolated dev stack on other ports
+const CLIENT_PORT = process.env.MINION_CLIENT_PORT ?? "3031";
 const N = 5;
 
 let failures = 0;
@@ -31,7 +34,7 @@ async function openPlayer(browser, label) {
   await page.goto(SHELL_URL, { waitUntil: "domcontentloaded" });
   let frame;
   for (let i = 0; i < 120 && !frame; i++) {
-    frame = page.frames().find((f) => f.url().includes(":3031"));
+    frame = page.frames().find((f) => f.url().includes(`:${CLIENT_PORT}`));
     if (!frame) await page.waitForTimeout(250);
   }
   if (!frame) throw new Error(`${label}: game iframe never appeared`);
