@@ -188,6 +188,34 @@ try {
     "player1 sees 2 remote players",
   );
 
+  // chunk-scoped sync: an edit in a far-away chunk (nobody nearby) must not
+  // be delivered to other players' edit state
+  await p1.frame.evaluate(() => window.__voxels.setBlockAt(2, 3000, 10, 3000));
+  await p1.page.waitForTimeout(1200);
+  const farLeaks = await Promise.all(
+    [p2, p3].map((p) => p.frame.evaluate(() => window.__voxels.hasEdit(3000, 10, 3000))),
+  );
+  if (farLeaks.some(Boolean)) throw new Error("far-chunk edit leaked to non-nearby players");
+  // every nearby player should hold the same spawn-area edit state (the dev
+  // server's log persists across runs, so compare counts rather than pin them)
+  const nearCounts = await Promise.all(
+    [p2, p3].map((p) =>
+      p.frame.evaluate(() => ({
+        near: window.__voxels.hasEdit(3, 10, 3),
+        count: window.__voxels.editCount(),
+      })),
+    ),
+  );
+  for (const { near } of nearCounts) {
+    if (!near) throw new Error("nearby edit missing from a nearby player");
+  }
+  if (nearCounts[0].count !== nearCounts[1].count) {
+    throw new Error(
+      `nearby players disagree on edit state: ${nearCounts.map((c) => c.count).join(" vs ")}`,
+    );
+  }
+  log("OK: far-chunk edit not synced to others; nearby players agree on local edit state");
+
   // screenshots while all three are in-world
   await p1.page.waitForTimeout(400);
   await p1.page.screenshot({ path: `${SHOTS}player1.png` });

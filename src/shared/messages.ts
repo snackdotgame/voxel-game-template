@@ -42,7 +42,6 @@ export type PlayersMessage = {
 export type WelcomeMessage = {
   type: "welcome";
   you: string;
-  edits: BlockEdit[];
 };
 
 export type JoinMessage = {
@@ -116,7 +115,13 @@ function parseCharState(value: unknown): CharState | undefined {
     isFiniteNumber(value.z) &&
     isFiniteNumber(value.vx) &&
     isFiniteNumber(value.vy) &&
-    isFiniteNumber(value.vz)
+    isFiniteNumber(value.vz) &&
+    isFiniteNumber(value.rx) &&
+    isFiniteNumber(value.ry) &&
+    isFiniteNumber(value.rz) &&
+    isFiniteNumber(value.jumpCount) &&
+    isFiniteNumber(value.jumpMsLeft) &&
+    isFiniteNumber(value.sleep)
   ) {
     return {
       x: value.x,
@@ -125,7 +130,13 @@ function parseCharState(value: unknown): CharState | undefined {
       vx: value.vx,
       vy: value.vy,
       vz: value.vz,
-      onGround: value.onGround === true,
+      rx: value.rx,
+      ry: value.ry,
+      rz: value.rz,
+      jumpCount: value.jumpCount,
+      jumpMsLeft: value.jumpMsLeft,
+      jumping: value.jumping === true,
+      sleep: value.sleep,
     };
   }
   return undefined;
@@ -172,15 +183,8 @@ export function parseServerStreamMessage(value: unknown): ServerStreamMessage | 
   if (!isRecord(value)) {
     return undefined;
   }
-  if (value.type === "welcome" && typeof value.you === "string" && Array.isArray(value.edits)) {
-    const edits: BlockEdit[] = [];
-    for (const entry of value.edits) {
-      const edit = parseEditMessage(isRecord(entry) ? { ...entry, type: "edit" } : entry);
-      if (edit) {
-        edits.push({ block: edit.block, x: edit.x, y: edit.y, z: edit.z });
-      }
-    }
-    return { type: "welcome", you: value.you, edits };
+  if (value.type === "welcome" && typeof value.you === "string") {
+    return { type: "welcome", you: value.you };
   }
   if (value.type === "edit") {
     return parseEditMessage(value);

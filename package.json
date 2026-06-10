@@ -1,6 +1,9 @@
 {
   "name": "noa-voxel-game",
   "private": true,
+  "workspaces": [
+    "vendor/noa"
+  ],
   "type": "module",
   "scripts": {
     "dev": "turbo run dev:client dev:server --parallel",
@@ -19,7 +22,10 @@
   },
   "dependencies": {
     "@babylonjs/core": "^6.49.0",
-    "noa-engine": "^0.33.0"
+    "aabb-3d": "fenomas/aabb-3d",
+    "gl-vec3": "^1.1.3",
+    "noa-engine": "^0.33.0",
+    "voxel-physics-engine": "^0.13.0"
   },
   "devDependencies": {
     "@minion-game/cli": "latest",

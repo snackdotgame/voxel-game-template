@@ -253,14 +253,25 @@ export function editKey(x: number, y: number, z: number): string {
   return `${x},${y},${z}`;
 }
 
+// Chunk columns used for edit-log sync; matches the client chunk size.
+export const CHUNK_SIZE = 32;
+
+export function chunkCoord(v: number): number {
+  return Math.floor(v / CHUNK_SIZE);
+}
+
+export function chunkKey(cx: number, cz: number): string {
+  return `${cx},${cz}`;
+}
+
+export type EditLookup = (x: number, y: number, z: number) => BlockEdit | undefined;
+
 // Voxel lookup combining deterministic base terrain with the shared edit log.
 // Client and server both build their collision world through this, so the
 // prediction sim and the authoritative sim see the same geometry.
-export function makeIsSolid(
-  edits: Map<string, BlockEdit>,
-): (x: number, y: number, z: number) => boolean {
+export function makeIsSolid(lookup: EditLookup): (x: number, y: number, z: number) => boolean {
   return (x, y, z) => {
-    const edit = edits.get(editKey(x, y, z));
+    const edit = lookup(x, y, z);
     const block = edit ? edit.block : baseVoxelID(x, y, z);
     return block !== 0;
   };

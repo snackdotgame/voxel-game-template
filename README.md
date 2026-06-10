@@ -7,24 +7,41 @@ animate as they move. Block edits are shared live and replayed to anyone who joi
 
 ## Architecture
 
-Movement is **server-authoritative with client-side prediction and rollback**:
+Movement is **server-authoritative with client-side prediction and rollback**, running
+**noa's exact physics on both sides**:
 
-- `src/shared/sim.ts` — deterministic fixed-tick (20 Hz) character sim: walk/sprint/jump,
-  gravity, and AABB voxel collision. The exact same code steps the sim on both sides.
-- `src/shared/terrain.ts` — deterministic terrain function plus the shared block-edit overlay,
-  so prediction and authority collide against identical geometry.
+- `vendor/noa` — noa-engine 0.33 vendored as an npm workspace, with one patch: its internal
+  movement controller (`applyMovementPhysics`) is exported so the headless sim can drive it.
+- `src/shared/sim.ts` — a fixed-tick (20 Hz) stepper around noa's `voxel-physics-engine`
+  rigid body + noa's movement controller (auto-step, Quake-style acceleration, variable-height
+  jumps). The body and movement state are fully captured into a plain `CharState` after every
+  step, so a state can be restored bit-for-bit — the property rollback depends on.
+  `scripts/sim-test.ts` proves settle/walk/jump behavior plus bit-exact determinism and
+  snapshot+replay equivalence in node.
+- `src/shared/terrain.ts` — deterministic terrain function plus the synced edit overlay, so
+  prediction and authority collide against identical geometry.
 - `src/client.ts` — samples input every sim tick, steps the sim locally right away
   (prediction), and sends the sequenced input to the server as a **datagram**. Server snapshots
   ack the last applied input seq; if the authoritative state differs from what the client
   predicted at that seq (lost/reordered datagrams), the client **rolls back** to the server
   state and replays its pending inputs. The HUD shows a live rollback counter.
-- `src/server.ts` — steps each player's authoritative sim from received inputs (rate-capped),
-  broadcasts 20 Hz state snapshots over **datagrams**, relays block edits over reliable
-  streams, and replays the edit log to late joiners. Players whose inputs stop for 5s are
-  dropped without waiting for transport timeouts.
+- `src/server.ts` — steps each player's authoritative sim from received inputs (burst-buffered
+  and rate-capped), broadcasts 20 Hz state snapshots over **datagrams**, and owns the edit log.
+  Players whose inputs stop for 5s are dropped without waiting for transport timeouts.
 
 Datagrams carry everything frequent and loss-tolerant (inputs, snapshots); reliable streams
-carry only what must arrive (block edits, join/leave, welcome replay).
+carry only what must arrive (block edits, join/leave, chunk state).
+
+### Chunk-scoped world sync
+
+Chunk voxel data never crosses the network — terrain regenerates deterministically on every
+client. The only synced state is the set of _current edited-voxel values_, bucketed by chunk
+column. The server tracks each player's authoritative position and, as chunks enter their sync
+window (4-chunk radius, 6 to unsubscribe), sends that chunk's state as a compact **binary
+packet** (`src/shared/chunkCodec.ts`: 16-byte header + 7-byte records, run-length encoded
+along x, split to fit the stream message limit). Live edits broadcast only to players who
+currently have that chunk. Players never receive — or store — edit state for parts of the
+world they aren't near, so join cost and memory scale with local activity, not world history.
 
 ### World
 

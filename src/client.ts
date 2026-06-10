@@ -17,10 +17,12 @@ import {
   type CharState,
   SIM_TICK_MS,
   cloneState,
+  makeStepper,
+  onGround,
   spawnState,
   statesDiverge,
-  stepCharacter,
 } from "./shared/sim.js";
+import { type ChunkState, decodeChunkState } from "./shared/chunkCodec.js";
 import {
   COAL_ORE_ID,
   DIAMOND_ORE_ID,
@@ -34,6 +36,8 @@ import {
   SNOW_ID,
   STONE_ID,
   baseVoxelID,
+  chunkCoord,
+  chunkKey,
   editKey,
   makeIsSolid,
 } from "./shared/terrain.js";
@@ -88,11 +92,28 @@ noa.registry.registerBlock(IRON_ORE_ID, { material: "iron_ore" });
 noa.registry.registerBlock(GOLD_ORE_ID, { material: "gold_ore" });
 noa.registry.registerBlock(DIAMOND_ORE_ID, { material: "diamond_ore" });
 
-// Edits received from the server, keyed "x,y,z", applied on top of the
-// deterministic base terrain whenever a chunk (re)generates. The prediction
-// sim collides against the same data via makeIsSolid.
-const worldEdits = new Map<string, BlockEdit>();
-const isSolid = makeIsSolid(worldEdits);
+// Edited-voxel values received from the server, bucketed by chunk column
+// and applied on top of the deterministic base terrain whenever a chunk
+// (re)generates. The prediction sim collides against the same data via
+// makeIsSolid.
+const editBuckets = new Map<string, Map<string, BlockEdit>>();
+
+function editBucket(cx: number, cz: number): Map<string, BlockEdit> {
+  const key = chunkKey(cx, cz);
+  let bucket = editBuckets.get(key);
+  if (!bucket) {
+    bucket = new Map();
+    editBuckets.set(key, bucket);
+  }
+  return bucket;
+}
+
+function lookupEdit(x: number, y: number, z: number): BlockEdit | undefined {
+  return editBuckets.get(chunkKey(chunkCoord(x), chunkCoord(z)))?.get(editKey(x, y, z));
+}
+
+const isSolid = makeIsSolid(lookupEdit);
+const step = makeStepper(isSolid);
 
 type ChunkData = {
   shape: number[];
@@ -107,20 +128,32 @@ noa.world.on("worldDataNeeded", (id: string, data: ChunkData, x: number, y: numb
       }
     }
   }
-  for (const edit of worldEdits.values()) {
-    const i = edit.x - x;
-    const j = edit.y - y;
-    const k = edit.z - z;
-    if (i >= 0 && i < data.shape[0] && j >= 0 && j < data.shape[1] && k >= 0 && k < data.shape[2]) {
-      data.set(i, j, k, edit.block);
+  const bucket = editBuckets.get(chunkKey(chunkCoord(x), chunkCoord(z)));
+  if (bucket) {
+    for (const edit of bucket.values()) {
+      const j = edit.y - y;
+      if (j >= 0 && j < data.shape[1]) {
+        data.set(edit.x - x, j, edit.z - z, edit.block);
+      }
     }
   }
   noa.world.setChunkData(id, data);
 });
 
 function applyEdit(edit: BlockEdit) {
-  worldEdits.set(editKey(edit.x, edit.y, edit.z), edit);
+  editBucket(chunkCoord(edit.x), chunkCoord(edit.z)).set(editKey(edit.x, edit.y, edit.z), edit);
   noa.setBlock(edit.block, edit.x, edit.y, edit.z);
+}
+
+// A chunk-state packet carries the chunk's full current overrides, so the
+// first (non-append) packet replaces whatever we had for that chunk.
+function applyChunkState(state: ChunkState) {
+  if (!state.append) {
+    editBuckets.get(chunkKey(state.cx, state.cz))?.clear();
+  }
+  for (const edit of state.edits) {
+    applyEdit(edit);
+  }
 }
 
 /*
@@ -407,6 +440,7 @@ let pending: { input: CharInput; state: CharState }[] = [];
 let nextSeq = 1;
 let rollbacks = 0;
 let simAccumMs = 0;
+let lastRollback: Record<string, unknown> | null = null;
 
 noa.inputs.bind("sprint", "ShiftLeft");
 
@@ -427,14 +461,12 @@ function sampleInput(): CharInput {
 function simTick(): void {
   const input = sampleInput();
   prevPredicted = predicted;
-  predicted = stepCharacter(predicted, input, isSolid);
+  predicted = step(predicted, input);
   pending.push({ input, state: predicted });
   if (pending.length > 200) {
     pending.splice(0, pending.length - 100);
   }
-  if (connectionState === "connected") {
-    void client.datagrams.send({ type: "input", ...input }).catch(() => {});
-  }
+  void client.datagrams.send({ type: "input", ...input }).catch(() => {});
 }
 
 // Fixed-step accumulator driven from the render loop: if worldgen or GC
@@ -443,6 +475,12 @@ function simTick(): void {
 const MAX_CATCHUP_TICKS = 6;
 
 function pumpSim(frameMs: number): void {
+  // don't simulate (or burn input seqs) until the server can hear us;
+  // both sides then start the spawn fall from the same first input
+  if (connectionState !== "connected") {
+    simAccumMs = 0;
+    return;
+  }
   simAccumMs = Math.min(simAccumMs + frameMs, SIM_TICK_MS * MAX_CATCHUP_TICKS);
   while (simAccumMs >= SIM_TICK_MS) {
     simAccumMs -= SIM_TICK_MS;
@@ -470,9 +508,22 @@ function reconcile(snap: PlayerSnapshot) {
 
   // rollback: restart from the authoritative state and replay unacked inputs
   rollbacks += 1;
+  lastRollback = {
+    seq: snap.lastSeq,
+    dx: snap.state.x - predictedThen.x,
+    dy: snap.state.y - predictedThen.y,
+    dz: snap.state.z - predictedThen.z,
+    dvy: snap.state.vy - predictedThen.vy,
+    groundServer: onGround(snap.state),
+    groundClient: onGround(predictedThen),
+    jumpServer: snap.state.jumping,
+    jumpClient: predictedThen.jumping,
+    sleepServer: snap.state.sleep,
+    sleepClient: predictedThen.sleep,
+  };
   let state = cloneState(snap.state);
   for (const entry of pending) {
-    state = stepCharacter(state, entry.input, isSolid);
+    state = step(state, entry.input);
     entry.state = state;
   }
   predicted = state;
@@ -553,7 +604,7 @@ noa.on("beforeRender", () => {
     prevPredicted.z + (predicted.z - prevPredicted.z) * alpha,
   );
   selfRig.root.rotation.y = noa.camera.heading;
-  animateRig(selfRig, Math.hypot(predicted.vx, predicted.vz), predicted.onGround, dtSec);
+  animateRig(selfRig, Math.hypot(predicted.vx, predicted.vz), onGround(predicted), dtSec);
 
   // remote players: ease toward their latest authoritative state
   const t = 1 - Math.exp(-dtSec * 12);
@@ -569,7 +620,7 @@ noa.on("beforeRender", () => {
     animateRig(
       remote.rig,
       Math.hypot(remote.target.vx, remote.target.vz),
-      remote.target.onGround,
+      onGround(remote.target),
       dtSec,
     );
   }
@@ -645,15 +696,16 @@ let myId = "";
 async function readStreams(): Promise<void> {
   while (true) {
     const event = await client.streams.recv();
+    const chunkState = decodeChunkState(event.bytes);
+    if (chunkState) {
+      applyChunkState(chunkState);
+      continue;
+    }
     const message = parseServerStreamMessage(safeJson(event));
     if (!message) {
       continue;
     }
-    if (message.type === "welcome") {
-      for (const edit of message.edits) {
-        applyEdit(edit);
-      }
-    } else if (message.type === "edit") {
+    if (message.type === "edit") {
       applyEdit(message);
     } else if (message.type === "leave") {
       removeRemotePlayer(message.id);
@@ -703,6 +755,9 @@ async function connect(): Promise<void> {
   });
   try {
     await client.ready;
+    // let the datagram path warm up so the first inputs aren't dropped
+    // while the transport settles (each early loss forces a rollback)
+    await new Promise((resolve) => setTimeout(resolve, 300));
     connectionState = "connected";
   } catch {
     connectionState = "disconnected";
@@ -726,9 +781,12 @@ declare global {
       playerPosition(): number[];
       connectionState(): string;
       rollbacks(): number;
+      lastRollback(): Record<string, unknown> | null;
       pendingInputs(): number;
       blockAt(x: number, y: number, z: number): number;
       setBlockAt(block: number, x: number, y: number, z: number): void;
+      hasEdit(x: number, y: number, z: number): boolean;
+      editCount(): number;
       digTargeted(): void;
     };
   }
@@ -745,9 +803,12 @@ window.__voxels = {
   playerPosition: () => [predicted.x, predicted.y, predicted.z],
   connectionState: () => connectionState,
   rollbacks: () => rollbacks,
+  lastRollback: () => lastRollback,
   pendingInputs: () => pending.length,
   blockAt: (x, y, z) => noa.getBlock(x, y, z),
   setBlockAt: (block, x, y, z) => sendEdit(block, x, y, z),
+  hasEdit: (x, y, z) => lookupEdit(x, y, z) !== undefined,
+  editCount: () => [...editBuckets.values()].reduce((sum, bucket) => sum + bucket.size, 0),
   digTargeted: () => {
     if (noa.targetedBlock) {
       const [x, y, z] = noa.targetedBlock.position;

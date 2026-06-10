@@ -7,5 +7,5 @@
     "noEmit": true,
     "types": ["./.minion/types/server"]
   },
-  "include": ["src/server.ts", "src/shared/**/*.ts", ".minion/types/**/*.d.ts"]
+  "include": ["src/server.ts", "src/shims.d.ts", "src/shared/**/*.ts", ".minion/types/**/*.d.ts"]
 }

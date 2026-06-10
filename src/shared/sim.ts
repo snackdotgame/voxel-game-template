@@ -1,22 +1,24 @@
 // Deterministic fixed-tick character simulation, run identically on the
-// client (prediction) and the server (authority). Everything here must stay
-// pure: same state + same input + same world = same result on both sides.
+// client (prediction) and the server (authority).
+//
+// This is noa's exact player physics: a voxel-physics-engine rigid body
+// driven by noa's own movement controller (vendored in vendor/noa, which
+// exports applyMovementPhysics). The body state is fully captured into a
+// plain CharState after every step so the client can roll back to a
+// server state and replay pending inputs through the same code.
+
+import aabb from "aabb-3d";
+import { MovementState, applyMovementPhysics } from "noa-engine/src/components/movement.js";
+import { Physics } from "voxel-physics-engine";
 
 export const SIM_TICK_MS = 50;
-const DT = SIM_TICK_MS / 1000;
 
-const GRAVITY = -28;
-const JUMP_SPEED = 9;
-const WALK_SPEED = 4.5;
-const SPRINT_SPEED = 7;
-const GROUND_BLEND = 0.5;
-const AIR_BLEND = 0.12;
-const TERMINAL_FALL = -50;
-
-export const CHAR_HALF_WIDTH = 0.3;
+export const CHAR_WIDTH = 0.6;
 export const CHAR_HEIGHT = 1.8;
-const COLLIDE_STEP = 0.05;
-const EPS = 1e-4;
+const HALF_W = CHAR_WIDTH / 2;
+
+const WALK_SPEED = 6;
+const SPRINT_SPEED = 9.5;
 
 export type CharInput = {
   seq: number;
@@ -29,6 +31,10 @@ export type CharInput = {
   sprint: boolean;
 };
 
+// Full snapshot of the rigid body + movement controller between ticks.
+// x/z are the AABB's bottom-center (noa's position convention); rx/ry/rz
+// are the body's resting flags (-1/0/1); sleep is the engine's
+// sleep-frame countdown, which gates whether a tick integrates at all.
 export type CharState = {
   x: number;
   y: number;
@@ -36,150 +42,133 @@ export type CharState = {
   vx: number;
   vy: number;
   vz: number;
-  onGround: boolean;
+  rx: number;
+  ry: number;
+  rz: number;
+  jumpCount: number;
+  jumpMsLeft: number;
+  jumping: boolean;
+  sleep: number;
 };
 
 export type IsSolid = (x: number, y: number, z: number) => boolean;
+export type Stepper = (state: CharState, input: CharInput) => CharState;
+
+export function onGround(state: CharState): boolean {
+  return state.ry < 0;
+}
 
 export function spawnState(): CharState {
-  return { x: 0.5, y: 16, z: 0.5, vx: 0, vy: 0, vz: 0, onGround: false };
+  return {
+    x: 0.5,
+    y: 16,
+    z: 0.5,
+    vx: 0,
+    vy: 0,
+    vz: 0,
+    rx: 0,
+    ry: 0,
+    rz: 0,
+    jumpCount: 0,
+    jumpMsLeft: 0,
+    jumping: false,
+    sleep: 10,
+  };
 }
 
 export function cloneState(state: CharState): CharState {
   return { ...state };
 }
 
-function collides(x: number, y: number, z: number, isSolid: IsSolid): boolean {
-  const x0 = Math.floor(x - CHAR_HALF_WIDTH + EPS);
-  const x1 = Math.floor(x + CHAR_HALF_WIDTH - EPS);
-  const y0 = Math.floor(y + EPS);
-  const y1 = Math.floor(y + CHAR_HEIGHT - EPS);
-  const z0 = Math.floor(z - CHAR_HALF_WIDTH + EPS);
-  const z1 = Math.floor(z + CHAR_HALF_WIDTH - EPS);
-  for (let vx = x0; vx <= x1; vx++) {
-    for (let vy = y0; vy <= y1; vy++) {
-      for (let vz = z0; vz <= z1; vz++) {
-        if (isSolid(vx, vy, vz)) {
-          return true;
+export function makeStepper(isSolid: IsSolid): Stepper {
+  const world = new Physics({}, isSolid, () => false);
+  const body = world.addBody(new aabb([0, 0, 0], [CHAR_WIDTH, CHAR_HEIGHT, CHAR_WIDTH]));
+  // match noa's player body setup (Engine constructor)
+  body.gravityMultiplier = 2;
+  body.autoStep = true;
+
+  const move = new MovementState();
+  move.airJumps = 0;
+  // noa's defaults launch ~4 blocks; tune to a Minecraft-ish single-block hop
+  move.jumpImpulse = 8.5;
+  move.jumpTime = 150;
+
+  return (prev, input) => {
+    // restore the body from the previous tick's snapshot
+    const { base, max, vec } = body.aabb;
+    base[0] = prev.x - HALF_W;
+    base[1] = prev.y;
+    base[2] = prev.z - HALF_W;
+    vec[0] = CHAR_WIDTH;
+    vec[1] = CHAR_HEIGHT;
+    vec[2] = CHAR_WIDTH;
+    max[0] = base[0] + vec[0];
+    max[1] = base[1] + vec[1];
+    max[2] = base[2] + vec[2];
+    body.velocity[0] = prev.vx;
+    body.velocity[1] = prev.vy;
+    body.velocity[2] = prev.vz;
+    body.resting[0] = prev.rx;
+    body.resting[1] = prev.ry;
+    body.resting[2] = prev.rz;
+    body._forces[0] = 0;
+    body._forces[1] = 0;
+    body._forces[2] = 0;
+    body._impulses[0] = 0;
+    body._impulses[1] = 0;
+    body._impulses[2] = 0;
+    body.inFluid = false;
+    body.ratioInFluid = 0;
+    body._sleepFrameCount = prev.sleep;
+
+    // restore the movement controller's jump bookkeeping
+    move._jumpCount = prev.jumpCount;
+    move._currjumptime = prev.jumpMsLeft;
+    move._isJumping = prev.jumping;
+    move.jumping = input.jump;
+    move.maxSpeed = input.sprint ? SPRINT_SPEED : WALK_SPEED;
+
+    // WASD -> heading/running, mirroring noa's receivesInputs component
+    const fb = input.fwd ? (input.back ? 0 : 1) : input.back ? -1 : 0;
+    const rl = input.right ? (input.left ? 0 : 1) : input.left ? -1 : 0;
+    if ((fb | rl) === 0) {
+      move.running = false;
+    } else {
+      move.running = true;
+      let heading = input.heading;
+      if (fb) {
+        if (fb === -1) {
+          heading += Math.PI;
         }
+        if (rl) {
+          heading += (Math.PI / 4) * fb * rl;
+        }
+      } else {
+        heading += rl * (Math.PI / 2);
       }
+      move.heading = heading;
     }
-  }
-  return false;
-}
 
-// Move along one axis in fixed substeps, stopping at the first colliding
-// position. Substepping keeps the math identical on both sides and avoids
-// tunneling at our speeds (max ~0.5 blocks per tick). Returns the
-// un-traveled remainder (0 when the full delta was applied).
-function moveAxis(
-  state: CharState,
-  axis: "x" | "y" | "z",
-  delta: number,
-  isSolid: IsSolid,
-): number {
-  let remaining = delta;
-  while (Math.abs(remaining) > 1e-9) {
-    const step = Math.max(-COLLIDE_STEP, Math.min(COLLIDE_STEP, remaining));
-    const next = { ...state, [axis]: state[axis] + step };
-    if (collides(next.x, next.y, next.z, isSolid)) {
-      return remaining;
-    }
-    state[axis] += step;
-    remaining -= step;
-  }
-  return 0;
-}
+    // same per-tick order as noa: movement system, then physics
+    applyMovementPhysics(SIM_TICK_MS, move, body);
+    world.tick(SIM_TICK_MS);
 
-const STEP_UP_HEIGHT = 1.05;
-
-// Auto-step: when a grounded horizontal move is blocked, try raising the
-// character one block, finishing the move, and settling back down.
-function moveAxisWithStepUp(
-  state: CharState,
-  axis: "x" | "z",
-  delta: number,
-  isSolid: IsSolid,
-): number {
-  const remaining = moveAxis(state, axis, delta, isSolid);
-  if (remaining === 0 || !state.onGround) {
-    return remaining;
-  }
-
-  const before = cloneState(state);
-  const upBlocked = moveAxis(state, "y", STEP_UP_HEIGHT, isSolid);
-  if (upBlocked !== 0) {
-    state.x = before.x;
-    state.y = before.y;
-    state.z = before.z;
-    return remaining;
-  }
-  const after = moveAxis(state, axis, remaining, isSolid);
-  moveAxis(state, "y", -STEP_UP_HEIGHT, isSolid);
-  if (after === remaining) {
-    // no horizontal progress even when raised; undo the whole attempt
-    state.x = before.x;
-    state.y = before.y;
-    state.z = before.z;
-  }
-  return after;
-}
-
-export function stepCharacter(previous: CharState, input: CharInput, isSolid: IsSolid): CharState {
-  const state = cloneState(previous);
-
-  // input direction in the horizontal plane, relative to heading
-  const sin = Math.sin(input.heading);
-  const cos = Math.cos(input.heading);
-  let mx = 0;
-  let mz = 0;
-  if (input.fwd) {
-    mx += sin;
-    mz += cos;
-  }
-  if (input.back) {
-    mx -= sin;
-    mz -= cos;
-  }
-  if (input.right) {
-    mx += cos;
-    mz -= sin;
-  }
-  if (input.left) {
-    mx -= cos;
-    mz += sin;
-  }
-  const mlen = Math.hypot(mx, mz);
-  const speed = input.sprint ? SPRINT_SPEED : WALK_SPEED;
-  const tx = mlen > 0 ? (mx / mlen) * speed : 0;
-  const tz = mlen > 0 ? (mz / mlen) * speed : 0;
-
-  const blend = state.onGround ? GROUND_BLEND : AIR_BLEND;
-  state.vx += (tx - state.vx) * blend;
-  state.vz += (tz - state.vz) * blend;
-
-  if (input.jump && state.onGround) {
-    state.vy = JUMP_SPEED;
-    state.onGround = false;
-  }
-  state.vy = Math.max(TERMINAL_FALL, state.vy + GRAVITY * DT);
-
-  if (moveAxisWithStepUp(state, "x", state.vx * DT, isSolid) !== 0) {
-    state.vx = 0;
-  }
-  if (moveAxisWithStepUp(state, "z", state.vz * DT, isSolid) !== 0) {
-    state.vz = 0;
-  }
-  const falling = state.vy <= 0;
-  if (moveAxis(state, "y", state.vy * DT, isSolid) !== 0) {
-    state.vy = 0;
-    state.onGround = falling;
-  } else if (falling) {
-    // didn't hit anything moving down: airborne (walked off an edge)
-    state.onGround = false;
-  }
-
-  return state;
+    return {
+      x: body.aabb.base[0] + HALF_W,
+      y: body.aabb.base[1],
+      z: body.aabb.base[2] + HALF_W,
+      vx: body.velocity[0],
+      vy: body.velocity[1],
+      vz: body.velocity[2],
+      rx: body.resting[0],
+      ry: body.resting[1],
+      rz: body.resting[2],
+      jumpCount: move._jumpCount,
+      jumpMsLeft: move._currjumptime,
+      jumping: move._isJumping,
+      sleep: body._sleepFrameCount,
+    };
+  };
 }
 
 export function statesDiverge(a: CharState, b: CharState): boolean {
@@ -189,6 +178,9 @@ export function statesDiverge(a: CharState, b: CharState): boolean {
     Math.abs(a.z - b.z) > 0.01 ||
     Math.abs(a.vx - b.vx) > 0.05 ||
     Math.abs(a.vy - b.vy) > 0.05 ||
-    Math.abs(a.vz - b.vz) > 0.05
+    Math.abs(a.vz - b.vz) > 0.05 ||
+    onGround(a) !== onGround(b) ||
+    a.jumping !== b.jumping ||
+    a.jumpCount !== b.jumpCount
   );
 }
