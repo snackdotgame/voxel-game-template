@@ -84,9 +84,13 @@ Minecraft-proportioned box rigs (swinging arms/legs hung off shoulder/hip pivots
 with a classic-format 64x32 character skin. Procedural animation follows the
 Minecraft-classic/ClassiCube formulas: cosine limb swing with legs at ~1.4x arm amplitude in
 opposite phase, scaled by speed, plus idle breathing sway, body bob, an airborne pose, a
-wind-up-and-chop use animation, and yaw following each player's view heading. Your own
-character is visible in third person; remote players get a deterministic hue shift on the
-clothing so everyone looks different.
+strike-with-follow-through use animation (Minecraft's sin(sqrt(p)\*2pi) swing curve, with the
+arm's forward direction empirically calibrated), and yaw following each player's view
+heading. Swings are broadcast, so everyone sees everyone mining and attacking; holding the
+mouse keeps swinging and digging. Your own character is visible in third person, and your
+outfit — a deterministic hue shift derived from your connection id — is the same one everyone
+else sees, including the sleeve on your first-person arm, which wears the actual skin
+texture.
 
 ### Combat
 

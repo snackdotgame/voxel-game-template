@@ -354,14 +354,7 @@ function hueRotate(pixels: Uint8ClampedArray, degrees: number): void {
   }
 }
 
-function makeSkinMaterial(name: string, hueShiftDegrees: number) {
-  const texture = new DynamicTexture(
-    `${name}-skin`,
-    { width: 64, height: 32 },
-    scene,
-    false,
-    Texture.NEAREST_SAMPLINGMODE,
-  );
+function drawSkin(texture: DynamicTexture, hueShiftDegrees: number): void {
   void skinImage.then((img) => {
     const ctx = texture.getContext() as unknown as CanvasRenderingContext2D;
     ctx.clearRect(0, 0, 64, 32);
@@ -374,9 +367,29 @@ function makeSkinMaterial(name: string, hueShiftDegrees: number) {
     }
     texture.update();
   });
+}
+
+function makeSkinMaterial(name: string, hueShiftDegrees: number) {
+  const texture = new DynamicTexture(
+    `${name}-skin`,
+    { width: 64, height: 32 },
+    scene,
+    false,
+    Texture.NEAREST_SAMPLINGMODE,
+  );
+  drawSkin(texture, hueShiftDegrees);
   const material = noa.rendering.makeStandardMaterial(name);
   material.diffuseTexture = texture;
   return material;
+}
+
+// re-tint a rig's existing skin texture (used once our own id is known, so
+// the outfit we see on ourselves matches what everyone else sees)
+function tintRig(rig: Rig, hueShiftDegrees: number): void {
+  const texture = rig.skin.diffuseTexture;
+  if (texture instanceof DynamicTexture) {
+    drawSkin(texture, hueShiftDegrees);
+  }
 }
 
 function buildRig(name: string, hueShiftDegrees: number): Rig {
@@ -630,11 +643,17 @@ function refreshViewModel(): void {
     return;
   }
   const root = new Mesh("view-model", scene);
-  const arm = CreateBox("view-arm", { width: 0.1, height: 0.1, depth: 0.35 }, scene);
-  arm.material = colorMaterial("view-skin", "#e0ac69");
+  const arm = CreateBox(
+    "view-arm",
+    { width: 0.16, height: 0.5, depth: 0.16, faceUV: faceUVs(ARM_FACES), wrap: true },
+    scene,
+  );
+  arm.material = selfRig.skin;
   arm.parent = root;
-  arm.position.set(0, -0.1, -0.14);
-  arm.rotation.x = 0.35;
+  // arm extends -y at rest; negative x-rotation tips the hand end forward
+  // into the scene (empirically calibrated)
+  arm.position.set(0, -0.1, -0.12);
+  arm.rotation.x = -1.15;
   const tool = buildToolMesh("view", equippedItem);
   if (tool) {
     tool.parent = root;
@@ -908,6 +927,7 @@ type RemotePlayer = {
   item: number;
   hp: number;
   hurtUntil: number;
+  swingT: number;
 };
 
 const remotePlayers = new Map<string, RemotePlayer>();
@@ -948,6 +968,7 @@ function upsertRemotePlayer(snap: PlayerSnapshot): void {
     item: snap.item,
     hp: snap.hp,
     hurtUntil: 0,
+    swingT: 0,
   });
   updateHud();
 }
@@ -985,26 +1006,27 @@ noa.on("beforeRender", () => {
   selfRig.root.rotation.y = noa.camera.heading;
   animateRig(selfRig, Math.hypot(predicted.vx, predicted.vz), onGround(predicted), dtSec);
 
-  // use animation: fast wind-up chop that eases back (sqrt attack curve),
-  // layered on top of the walk swing
+  // use animation, after Minecraft's swing curves: sin(sqrt(p)*2pi) drives
+  // a forward strike with follow-through past neutral, sin(p*pi) the reach.
+  // Negative arm rotation.x swings the hand forward (calibrated).
   if (swingT > 0) {
-    swingT = Math.max(0, swingT - dtSec * 5);
+    swingT = Math.max(0, swingT - dtSec * 4);
     const p = 1 - swingT;
-    const chop = Math.sin(Math.sqrt(p) * Math.PI);
+    const strike = Math.sin(Math.sqrt(p) * Math.PI * 2);
     const reach = Math.sin(p * Math.PI);
-    selfRig.rightArm.rotation.x -= chop * 1.9;
-    selfRig.rightArm.rotation.z += reach * 0.25;
+    selfRig.rightArm.rotation.x -= strike * 1.2 + reach * 0.5;
+    selfRig.rightArm.rotation.z += reach * 0.3;
     if (viewModel) {
-      viewModel.rotation.x = -chop * 0.85;
-      viewModel.rotation.z = -reach * 0.2;
-      viewModel.position.y = VIEW_MODEL_POS[1] - chop * 0.1;
-      viewModel.position.z = VIEW_MODEL_POS[2] + reach * 0.3;
+      viewModel.position.x = VIEW_MODEL_POS[0] - strike * 0.22;
+      viewModel.position.y = VIEW_MODEL_POS[1] - reach * 0.18;
+      viewModel.position.z = VIEW_MODEL_POS[2] + reach * 0.12;
+      viewModel.rotation.x = -strike * 0.9;
+      viewModel.rotation.y = -0.3 - strike * 0.5;
+      viewModel.rotation.z = -reach * 0.35;
     }
   } else if (viewModel) {
-    viewModel.rotation.x = 0;
-    viewModel.rotation.z = 0;
-    viewModel.position.y = VIEW_MODEL_POS[1];
-    viewModel.position.z = VIEW_MODEL_POS[2];
+    viewModel.position.fromArray(VIEW_MODEL_POS);
+    viewModel.rotation.set(0, -0.3, 0);
   }
 
   // projectiles: ease toward broadcast positions, tumbling as they fly
@@ -1052,6 +1074,14 @@ noa.on("beforeRender", () => {
       onGround(remote.target),
       dtSec,
     );
+    if (remote.swingT > 0) {
+      remote.swingT = Math.max(0, remote.swingT - dtSec * 4);
+      const p = 1 - remote.swingT;
+      const strike = Math.sin(Math.sqrt(p) * Math.PI * 2);
+      const reach = Math.sin(p * Math.PI);
+      remote.rig.rightArm.rotation.x -= strike * 1.2 + reach * 0.5;
+      remote.rig.rightArm.rotation.z += reach * 0.3;
+    }
   }
 });
 
@@ -1427,7 +1457,7 @@ function findAttackTarget(): string | null {
   return best;
 }
 
-noa.inputs.down.on("fire", () => {
+function primaryAction(fromHold: boolean): void {
   swingT = 1;
   const target = findAttackTarget();
   if (target) {
@@ -1439,9 +1469,13 @@ noa.inputs.down.on("fire", () => {
   }
   const block = noa.targetedBlock.blockID;
   if (hitDamage(equippedItem, block) <= 0) {
-    showNotice(
-      requiresPickaxe(block) ? "Too hard to dig by hand — equip the pickaxe (2)" : "Can't dig that",
-    );
+    if (!fromHold) {
+      showNotice(
+        requiresPickaxe(block)
+          ? "Too hard to dig by hand — equip the pickaxe (2)"
+          : "Can't dig that",
+      );
+    }
     return;
   }
   const [x, y, z] = noa.targetedBlock.position;
@@ -1449,7 +1483,17 @@ noa.inputs.down.on("fire", () => {
   placeItem = blockToItem(block);
   updateHud();
   void client.streams.send({ type: "hit", x, y, z }).catch(() => {});
-});
+}
+
+noa.inputs.down.on("fire", () => primaryAction(false));
+
+// hold to keep mining/attacking: re-trigger at swing cadence while held
+setInterval(() => {
+  const state = noa.inputs.state as Record<string, boolean>;
+  if (state.fire === true && swingT <= 0) {
+    primaryAction(true);
+  }
+}, 80);
 
 noa.inputs.down.on("alt-fire", () => {
   swingT = 1;
@@ -1471,6 +1515,7 @@ noa.inputs.down.on("alt-fire", () => {
  */
 
 let myId = "";
+let myOutfitHue = 0;
 
 async function readStreams(): Promise<void> {
   while (true) {
@@ -1490,6 +1535,11 @@ async function readStreams(): Promise<void> {
       showNotice(
         `${itemName(blockToItem(noa.getBlock(message.x, message.y, message.z)))}: ${message.maxHp - message.hp}/${message.maxHp}`,
       );
+    } else if (message.type === "swing") {
+      const remote = remotePlayers.get(message.id);
+      if (remote) {
+        remote.swingT = 1;
+      }
     } else if (message.type === "hurt") {
       if (message.id === myId) {
         flashHurt(0.35 + message.amount * 0.1);
@@ -1582,6 +1632,9 @@ async function connect(): Promise<void> {
   void client.connection.then((connection) => {
     myId = connection.connectionId;
     myName = connection.userName;
+    // wear the same outfit everyone else sees on us
+    myOutfitHue = hueForId(myId);
+    tintRig(selfRig, myOutfitHue);
     updateHud();
   });
   try {

@@ -353,6 +353,12 @@ async function pumpStreams(world: World) {
   }
 }
 
+function broadcastSwing(world: World, actorId: string) {
+  if (world.players.has(actorId)) {
+    server.streams.broadcast({ type: "swing", id: actorId }, { except: [actorId] });
+  }
+}
+
 function handleStream(world: World, event: StreamEvent) {
   const value = safeJson(event);
   const equip = parseEquipMessage(value);
@@ -365,21 +371,25 @@ function handleStream(world: World, event: StreamEvent) {
   }
   const throwMsg = parseThrowMessage(value);
   if (throwMsg) {
+    broadcastSwing(world, event.connection.id);
     handleThrow(world, event.connection.id, throwMsg.dx, throwMsg.dy, throwMsg.dz);
     return;
   }
   const hit = parseHitMessage(value);
   if (hit) {
+    broadcastSwing(world, event.connection.id);
     handleHit(world, event.connection.id, hit.x, hit.y, hit.z);
     return;
   }
   const attack = parseAttackMessage(value);
   if (attack) {
+    broadcastSwing(world, event.connection.id);
     handleAttack(world, event.connection.id, attack.target);
     return;
   }
   const place = parsePlaceMessage(value);
   if (place) {
+    broadcastSwing(world, event.connection.id);
     handlePlace(world, event.connection.id, place.item, place.x, place.y, place.z);
     return;
   }

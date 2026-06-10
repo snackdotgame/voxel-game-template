@@ -55,6 +55,12 @@ export function parseAttackMessage(value: unknown): AttackMessage | undefined {
   return undefined;
 }
 
+// Server -> clients: a player swung their item (animation only).
+export type SwingMessage = {
+  type: "swing";
+  id: string;
+};
+
 // Server -> clients: a player took damage.
 export type HurtMessage = {
   type: "hurt";
@@ -198,7 +204,8 @@ export type ServerStreamMessage =
   | DamageMessage
   | InventoryMessage
   | HurtMessage
-  | DeathMessage;
+  | DeathMessage
+  | SwingMessage;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -262,6 +269,9 @@ export function parseServerStreamMessage(value: unknown): ServerStreamMessage | 
       hp: value.hp,
       maxHp: value.maxHp,
     };
+  }
+  if (value.type === "swing" && typeof value.id === "string") {
+    return { type: "swing", id: value.id };
   }
   if (
     value.type === "hurt" &&
