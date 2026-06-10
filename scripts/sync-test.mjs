@@ -221,9 +221,17 @@ try {
     if (!gone) digAgree = false;
   }
   check("hit-dug block disappears on all clients", digAgree);
-  const dropCounts = [];
-  for (const p of players) {
-    dropCounts.push(await p.frame.evaluate(() => window.__voxels.dropCount()));
+  // drops ride lossy datagrams with a periodic re-sync heartbeat, so poll
+  // for agreement instead of sampling one instant
+  let dropCounts = [];
+  const dropDeadline = Date.now() + 5000;
+  while (Date.now() < dropDeadline) {
+    dropCounts = [];
+    for (const p of players) {
+      dropCounts.push(await p.frame.evaluate(() => window.__voxels.dropCount()));
+    }
+    if (new Set(dropCounts).size === 1 && dropCounts[0] >= 1) break;
+    await players[0].page.waitForTimeout(300);
   }
   check(
     "all clients see the same world drops",
