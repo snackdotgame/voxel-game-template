@@ -41,6 +41,72 @@ export function parseEquipMessage(value: unknown): EquipMessage | undefined {
   return undefined;
 }
 
+// Client -> server: one dig hit on a block (blocks have HP).
+export type HitMessage = {
+  type: "hit";
+  x: number;
+  y: number;
+  z: number;
+};
+
+export function parseHitMessage(value: unknown): HitMessage | undefined {
+  if (
+    isRecord(value) &&
+    value.type === "hit" &&
+    Number.isInteger(value.x) &&
+    Number.isInteger(value.y) &&
+    Number.isInteger(value.z)
+  ) {
+    return { type: "hit", x: value.x as number, y: value.y as number, z: value.z as number };
+  }
+  return undefined;
+}
+
+// Client -> server: place a block item from inventory.
+export type PlaceMessage = {
+  type: "place";
+  item: number;
+  x: number;
+  y: number;
+  z: number;
+};
+
+export function parsePlaceMessage(value: unknown): PlaceMessage | undefined {
+  if (
+    isRecord(value) &&
+    value.type === "place" &&
+    Number.isInteger(value.item) &&
+    Number.isInteger(value.x) &&
+    Number.isInteger(value.y) &&
+    Number.isInteger(value.z)
+  ) {
+    return {
+      type: "place",
+      item: value.item as number,
+      x: value.x as number,
+      y: value.y as number,
+      z: value.z as number,
+    };
+  }
+  return undefined;
+}
+
+// Server -> hitter: dig progress on a block.
+export type DamageMessage = {
+  type: "damage";
+  x: number;
+  y: number;
+  z: number;
+  hp: number;
+  maxHp: number;
+};
+
+// Server -> owner: full inventory state after any change.
+export type InventoryMessage = {
+  type: "inventory";
+  items: Record<string, number>;
+};
+
 // Client -> server: throw the equipped item along a view direction.
 export type ThrowMessage = {
   type: "throw";
@@ -95,7 +161,13 @@ export type LeaveMessage = {
   id: string;
 };
 
-export type ServerStreamMessage = WelcomeMessage | EditMessage | JoinMessage | LeaveMessage;
+export type ServerStreamMessage =
+  | WelcomeMessage
+  | EditMessage
+  | JoinMessage
+  | LeaveMessage
+  | DamageMessage
+  | InventoryMessage;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -142,6 +214,32 @@ export function parseServerStreamMessage(value: unknown): ServerStreamMessage | 
   }
   if (value.type === "edit") {
     return parseEditMessage(value);
+  }
+  if (
+    value.type === "damage" &&
+    Number.isInteger(value.x) &&
+    Number.isInteger(value.y) &&
+    Number.isInteger(value.z) &&
+    isFiniteNumber(value.hp) &&
+    isFiniteNumber(value.maxHp)
+  ) {
+    return {
+      type: "damage",
+      x: value.x as number,
+      y: value.y as number,
+      z: value.z as number,
+      hp: value.hp,
+      maxHp: value.maxHp,
+    };
+  }
+  if (value.type === "inventory" && isRecord(value.items)) {
+    const items: Record<string, number> = {};
+    for (const [key, count] of Object.entries(value.items)) {
+      if (isFiniteNumber(count)) {
+        items[key] = count;
+      }
+    }
+    return { type: "inventory", items };
   }
   if (value.type === "join" && typeof value.id === "string" && typeof value.name === "string") {
     return { type: "join", id: value.id, name: value.name };

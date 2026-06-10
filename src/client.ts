@@ -14,11 +14,27 @@ import {
 } from "./shared/messages.js";
 import {
   type ProjectileSnapshot,
+  decodeDrops,
   decodeProjectiles,
   decodeSnapshots,
   encodeInput,
 } from "./shared/netCodec.js";
-import { HAND, ITEMS, PICKAXE, AXE, SHOVEL, ROCK, SNOWBALL, isThrowable } from "./shared/items.js";
+import {
+  AXE,
+  HAND,
+  ITEMS,
+  PICKAXE,
+  ROCK,
+  SHOVEL,
+  SNOWBALL,
+  blockToItem,
+  hitDamage,
+  isThrowable,
+  itemName,
+  itemToBlock,
+  isBlockItem,
+  requiresPickaxe,
+} from "./shared/items.js";
 import {
   type CharInput,
   type CharState,
@@ -42,10 +58,12 @@ import {
   SAND_ID,
   SNOW_ID,
   STONE_ID,
+  WATER_ID,
   baseVoxelID,
   chunkCoord,
   chunkKey,
   editKey,
+  makeIsFluid,
   makeIsSolid,
 } from "./shared/terrain.js";
 
@@ -98,6 +116,8 @@ noa.registry.registerBlock(COAL_ORE_ID, { material: "coal_ore" });
 noa.registry.registerBlock(IRON_ORE_ID, { material: "iron_ore" });
 noa.registry.registerBlock(GOLD_ORE_ID, { material: "gold_ore" });
 noa.registry.registerBlock(DIAMOND_ORE_ID, { material: "diamond_ore" });
+noa.registry.registerMaterial("water", { color: [0.25, 0.5, 0.95, 0.65] });
+noa.registry.registerBlock(WATER_ID, { material: "water", fluid: true, opaque: false });
 
 // Edited-voxel values received from the server, bucketed by chunk column
 // and applied on top of the deterministic base terrain whenever a chunk
@@ -120,7 +140,8 @@ function lookupEdit(x: number, y: number, z: number): BlockEdit | undefined {
 }
 
 const isSolid = makeIsSolid(lookupEdit);
-const step = makeStepper(isSolid);
+const isFluid = makeIsFluid(lookupEdit);
+const step = makeStepper(isSolid, isFluid);
 
 type ChunkData = {
   shape: number[];
@@ -174,6 +195,8 @@ function applyChunkState(state: ChunkState) {
  */
 
 const scene = noa.rendering.getScene();
+// widen the default ~46° vertical FOV; it reads badly zoomed-in up close
+noa.rendering.camera.fov = 1.25;
 
 const SKIN_PX = 0.05625; // world units per skin pixel: 32px of parts -> 1.8 blocks
 
@@ -185,6 +208,7 @@ type Rig = {
   rightLeg: TransformNode;
   body: TransformNode;
   phase: number;
+  idleT: number;
   tool: Mesh | null;
 };
 
@@ -354,6 +378,7 @@ function buildRig(name: string, hueShiftDegrees: number): Rig {
     leftLeg: limb("left-leg", LEG_FACES, 0.675, -0.1125),
     rightLeg: limb("right-leg", LEG_FACES, 0.675, 0.1125),
     phase: 0,
+    idleT: 0,
     tool: null,
   };
 
@@ -365,30 +390,47 @@ function buildRig(name: string, hueShiftDegrees: number): Rig {
   return rig;
 }
 
-function animateRig(rig: Rig, speed: number, onGround: boolean, dtSec: number) {
-  let legSwing: number;
-  let armSwing: number;
-  if (!onGround) {
-    // airborne pose: legs tucked, arms slightly raised
-    legSwing = 0.35;
-    armSwing = -0.6;
-    rig.body.position.y = 0;
-  } else if (speed > 0.4) {
-    rig.phase += dtSec * (3 + speed * 2.6);
-    const amp = Math.min(1, speed / 4.5) * 0.85;
-    legSwing = Math.sin(rig.phase) * amp;
-    armSwing = -legSwing * 0.9;
-    rig.body.position.y = Math.abs(Math.cos(rig.phase)) * 0.035;
-  } else {
-    legSwing = 0;
-    armSwing = 0;
-    rig.body.position.y = 0;
+// Walk cycle after Minecraft-classic / ClassiCube: cosine limb swing with
+// legs at ~1.4x the arm amplitude in opposite phase, scaled by speed, plus
+// a subtle idle breathing sway on the arms.
+function animateRig(rig: Rig, speed: number, grounded: boolean, dtSec: number) {
+  rig.idleT += dtSec;
+  const amount = Math.min(1, speed / 6);
+  if (amount > 0.05) {
+    rig.phase += dtSec * (4 + speed * 1.3);
   }
-  const blend = 1 - Math.exp(-dtSec * 14);
-  rig.leftLeg.rotation.x += (legSwing - rig.leftLeg.rotation.x) * blend;
-  rig.rightLeg.rotation.x += (-legSwing - rig.rightLeg.rotation.x) * blend;
-  rig.leftArm.rotation.x += (armSwing - rig.leftArm.rotation.x) * blend;
-  rig.rightArm.rotation.x += (-armSwing - rig.rightArm.rotation.x) * blend;
+
+  let legTarget = 0;
+  let armTarget = 0;
+  let legSplit = -1; // -1: opposite-phase swing, +1: same pose both legs
+  if (!grounded) {
+    // airborne: legs scissor slightly, arms trail up
+    legTarget = 0.35;
+    armTarget = -0.55;
+    legSplit = 1;
+    rig.body.position.y = 0;
+  } else {
+    const cycle = Math.cos(rig.phase);
+    legTarget = cycle * 1.3 * amount;
+    armTarget = -cycle * 0.9 * amount;
+    rig.body.position.y = Math.abs(cycle) * 0.045 * amount;
+  }
+
+  // idle sway: arms splay out and breathe a little (always on, scaled down
+  // while moving so it doesn't fight the walk swing)
+  const idle = 1 - amount * 0.7;
+  const swayZ = (Math.cos(rig.idleT * 1.7) * 0.025 + 0.05) * idle;
+  const swayX = Math.sin(rig.idleT * 1.3) * 0.04 * idle;
+
+  const blend = 1 - Math.exp(-dtSec * 16);
+  const ease = (node: TransformNode, x: number, z: number) => {
+    node.rotation.x += (x - node.rotation.x) * blend;
+    node.rotation.z += (z - node.rotation.z) * blend;
+  };
+  ease(rig.leftLeg, legTarget, 0);
+  ease(rig.rightLeg, legTarget * legSplit * -1, 0);
+  ease(rig.leftArm, armTarget + swayX, -swayZ);
+  ease(rig.rightArm, -armTarget + swayX, swayZ);
 }
 
 function hueForId(id: string): number {
@@ -423,11 +465,36 @@ function colorMaterial(name: string, hex: string) {
   return material;
 }
 
+const BLOCK_COLORS: readonly string[] = [
+  "#ffffff",
+  "#62b53c", // grass
+  "#7a5230", // dirt
+  "#8d8d8d", // stone
+  "#e7d9a8", // sand
+  "#f4f8fa", // snow
+  "#6b4a2b", // log
+  "#3e7d2e", // leaves
+  "#4c4c4c", // coal ore
+  "#c9a385", // iron ore
+  "#e6c84d", // gold ore
+  "#7fe3df", // diamond ore
+  "#4d7fd9", // water
+];
+
 function buildToolMesh(name: string, item: number): Mesh | null {
   if (item === HAND) {
     return null;
   }
   const root = new Mesh(`${name}-item`, scene);
+  if (isBlockItem(item)) {
+    const block = itemToBlock(item);
+    const color = BLOCK_COLORS[block] ?? "#bbbbbb";
+    const mesh = CreateBox(`${name}-block`, { size: 0.34 }, scene);
+    mesh.material = colorMaterial(`block-item-${block}`, color);
+    mesh.parent = root;
+    noa.rendering.addMeshToScene(mesh);
+    return root;
+  }
   const wood = colorMaterial("tool-wood", "#8a5a2b");
   const metal = colorMaterial("tool-metal", "#aab4be");
   const part = (
@@ -491,6 +558,12 @@ function attachToolToRig(rig: Rig, name: string, item: number): void {
 let equippedItem: number = HAND;
 let firstPerson = false;
 let swingT = 0;
+// server-authoritative inventory, mirrored from inventory stream messages
+const inventory = new Map<number, number>();
+
+function invCount(item: number): number {
+  return inventory.get(item) ?? 0;
+}
 
 // first-person view model: arm + tool fixed to the camera
 let viewModel: Mesh | null = null;
@@ -528,6 +601,10 @@ function setEquipped(item: number): void {
   if (item === equippedItem) {
     return;
   }
+  if (item !== HAND && invCount(item) <= 0) {
+    showNotice(`No ${itemName(item)} in your inventory`);
+    return;
+  }
   equippedItem = item;
   attachToolToRig(selfRig, "self", item);
   refreshViewModel();
@@ -556,6 +633,10 @@ noa.inputs.down.on("mid-fire", () => {
     showNotice("Nothing throwable equipped — try the rock (5)");
     return;
   }
+  if (invCount(equippedItem) <= 0) {
+    showNotice(`Out of ${itemName(equippedItem)}s`);
+    return;
+  }
   swingT = 1;
   const dir = noa.rendering.camera.getForwardRay().direction;
   void client.streams.send({ type: "throw", dx: dir.x, dy: dir.y, dz: dir.z }).catch(() => {});
@@ -572,27 +653,33 @@ type ProjectileView = {
 };
 
 const projectileViews = new Map<number, ProjectileView>();
+const dropViews = new Map<number, ProjectileView>();
 
-function applyProjectiles(snapshots: ProjectileSnapshot[]): void {
+function applyEntityViews(
+  views: Map<number, ProjectileView>,
+  snapshots: ProjectileSnapshot[],
+  prefix: string,
+  scale: number,
+): void {
   const seen = new Set<number>();
   for (const snap of snapshots) {
     seen.add(snap.id);
-    const existing = projectileViews.get(snap.id);
+    const existing = views.get(snap.id);
     if (existing) {
       existing.target = snap;
       continue;
     }
-    const mesh = buildToolMesh(`proj-${snap.id}`, snap.item);
+    const mesh = buildToolMesh(`${prefix}-${snap.id}`, snap.item);
     if (!mesh) {
       continue;
     }
-    mesh.scaling.setAll(0.8);
+    mesh.scaling.setAll(scale);
     const entityId = ents.add([snap.x, snap.y, snap.z], 0.2, 0.2, mesh, [0, 0, 0], false, false);
-    projectileViews.set(snap.id, { entityId, mesh, target: snap });
+    views.set(snap.id, { entityId, mesh, target: snap });
   }
-  for (const [id, view] of projectileViews) {
+  for (const [id, view] of views) {
     if (!seen.has(id)) {
-      projectileViews.delete(id);
+      views.delete(id);
       ents.deleteEntity(view.entityId, true);
     }
   }
@@ -681,6 +768,16 @@ function simTick(): void {
 // stalls a frame, the sim runs catch-up steps instead of losing time.
 // The burst is capped to match the server's per-tick input budget.
 const MAX_CATCHUP_TICKS = 6;
+
+// backup pump: occluded/backgrounded pages throttle rAF, which would starve
+// the sim and stale-drop us server-side; a timer keeps inputs flowing
+setInterval(() => {
+  const sinceFrame = performance.now() - lastFrameAt;
+  if (sinceFrame > 150) {
+    lastFrameAt = performance.now();
+    pumpSim(Math.min(sinceFrame, 1000));
+  }
+}, 120);
 
 function pumpSim(frameMs: number): void {
   // don't simulate (or burn input seqs) until the server can hear us;
@@ -821,18 +918,26 @@ noa.on("beforeRender", () => {
   selfRig.root.rotation.y = noa.camera.heading;
   animateRig(selfRig, Math.hypot(predicted.vx, predicted.vz), onGround(predicted), dtSec);
 
-  // tool swing arc, applied on top of the walk animation
+  // use animation: fast wind-up chop that eases back (sqrt attack curve),
+  // layered on top of the walk swing
   if (swingT > 0) {
-    swingT = Math.max(0, swingT - dtSec * 4.5);
-    const arc = Math.sin(swingT * Math.PI);
-    selfRig.rightArm.rotation.x -= arc * 1.6;
+    swingT = Math.max(0, swingT - dtSec * 5);
+    const p = 1 - swingT;
+    const chop = Math.sin(Math.sqrt(p) * Math.PI);
+    const reach = Math.sin(p * Math.PI);
+    selfRig.rightArm.rotation.x -= chop * 1.9;
+    selfRig.rightArm.rotation.z += reach * 0.25;
     if (viewModel) {
-      viewModel.rotation.x = -arc * 0.9;
-      viewModel.position.y = VIEW_MODEL_POS[1] - arc * 0.08;
+      viewModel.rotation.x = -chop * 0.85;
+      viewModel.rotation.z = -reach * 0.2;
+      viewModel.position.y = VIEW_MODEL_POS[1] - chop * 0.1;
+      viewModel.position.z = VIEW_MODEL_POS[2] + reach * 0.3;
     }
   } else if (viewModel) {
     viewModel.rotation.x = 0;
+    viewModel.rotation.z = 0;
     viewModel.position.y = VIEW_MODEL_POS[1];
+    viewModel.position.z = VIEW_MODEL_POS[2];
   }
 
   // projectiles: ease toward broadcast positions, tumbling as they fly
@@ -846,6 +951,20 @@ noa.on("beforeRender", () => {
       current[2] + (view.target.z - current[2]) * pt,
     );
     view.mesh.rotation.x += dtSec * 9;
+  }
+
+  // world drops: float in place, bobbing and slowly spinning
+  const dropTime = now / 1000;
+  for (const [id, view] of dropViews) {
+    const bob = Math.sin(dropTime * 2.4 + id * 1.7) * 0.08;
+    const current = ents.getPosition(view.entityId);
+    ents.setPosition(
+      view.entityId,
+      current[0] + (view.target.x - current[0]) * pt,
+      current[1] + (view.target.y + 0.25 + bob - current[1]) * pt,
+      current[2] + (view.target.z - current[2]) * pt,
+    );
+    view.mesh.rotation.y += dtSec * 1.6;
   }
 
   // remote players: ease toward their latest authoritative state
@@ -906,6 +1025,12 @@ function updateHud(): void {
   const hotbar = ITEMS.map((name, i) =>
     i === equippedItem ? `[${i + 1} ${name}]` : ` ${i + 1} ${name} `,
   ).join(" ");
+  const bag = [...inventory.entries()]
+    .filter(([, count]) => count > 0)
+    .sort((a, b) => a[0] - b[0])
+    .map(([item, count]) => `${itemName(item)}×${count}`)
+    .slice(0, 10)
+    .join("  ");
   hud.textContent =
     `Noa Voxels — ${connectionState}` +
     (myName ? ` as ${myName}` : "") +
@@ -913,6 +1038,7 @@ function updateHud(): void {
     (others.length > 0 ? ` (also: ${others.join(", ")})` : "") +
     `\nPrediction rollbacks: ${rollbacks}` +
     `\n${hotbar}` +
+    `\nBag: ${bag || "empty"}` +
     `\nWASD move, shift sprint, space jump, V ${firstPerson ? "third" : "first"}-person` +
     "\nLeft-click dig, right-click/E place, Q throw, scroll zoom" +
     (notice ? `\n>> ${notice}` : "");
@@ -930,32 +1056,36 @@ function sendEdit(block: number, x: number, y: number, z: number): void {
   void client.streams.send({ type: "edit", block, x, y, z }).catch(() => {});
 }
 
-function needsPickaxe(block: number): boolean {
-  return block === STONE_ID || block >= COAL_ORE_ID;
-}
-
 noa.inputs.down.on("fire", () => {
   swingT = 1;
   if (!noa.targetedBlock) {
     return;
   }
   const block = noa.targetedBlock.blockID;
-  if (needsPickaxe(block) && equippedItem !== PICKAXE) {
-    showNotice("Too hard to dig by hand — equip the pickaxe (2)");
+  if (hitDamage(equippedItem, block) <= 0) {
+    showNotice(
+      requiresPickaxe(block) ? "Too hard to dig by hand — equip the pickaxe (2)" : "Can't dig that",
+    );
     return;
   }
   const [x, y, z] = noa.targetedBlock.position;
-  // place what you dig: remember the last broken block type
+  // remember the last block type you worked on for placement
   placeBlock = block;
-  sendEdit(0, x, y, z);
+  void client.streams.send({ type: "hit", x, y, z }).catch(() => {});
 });
 
 noa.inputs.down.on("alt-fire", () => {
   swingT = 1;
-  if (noa.targetedBlock) {
-    const [x, y, z] = noa.targetedBlock.adjacent;
-    sendEdit(placeBlock, x, y, z);
+  if (!noa.targetedBlock) {
+    return;
   }
+  const item = blockToItem(placeBlock);
+  if (invCount(item) <= 0) {
+    showNotice(`No ${itemName(item)} blocks to place — dig some first`);
+    return;
+  }
+  const [x, y, z] = noa.targetedBlock.adjacent;
+  void client.streams.send({ type: "place", item, x, y, z }).catch(() => {});
 });
 
 /*
@@ -978,6 +1108,16 @@ async function readStreams(): Promise<void> {
     }
     if (message.type === "edit") {
       applyEdit(message);
+    } else if (message.type === "damage") {
+      showNotice(
+        `${itemName(blockToItem(noa.getBlock(message.x, message.y, message.z)))}: ${message.maxHp - message.hp}/${message.maxHp}`,
+      );
+    } else if (message.type === "inventory") {
+      inventory.clear();
+      for (const [key, count] of Object.entries(message.items)) {
+        inventory.set(Number(key), count);
+      }
+      updateHud();
     } else if (message.type === "welcome") {
       for (const entry of message.players) {
         playerNames.set(entry.id, entry.name);
@@ -998,7 +1138,12 @@ async function readDatagrams(): Promise<void> {
     const event = await client.datagrams.recv();
     const projectiles = decodeProjectiles(event.bytes);
     if (projectiles) {
-      applyProjectiles(projectiles);
+      applyEntityViews(projectileViews, projectiles, "proj", 0.8);
+      continue;
+    }
+    const drops = decodeDrops(event.bytes);
+    if (drops) {
+      applyEntityViews(dropViews, drops, "drop", 0.7);
       continue;
     }
     const players = decodeSnapshots(event.bytes);
@@ -1065,6 +1210,9 @@ declare global {
       remotes(): { id: string; name: string; item: number; x: number; y: number; z: number }[];
       equipped(): number;
       projectileCount(): number;
+      dropCount(): number;
+      inventory(): Record<string, number>;
+      sendHit(x: number, y: number, z: number): void;
       playerPosition(): number[];
       connectionState(): string;
       rollbacks(): number;
@@ -1089,6 +1237,11 @@ window.__voxels = {
     }),
   equipped: () => equippedItem,
   projectileCount: () => projectileViews.size,
+  dropCount: () => dropViews.size,
+  inventory: () => Object.fromEntries(inventory),
+  sendHit: (x, y, z) => {
+    void client.streams.send({ type: "hit", x, y, z }).catch(() => {});
+  },
   playerPosition: () => [predicted.x, predicted.y, predicted.z],
   connectionState: () => connectionState,
   rollbacks: () => rollbacks,

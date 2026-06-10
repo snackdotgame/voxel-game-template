@@ -2,16 +2,32 @@ import { server, type Connection, type DatagramEvent, type StreamEvent } from "m
 import {
   type ProjectileSnapshot,
   decodeInput,
+  encodeDrops,
   encodeProjectiles,
   encodeSnapshots,
 } from "./shared/netCodec.js";
-import { KNOCKBACK, THROW_SPEED, isThrowable, isValidItem } from "./shared/items.js";
+import {
+  blockHP,
+  blockToItem,
+  bonusDrop,
+  dropsOnImpact,
+  hitDamage,
+  isBlockItem,
+  isThrowable,
+  isValidItem,
+  itemToBlock,
+  knockback,
+  starterKit,
+  throwSpeed,
+} from "./shared/items.js";
 import {
   type BlockEdit,
   type PlayerSnapshot,
   type RosterEntry,
   parseEditMessage,
   parseEquipMessage,
+  parseHitMessage,
+  parsePlaceMessage,
   parseThrowMessage,
 } from "./shared/messages.js";
 import {
@@ -23,7 +39,15 @@ import {
   spawnState,
 } from "./shared/sim.js";
 import { encodeChunkState, maxRecordsForPayload } from "./shared/chunkCodec.js";
-import { chunkCoord, chunkKey, editKey, makeIsSolid } from "./shared/terrain.js";
+import {
+  WATER_ID,
+  baseVoxelID,
+  chunkCoord,
+  chunkKey,
+  editKey,
+  makeIsFluid,
+  makeIsSolid,
+} from "./shared/terrain.js";
 
 const MAX_EDITS = 200_000;
 // Allow short input bursts (catch-up after client jank) but bound per-player CPU.
@@ -43,6 +67,13 @@ const UNSYNC_RADIUS = 6;
 const PROJECTILE_GRAVITY = -16;
 const PROJECTILE_TTL_MS = 5_000;
 const MAX_PROJECTILES = 256;
+
+const MAX_DROPS = 512;
+const DROP_TTL_MS = 120_000;
+const DROP_PICKUP_DELAY_MS = 700;
+const DROP_PICKUP_RADIUS = 1.6;
+// partial dig damage heals back if the block is left alone this long
+const BLOCK_DAMAGE_RESET_MS = 10_000;
 
 type Player = {
   name: string;
@@ -71,9 +102,28 @@ type Projectile = {
   ttlMs: number;
 };
 
+type Drop = {
+  id: number;
+  item: number;
+  x: number;
+  y: number;
+  z: number;
+  ttlMs: number;
+  noPickupMs: number;
+};
+
 type World = {
   players: Map<string, Player>;
   lastSeen: Map<string, number>;
+  // inventories survive stale-drop/rejoin; deleted on real disconnect
+  inventories: Map<string, Map<number, number>>;
+  drops: Map<number, Drop>;
+  nextDropId: number;
+  dropsDirty: boolean;
+  hadDrops: boolean;
+  dropTick: number;
+  blockDamage: Map<string, { block: number; hp: number; at: number }>;
+  lookupEdit: (x: number, y: number, z: number) => BlockEdit | undefined;
   // edit log bucketed by chunk column, each bucket keyed by block coordinate
   edits: Map<string, Map<string, BlockEdit>>;
   editCount: number;
@@ -86,15 +136,24 @@ type World = {
 
 export async function main() {
   const edits = new Map<string, Map<string, BlockEdit>>();
-  const isSolid = makeIsSolid((x, y, z) =>
-    edits.get(chunkKey(chunkCoord(x), chunkCoord(z)))?.get(editKey(x, y, z)),
-  );
+  const lookupEdit = (x: number, y: number, z: number) =>
+    edits.get(chunkKey(chunkCoord(x), chunkCoord(z)))?.get(editKey(x, y, z));
+  const isSolid = makeIsSolid(lookupEdit);
+  const isFluid = makeIsFluid(lookupEdit);
   const world: World = {
     players: new Map(),
     lastSeen: new Map(),
+    inventories: new Map(),
+    drops: new Map(),
+    nextDropId: 1,
+    dropsDirty: false,
+    hadDrops: false,
+    dropTick: 0,
+    blockDamage: new Map(),
+    lookupEdit,
     edits,
     editCount: 0,
-    step: makeStepper(isSolid),
+    step: makeStepper(isSolid, isFluid),
     isSolid,
     projectiles: new Map(),
     nextProjectileId: 1,
@@ -112,6 +171,7 @@ export async function main() {
     syncConnections(world);
     dropStalePlayers(world);
     stepProjectiles(world);
+    tickDrops(world);
 
     if (world.players.size > 0) {
       const players: PlayerSnapshot[] = [];
@@ -143,6 +203,25 @@ export async function main() {
         server.datagrams.broadcast(packet);
       }
       world.hadProjectiles = world.projectiles.size > 0;
+    }
+
+    // drops change rarely: broadcast on change, on a slow heartbeat, and
+    // one trailing empty packet after the last drop disappears
+    world.dropTick += 1;
+    if (
+      world.dropsDirty ||
+      (world.drops.size > 0 && world.dropTick % 10 === 0) ||
+      (world.hadDrops && world.drops.size === 0)
+    ) {
+      const snapshots: ProjectileSnapshot[] = [];
+      for (const drop of world.drops.values()) {
+        snapshots.push({ id: drop.id, item: drop.item, x: drop.x, y: drop.y, z: drop.z });
+      }
+      for (const packet of encodeDrops(snapshots, server.datagrams.maxSize)) {
+        server.datagrams.broadcast(packet);
+      }
+      world.dropsDirty = false;
+      world.hadDrops = world.drops.size > 0;
     }
 
     await Promise.race([server.sleep(SIM_TICK_MS), pumps]);
@@ -195,33 +274,44 @@ function sendChunkState(id: string, cx: number, cz: number, edits: BlockEdit[]) 
   }
 }
 
+// dev/test backdoor: raw edits, applied verbatim
 function handleEdit(world: World, event: StreamEvent, value: unknown) {
   const message = parseEditMessage(value);
-  if (!message || world.editCount >= MAX_EDITS) {
+  if (!message) {
     return;
   }
+  emitEdit(
+    world,
+    { block: message.block, x: message.x, y: message.y, z: message.z },
+    event.connection.id,
+  );
+}
 
-  const cKey = chunkKey(chunkCoord(message.x), chunkCoord(message.z));
+function emitEdit(world: World, edit: BlockEdit, exceptId: string | null) {
+  if (world.editCount >= MAX_EDITS) {
+    return;
+  }
+  const cKey = chunkKey(chunkCoord(edit.x), chunkCoord(edit.z));
   let bucket = world.edits.get(cKey);
   if (!bucket) {
     bucket = new Map();
     world.edits.set(cKey, bucket);
   }
-  const bKey = editKey(message.x, message.y, message.z);
+  const bKey = editKey(edit.x, edit.y, edit.z);
   if (!bucket.has(bKey)) {
     world.editCount += 1;
   }
-  bucket.set(bKey, { block: message.block, x: message.x, y: message.y, z: message.z });
+  bucket.set(bKey, edit);
 
   // live edits go only to players who currently have this chunk synced
   const recipients: string[] = [];
   for (const [id, player] of world.players) {
-    if (id !== event.connection.id && player.syncedChunks.has(cKey)) {
+    if (id !== exceptId && player.syncedChunks.has(cKey)) {
       recipients.push(id);
     }
   }
   if (recipients.length > 0) {
-    server.streams.broadcast(message, { only: recipients });
+    server.streams.broadcast({ type: "edit", ...edit }, { only: recipients });
   }
 }
 
@@ -264,7 +354,158 @@ function handleStream(world: World, event: StreamEvent) {
     handleThrow(world, event.connection.id, throwMsg.dx, throwMsg.dy, throwMsg.dz);
     return;
   }
+  const hit = parseHitMessage(value);
+  if (hit) {
+    handleHit(world, event.connection.id, hit.x, hit.y, hit.z);
+    return;
+  }
+  const place = parsePlaceMessage(value);
+  if (place) {
+    handlePlace(world, event.connection.id, place.item, place.x, place.y, place.z);
+    return;
+  }
   handleEdit(world, event, value);
+}
+
+/*
+ *      Inventory
+ */
+
+function inventoryOf(world: World, id: string): Map<number, number> {
+  let inv = world.inventories.get(id);
+  if (!inv) {
+    inv = starterKit();
+    world.inventories.set(id, inv);
+  }
+  return inv;
+}
+
+function sendInventory(world: World, id: string) {
+  const items: Record<string, number> = {};
+  for (const [item, count] of inventoryOf(world, id)) {
+    if (count > 0) {
+      items[String(item)] = count;
+    }
+  }
+  server.streams.send(id, { type: "inventory", items });
+}
+
+function addItem(world: World, id: string, item: number, count: number) {
+  const inv = inventoryOf(world, id);
+  inv.set(item, (inv.get(item) ?? 0) + count);
+  sendInventory(world, id);
+}
+
+function tryConsume(world: World, id: string, item: number, count: number): boolean {
+  const inv = inventoryOf(world, id);
+  const have = inv.get(item) ?? 0;
+  if (have < count) {
+    return false;
+  }
+  inv.set(item, have - count);
+  sendInventory(world, id);
+  return true;
+}
+
+/*
+ *      Block digging: blocks have HP and drop themselves when broken
+ */
+
+function blockAt(world: World, x: number, y: number, z: number): number {
+  const edit = world.lookupEdit(x, y, z);
+  return edit ? edit.block : baseVoxelID(x, y, z);
+}
+
+function handleHit(world: World, id: string, x: number, y: number, z: number) {
+  const player = world.players.get(id);
+  if (!player) {
+    return;
+  }
+  const block = blockAt(world, x, y, z);
+  const damage = hitDamage(player.item, block);
+  if (damage <= 0) {
+    return;
+  }
+  const key = editKey(x, y, z);
+  const now = server.elapsedMs();
+  let entry = world.blockDamage.get(key);
+  if (!entry || entry.block !== block || now - entry.at > BLOCK_DAMAGE_RESET_MS) {
+    entry = { block, hp: blockHP(block), at: now };
+  }
+  entry.hp -= damage;
+  entry.at = now;
+  if (entry.hp > 0) {
+    world.blockDamage.set(key, entry);
+    server.streams.send(id, { type: "damage", x, y, z, hp: entry.hp, maxHp: blockHP(block) });
+    return;
+  }
+
+  world.blockDamage.delete(key);
+  emitEdit(world, { block: 0, x, y, z }, null);
+  spawnDrop(world, blockToItem(block), x + 0.5, y + 0.4, z + 0.5);
+  const bonus = bonusDrop(block);
+  if (bonus !== null) {
+    spawnDrop(world, bonus, x + 0.5, y + 0.7, z + 0.5);
+  }
+}
+
+function handlePlace(world: World, id: string, item: number, x: number, y: number, z: number) {
+  const player = world.players.get(id);
+  if (!player || !isValidItem(item) || !isBlockItem(item)) {
+    return;
+  }
+  const target = blockAt(world, x, y, z);
+  if (target !== 0 && target !== WATER_ID) {
+    return;
+  }
+  if (!tryConsume(world, id, item, 1)) {
+    return;
+  }
+  emitEdit(world, { block: itemToBlock(item), x, y, z }, null);
+}
+
+/*
+ *      World drops: broken blocks and landed projectiles float in place
+ *      until someone walks over them
+ */
+
+function spawnDrop(world: World, item: number, x: number, y: number, z: number) {
+  if (world.drops.size >= MAX_DROPS) {
+    return;
+  }
+  const id = world.nextDropId;
+  world.nextDropId = (world.nextDropId + 1) % 65536 || 1;
+  world.drops.set(id, { id, item, x, y, z, ttlMs: DROP_TTL_MS, noPickupMs: DROP_PICKUP_DELAY_MS });
+  world.dropsDirty = true;
+}
+
+function tickDrops(world: World) {
+  for (const drop of world.drops.values()) {
+    drop.ttlMs -= SIM_TICK_MS;
+    if (drop.ttlMs <= 0) {
+      world.drops.delete(drop.id);
+      world.dropsDirty = true;
+      continue;
+    }
+    if (drop.noPickupMs > 0) {
+      drop.noPickupMs -= SIM_TICK_MS;
+      continue;
+    }
+    for (const [id, player] of world.players) {
+      const c = player.char;
+      if (
+        Math.abs(drop.x - c.x) <= DROP_PICKUP_RADIUS &&
+        drop.y >= c.y - 1 &&
+        drop.y <= c.y + 2.2 &&
+        Math.abs(drop.z - c.z) <= DROP_PICKUP_RADIUS
+      ) {
+        addItem(world, id, drop.item, 1);
+        world.drops.delete(drop.id);
+        world.dropsDirty = true;
+        break;
+      }
+    }
+  }
 }
 
 /*
@@ -280,10 +521,13 @@ function handleThrow(world: World, ownerId: string, dx: number, dy: number, dz: 
   if (len < 1e-6) {
     return;
   }
+  if (!tryConsume(world, ownerId, player.item, 1)) {
+    return;
+  }
   const nx = dx / len;
   const ny = dy / len;
   const nz = dz / len;
-  const speed = THROW_SPEED[player.item];
+  const speed = throwSpeed(player.item);
   const id = world.nextProjectileId;
   world.nextProjectileId = (world.nextProjectileId + 1) % 65536 || 1;
   world.projectiles.set(id, {
@@ -315,10 +559,17 @@ function stepProjectiles(world: World) {
     const steps = 3;
     let alive = true;
     for (let s = 0; s < steps && alive; s++) {
+      const prevX = proj.x;
+      const prevY = proj.y;
+      const prevZ = proj.z;
       proj.x += (proj.vx * dt) / steps;
       proj.y += (proj.vy * dt) / steps;
       proj.z += (proj.vz * dt) / steps;
       if (world.isSolid(Math.floor(proj.x), Math.floor(proj.y), Math.floor(proj.z))) {
+        // landed: persist as a world drop just shy of the surface it hit
+        if (dropsOnImpact(proj.item)) {
+          spawnDrop(world, proj.item, prevX, prevY, prevZ);
+        }
         alive = false;
         break;
       }
@@ -335,13 +586,16 @@ function stepProjectiles(world: World) {
         ) {
           // knockback: server-side velocity change that reaches the hit
           // player's own client as a prediction rollback
-          const kb = KNOCKBACK[proj.item];
+          const kb = knockback(proj.item);
           const hlen = Math.hypot(proj.vx, proj.vz) || 1;
           c.vx += (proj.vx / hlen) * kb;
           c.vz += (proj.vz / hlen) * kb;
           c.vy += kb * 0.5;
           c.ry = 0;
           c.sleep = 10;
+          if (dropsOnImpact(proj.item)) {
+            spawnDrop(world, proj.item, proj.x, proj.y, proj.z);
+          }
           alive = false;
           break;
         }
@@ -420,6 +674,7 @@ function addPlayer(world: World, connection: Connection) {
 function removePlayer(world: World, id: string) {
   world.players.delete(id);
   world.lastSeen.delete(id);
+  world.inventories.delete(id);
   server.streams.broadcast({ type: "leave", id });
 }
 
@@ -438,6 +693,7 @@ function syncConnections(world: World) {
     }
     addPlayer(world, connection);
     connection.streams.send({ type: "welcome", you: connection.id, players: roster });
+    sendInventory(world, connection.id);
   }
 
   for (const id of world.lastSeen.keys()) {

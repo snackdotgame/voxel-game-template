@@ -101,6 +101,15 @@ try {
     20000,
   );
 
+  // water: the spawn pond is part of deterministic worldgen
+  await waitFor(
+    p1.frame,
+    () => window.__voxels.blockAt(18, 0, 14) === 12,
+    null,
+    "spawn pond water generated at (18,0,14)",
+    10000,
+  );
+
   // keyboard movement: click canvas, hold W
   await p1.page.mouse.click(550, 375);
   const before = await p1.frame.evaluate(() => window.__voxels.playerPosition());
@@ -257,25 +266,78 @@ try {
     5000,
   );
 
-  // now hit player2 with one; the knockback lands as a server-side velocity
-  // change that reaches p2's own client through prediction rollback
-  const p2Before = await p2.frame.evaluate(() => window.__voxels.playerPosition());
+  // now hit the players idling at spawn; the knockback lands as a
+  // server-side velocity change that reaches the hit player's own client
+  // through prediction rollback. p2 and p3 overlap at spawn, so accept
+  // either being displaced.
+  const spawnBefore = await p1.frame.evaluate(() =>
+    window.__voxels.remotes().map((r) => ({ id: r.id, x: r.x, z: r.z })),
+  );
   await p1.frame.evaluate((target) => {
     const v = window.__voxels;
     const pos = v.playerPosition();
-    v.noa.camera.heading = Math.atan2(target[0] - pos[0], target[2] - pos[2]);
+    v.noa.camera.heading = Math.atan2(target.x - pos[0], target.z - pos[2]);
     v.noa.camera.pitch = 0;
-  }, p2Before);
+  }, spawnBefore[0]);
   await p1.page.waitForTimeout(150);
   await p1.page.keyboard.press("q");
   await waitFor(
-    p2.frame,
+    p1.frame,
+    (before) =>
+      window.__voxels.remotes().some((r) => {
+        const was = before.find((b) => b.id === r.id);
+        return was && Math.hypot(r.x - was.x, r.z - was.z) > 0.4;
+      }),
+    spawnBefore,
+    "a player at spawn was knocked back by the rock",
+    8000,
+  );
+
+  // block health: blocks take multiple hits, then drop a floating pickup
+  // that lands in the digger's inventory when they stand nearby
+  await p1.page.keyboard.press("2"); // pickaxe digs everything
+  await waitFor(
+    p1.frame,
+    () => window.__voxels.equipped() === 1,
+    null,
+    "player1 re-equipped pickaxe",
+  );
+  const digSpot = await p1.frame.evaluate(() => {
+    const v = window.__voxels;
+    const pos = v.playerPosition();
+    const x = Math.floor(pos[0]) + 1;
+    const z = Math.floor(pos[2]);
+    for (let y = Math.ceil(pos[1]) + 1; y >= Math.floor(pos[1]) - 6; y--) {
+      const b = v.blockAt(x, y, z);
+      if (b !== 0 && b !== 12) return { x, y, z, block: b };
+    }
+    return null;
+  });
+  if (!digSpot) throw new Error("no diggable block next to player1");
+  const invBefore = await p1.frame.evaluate(() => {
+    const inv = window.__voxels.inventory();
+    return Object.values(inv).reduce((a, b) => a + b, 0);
+  });
+  let hits = 0;
+  let broke = false;
+  for (; hits < 8 && !broke; ) {
+    await p1.frame.evaluate((s) => window.__voxels.sendHit(s.x, s.y, s.z), digSpot);
+    hits++;
+    await p1.page.waitForTimeout(250);
+    broke = await p1.frame.evaluate((s) => window.__voxels.blockAt(s.x, s.y, s.z) === 0, digSpot);
+  }
+  if (!broke) throw new Error(`block ${digSpot.block} did not break in ${hits} hits`);
+  if (hits < 2)
+    throw new Error(`block ${digSpot.block} broke in a single hit — expected multi-hit HP`);
+  log(`OK: block (type ${digSpot.block}) broke after ${hits} hits and dropped`);
+  await waitFor(
+    p1.frame,
     (before) => {
-      const pos = window.__voxels.playerPosition();
-      return Math.hypot(pos[0] - before[0], pos[2] - before[2]) > 0.4;
+      const inv = window.__voxels.inventory();
+      return Object.values(inv).reduce((a, b) => a + b, 0) > before;
     },
-    p2Before,
-    "player2 knocked back by the rock",
+    invBefore,
+    "player1 picked the drop up into their inventory",
     8000,
   );
 

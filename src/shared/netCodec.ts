@@ -45,6 +45,7 @@ const MAGIC_V = 0x56;
 const MAGIC_I = 0x49;
 const MAGIC_S = 0x53;
 const MAGIC_P = 0x50;
+const MAGIC_D = 0x44;
 export const NET_CODEC_VERSION = 2;
 
 const INPUT_BYTES = 12;
@@ -188,6 +189,27 @@ export function encodeProjectiles(
   projectiles: readonly ProjectileSnapshot[],
   maxBytes: number,
 ): Uint8Array[] {
+  return encodeEntityPackets(MAGIC_P, projectiles, maxBytes);
+}
+
+export function decodeProjectiles(bytes: Uint8Array): ProjectileSnapshot[] | undefined {
+  return decodeEntityPackets(MAGIC_P, bytes);
+}
+
+// World item drops use the identical record shape under a different magic.
+export function encodeDrops(drops: readonly ProjectileSnapshot[], maxBytes: number): Uint8Array[] {
+  return encodeEntityPackets(MAGIC_D, drops, maxBytes);
+}
+
+export function decodeDrops(bytes: Uint8Array): ProjectileSnapshot[] | undefined {
+  return decodeEntityPackets(MAGIC_D, bytes);
+}
+
+function encodeEntityPackets(
+  magic: number,
+  projectiles: readonly ProjectileSnapshot[],
+  maxBytes: number,
+): Uint8Array[] {
   const perPacket = Math.max(1, Math.min(255, Math.floor((maxBytes - 4) / PROJ_RECORD_BYTES)));
   const packets: Uint8Array[] = [];
   for (let start = 0; start === 0 || start < projectiles.length; start += perPacket) {
@@ -195,7 +217,7 @@ export function encodeProjectiles(
     const bytes = new Uint8Array(4 + group.length * PROJ_RECORD_BYTES);
     const view = new DataView(bytes.buffer);
     bytes[0] = MAGIC_V;
-    bytes[1] = MAGIC_P;
+    bytes[1] = magic;
     bytes[2] = NET_CODEC_VERSION;
     bytes[3] = group.length;
     let offset = 4;
@@ -212,8 +234,8 @@ export function encodeProjectiles(
   return packets;
 }
 
-export function decodeProjectiles(bytes: Uint8Array): ProjectileSnapshot[] | undefined {
-  if (bytes.length < 4 || bytes[0] !== MAGIC_V || bytes[1] !== MAGIC_P) {
+function decodeEntityPackets(magic: number, bytes: Uint8Array): ProjectileSnapshot[] | undefined {
+  if (bytes.length < 4 || bytes[0] !== MAGIC_V || bytes[1] !== magic) {
     return undefined;
   }
   if (bytes[2] !== NET_CODEC_VERSION) {

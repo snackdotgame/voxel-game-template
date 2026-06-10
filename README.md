@@ -52,17 +52,32 @@ world they aren't near, so join cost and memory scale with local activity, not w
 ### World
 
 Deterministic value-noise terrain with biomes (plains, forest, desert, snow-capped
-mountains), tree placement with cross-chunk canopies, and ore deposits (coal, iron, gold,
-diamond) clustered in pockets and gated by depth — dig down to find the good stuff. The whole
-generator lives in `src/shared/terrain.ts` and runs identically on client and server, so
-collision and prediction agree everywhere. Digging remembers the block you broke and
-right-click places it.
+mountains), tree placement with cross-chunk canopies, ore deposits (coal, iron, gold,
+diamond) clustered in pockets and gated by depth, and **water**: basins below sea level fill
+in (about a third of the world is ocean, plus a pond by spawn), with sandy shores. Water is a
+real fluid — voxel-physics-engine buoyancy and drag apply on both client and server, and
+holding jump swims you upward. The whole generator lives in `src/shared/terrain.ts` and runs
+identically on client and server, so collision and prediction agree everywhere.
+
+### Digging, drops, and inventory
+
+Blocks have HP and take multiple hits to break (leaves crumble instantly, ores take six
+half-damage hits without the right tool; matching tools — axe for wood, shovel for earth,
+pickaxe for stone — hit for double, and stone/ore can only be dug with the pickaxe; partial
+damage heals after 10s). A broken block becomes a Minecraft-style item drop: a floating,
+bobbing, slowly spinning miniature that anyone can walk over to collect after a short delay.
+Stone also yields a rock and snow a snowball, keeping throwing ammo renewable. Inventories
+are server-authoritative (starting kit: tools, 6 rocks, 6 snowballs); placing blocks and
+throwing items consume from them, and the HUD shows your bag. Landed projectiles persist as
+drops too, so a thrown pickaxe can be retrieved — or stolen.
 
 ### Characters
 
 Minecraft-proportioned box rigs (swinging arms/legs hung off shoulder/hip pivots) UV-mapped
-with a classic-format 64x32 character skin, with procedural animation: walk cycle scaled by
-speed, body bob, an airborne pose, and yaw following each player's view heading. Your own
+with a classic-format 64x32 character skin. Procedural animation follows the
+Minecraft-classic/ClassiCube formulas: cosine limb swing with legs at ~1.4x arm amplitude in
+opposite phase, scaled by speed, plus idle breathing sway, body bob, an airborne pose, a
+wind-up-and-chop use animation, and yaw following each player's view heading. Your own
 character is visible in third person; remote players get a deterministic hue shift on the
 clothing so everyone looks different.
 

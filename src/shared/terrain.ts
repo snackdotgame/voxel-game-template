@@ -12,6 +12,10 @@ export const COAL_ORE_ID = 8;
 export const IRON_ORE_ID = 9;
 export const GOLD_ORE_ID = 10;
 export const DIAMOND_ORE_ID = 11;
+export const WATER_ID = 12;
+
+// Basins below this height fill with water; shores near it turn to sand.
+export const SEA_LEVEL = 0;
 
 /*
  *      Deterministic noise
@@ -97,6 +101,13 @@ function computeColumn(x: number, z: number): Column {
   const spawnBlend = spawnDist >= SPAWN_FLAT_RADIUS ? 1 : smooth(spawnDist / SPAWN_FLAT_RADIUS);
   height = 2 + (height - 2) * spawnBlend;
 
+  // a small pond in the spawn meadow so water is in sight from the start
+  const pondDist = Math.hypot(x - 20, z - 16);
+  if (pondDist < 8) {
+    const bowl = -3 + 5 * smooth(pondDist / 8);
+    height = Math.min(height, bowl);
+  }
+
   const h = Math.round(height);
   let biome: Biome;
   if (h >= MOUNTAIN_HEIGHT) {
@@ -110,7 +121,11 @@ function computeColumn(x: number, z: number): Column {
   }
 
   let tree = 0;
-  if (spawnDist > TREE_FREE_RADIUS && (biome === "forest" || biome === "plains")) {
+  if (
+    h > SEA_LEVEL + 1 &&
+    spawnDist > TREE_FREE_RADIUS &&
+    (biome === "forest" || biome === "plains")
+  ) {
     const chance = biome === "forest" ? 0.04 : 0.005;
     const roll = hash2(x, z, 1006);
     if (roll < chance) {
@@ -215,15 +230,21 @@ export function baseVoxelID(x: number, y: number, z: number): number {
 
   if (y > col.height) {
     // canopies top out 8 blocks above the tallest nearby trunk
-    if (y > col.height + 12) {
-      return 0;
+    if (y <= col.height + 12) {
+      const tree = treeVoxel(col, x, y, z);
+      if (tree !== 0) {
+        return tree;
+      }
     }
-    return treeVoxel(col, x, y, z);
+    return y <= SEA_LEVEL ? WATER_ID : 0;
   }
 
   if (y === col.height) {
     if (col.snowy) {
       return SNOW_ID;
+    }
+    if (col.height <= SEA_LEVEL + 1) {
+      return SAND_ID; // beaches and sea floor
     }
     switch (col.biome) {
       case "desert":
@@ -273,6 +294,14 @@ export function makeIsSolid(lookup: EditLookup): (x: number, y: number, z: numbe
   return (x, y, z) => {
     const edit = lookup(x, y, z);
     const block = edit ? edit.block : baseVoxelID(x, y, z);
-    return block !== 0;
+    return block !== 0 && block !== WATER_ID;
+  };
+}
+
+export function makeIsFluid(lookup: EditLookup): (x: number, y: number, z: number) => boolean {
+  return (x, y, z) => {
+    const edit = lookup(x, y, z);
+    const block = edit ? edit.block : baseVoxelID(x, y, z);
+    return block === WATER_ID;
   };
 }

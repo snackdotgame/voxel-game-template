@@ -80,8 +80,10 @@ export function cloneState(state: CharState): CharState {
   return { ...state };
 }
 
-export function makeStepper(isSolid: IsSolid): Stepper {
-  const world = new Physics({}, isSolid, () => false);
+export function makeStepper(isSolid: IsSolid, isFluid: IsSolid = () => false): Stepper {
+  // fluidDensity tuned so a fully submerged body sinks slowly; holding
+  // jump adds swim force to rise
+  const world = new Physics({ fluidDensity: 2.8 }, isSolid, isFluid);
   const body = world.addBody(new aabb([0, 0, 0], [CHAR_WIDTH, CHAR_HEIGHT, CHAR_WIDTH]));
   // match noa's player body setup (Engine constructor)
   body.gravityMultiplier = 2;
@@ -147,6 +149,12 @@ export function makeStepper(isSolid: IsSolid): Stepper {
         heading += rl * (Math.PI / 2);
       }
       move.heading = heading;
+    }
+
+    // swimming: holding jump in water pushes upward (deterministic — the
+    // check reads the world, not transient body state)
+    if (input.jump && isFluid(Math.floor(prev.x), Math.floor(prev.y + 0.6), Math.floor(prev.z))) {
+      body.applyForce([0, 34, 0]);
     }
 
     // same per-tick order as noa: movement system, then physics
