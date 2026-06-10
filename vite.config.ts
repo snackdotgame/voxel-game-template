@@ -1,5 +1,6 @@
 import { fileURLToPath } from "node:url";
 import fs from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { defineConfig, type Plugin } from "vite";
 
@@ -12,7 +13,31 @@ const userClientEntryId = "/src/client.ts";
 const resolvedMinionClientEntryId = `\0${minionClientEntryId}`;
 const resolvedMinionClientModuleId = `\0${minionClientModuleId}`;
 const clientDevHost = process.env.MINION_CLIENT_HOST ?? "127.0.0.1";
-const clientDevPort = portFromEnv("MINION_CLIENT_PORT", 3031);
+// port resolution matches `minion dev`: env > minion.json dev.clientPort > 3031
+const clientDevPort = portFromEnv("MINION_CLIENT_PORT", manifestDevClientPort() ?? 3031);
+
+// the optional `dev` section of minion.json configures local ports:
+//   "dev": { "port": 3030, "clientPort": 3031 }
+function manifestDevClientPort(): number | undefined {
+  let manifest: unknown;
+  try {
+    manifest = JSON.parse(readFileSync(path.join(projectRoot, "minion.json"), "utf8"));
+  } catch {
+    return undefined;
+  }
+  if (typeof manifest !== "object" || manifest === null) {
+    return undefined;
+  }
+  const dev = (manifest as Record<string, unknown>).dev;
+  if (typeof dev !== "object" || dev === null) {
+    return undefined;
+  }
+  const port = (dev as Record<string, unknown>).clientPort;
+  if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535) {
+    return undefined;
+  }
+  return port;
+}
 
 function portFromEnv(name: string, fallback: number): number {
   const rawValue = process.env[name];
