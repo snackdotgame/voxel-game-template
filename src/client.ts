@@ -991,57 +991,279 @@ noa.on("beforeRender", () => {
  *      HUD
  */
 
-const hud = document.createElement("div");
-hud.style.cssText =
-  "position: fixed; top: 10px; right: 10px; z-index: 10; padding: 8px 12px;" +
-  "font: 13px/1.5 system-ui, sans-serif; color: #fff; background: rgba(0,0,0,0.55);" +
-  "border-radius: 6px; pointer-events: none; white-space: pre;";
-document.body.appendChild(hud);
+/*
+ *      HUD: status panel, crosshair, hotbar with item icons, block bar,
+ *      and toast notices
+ */
 
-const crosshair = document.createElement("div");
-crosshair.style.cssText =
-  "position: fixed; top: 50%; left: 50%; z-index: 10; width: 14px; height: 14px;" +
-  "margin: -7px 0 0 -7px; pointer-events: none;" +
-  "background: radial-gradient(circle, rgba(255,255,255,0.9) 2px, transparent 3px);";
-document.body.appendChild(crosshair);
+const UI_FONT = "12px/1.4 system-ui, sans-serif";
+
+// the block item that right-click places: follows the last block you hit,
+// auto-selects on first pickup, R cycles through owned blocks
+let placeItem = 0;
+
+function uiDiv(css: string): HTMLDivElement {
+  const el = document.createElement("div");
+  el.style.cssText = `position: fixed; z-index: 10; pointer-events: none; ${css}`;
+  document.body.appendChild(el);
+  return el;
+}
+
+const statusPanel = uiDiv(
+  `top: 10px; right: 10px; padding: 6px 10px; font: ${UI_FONT}; color: #fff;` +
+    "background: rgba(0,0,0,0.45); border-radius: 6px; white-space: pre; text-align: right;",
+);
+
+const helpPanel = uiDiv(
+  `bottom: 10px; left: 10px; padding: 6px 10px; font: ${UI_FONT}; color: rgba(255,255,255,0.75);` +
+    "background: rgba(0,0,0,0.35); border-radius: 6px; white-space: pre;",
+);
+helpPanel.textContent =
+  "WASD move · shift sprint · space jump/swim\n" +
+  "LMB dig · RMB/E place · Q throw · R cycle block\n" +
+  "V first/third person · scroll zoom";
+
+const crosshair = uiDiv(
+  "top: 50%; left: 50%; width: 14px; height: 14px; margin: -7px 0 0 -7px;" +
+    "background: radial-gradient(circle, rgba(255,255,255,0.9) 2px, transparent 3px);",
+);
+void crosshair;
+
+const toast = uiDiv(
+  "bottom: 132px; left: 50%; transform: translateX(-50%); padding: 6px 14px;" +
+    `font: ${UI_FONT}; font-size: 13px; color: #fff; background: rgba(20,20,28,0.8);` +
+    "border-radius: 6px; opacity: 0; transition: opacity 0.25s;",
+);
+
+// pixel-art icons for the tool items, drawn once onto small canvases
+const ICON_PALETTE: Record<string, string> = {
+  b: "#8a5a2b",
+  g: "#aab4be",
+  r: "#7d756b",
+  d: "#5c564e",
+  w: "#f2f7fa",
+  s: "#e0ac69",
+};
+
+const TOOL_ICONS: Record<number, string[]> = {
+  [HAND]: ["", "", "..s.s.s.", ".sssssss", "ssssssss", ".sssssss", ".ssssss.", "..sssss."],
+  [PICKAXE]: [
+    "..gggggg..",
+    ".gg....ggg",
+    "g.....b..g",
+    "......b...",
+    ".....b....",
+    "....b.....",
+    "...b......",
+    "..b.......",
+    ".b........",
+    "b.........",
+  ],
+  [AXE]: [
+    "..ggg.....",
+    ".ggggg....",
+    ".gggggb...",
+    ".ggg.b....",
+    "..g.b.....",
+    "....b.....",
+    "...b......",
+    "..b.......",
+    ".b........",
+    "b.........",
+  ],
+  [SHOVEL]: [
+    "....gg....",
+    "...gggg...",
+    "...gggg...",
+    "....gg....",
+    "....b.....",
+    "....b.....",
+    "...b......",
+    "...b......",
+    "..b.......",
+    "..b.......",
+  ],
+  [ROCK]: [
+    "",
+    "",
+    "...rrr....",
+    "..rrrrrr..",
+    ".rrrdrrrr.",
+    ".rrrrrrdr.",
+    ".rdrrrrrr.",
+    "..rrrrrr..",
+    "...rrrr...",
+  ],
+  [SNOWBALL]: [
+    "",
+    "...wwww...",
+    "..wwwwww..",
+    ".wwwwwwww.",
+    ".wwwswwww.",
+    ".wwwwwwsw.",
+    ".wswwwwww.",
+    "..wwwwww..",
+    "...wwww...",
+  ],
+};
+
+const BLOCK_TEXTURE_FILES: readonly string[] = [
+  "",
+  "grass.png",
+  "dirt.png",
+  "stone.png",
+  "sand.png",
+  "snow.png",
+  "tree.png",
+  "leaves.png",
+  "coal_ore.png",
+  "iron_ore.png",
+  "gold_ore.png",
+  "diamond_ore.png",
+  "",
+];
+
+function makeIconElement(item: number): Node {
+  if (isBlockItem(item)) {
+    const file = BLOCK_TEXTURE_FILES[itemToBlock(item)];
+    if (file) {
+      const img = document.createElement("img");
+      img.src = `${TEX}/${file}`;
+      img.style.cssText = "width: 28px; height: 28px; image-rendering: pixelated;";
+      return img;
+    }
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = 10;
+  canvas.height = 10;
+  canvas.style.cssText = "width: 30px; height: 30px; image-rendering: pixelated;";
+  const ctx = canvas.getContext("2d");
+  const rows = TOOL_ICONS[item];
+  if (ctx && rows) {
+    for (let y = 0; y < rows.length; y++) {
+      for (let x = 0; x < rows[y].length; x++) {
+        const color = ICON_PALETTE[rows[y][x]];
+        if (color) {
+          ctx.fillStyle = color;
+          ctx.fillRect(x, y, 1, 1);
+        }
+      }
+    }
+  }
+  return canvas;
+}
+
+type Slot = { root: HTMLDivElement; count: HTMLDivElement };
+
+const SLOT_CSS =
+  "position: relative; width: 44px; height: 44px; border-radius: 6px;" +
+  "background: rgba(10,10,16,0.55); border: 2px solid rgba(255,255,255,0.25);" +
+  "display: flex; align-items: center; justify-content: center; transition: border-color 0.1s;";
+
+function makeSlot(container: HTMLElement, item: number, keyLabel: string): Slot {
+  const root = document.createElement("div");
+  root.style.cssText = SLOT_CSS;
+  root.appendChild(makeIconElement(item));
+  if (keyLabel) {
+    const key = document.createElement("div");
+    key.textContent = keyLabel;
+    key.style.cssText = `position: absolute; top: 1px; left: 4px; font: ${UI_FONT}; font-size: 9px; color: rgba(255,255,255,0.7);`;
+    root.appendChild(key);
+  }
+  const count = document.createElement("div");
+  count.style.cssText = `position: absolute; bottom: 1px; right: 4px; font: ${UI_FONT}; font-size: 11px; font-weight: 700; color: #fff; text-shadow: 0 1px 2px #000;`;
+  root.appendChild(count);
+  container.appendChild(root);
+  return { root, count };
+}
+
+const hotbarEl = uiDiv(
+  "bottom: 14px; left: 50%; transform: translateX(-50%); display: flex; gap: 6px;",
+);
+const hotbarSlots: Slot[] = ITEMS.map((_, item) => makeSlot(hotbarEl, item, String(item + 1)));
+
+const blockBarEl = uiDiv(
+  "bottom: 70px; left: 50%; transform: translateX(-50%); display: flex; gap: 5px;",
+);
+const blockBarLabel = uiDiv(
+  `bottom: 76px; left: 50%; transform: translateX(-50%); font: ${UI_FONT}; font-size: 10px;` +
+    "color: rgba(255,255,255,0.75); text-shadow: 0 1px 2px #000;",
+);
+const blockSlots = new Map<number, Slot>();
 
 let connectionState = "connecting";
 let myName = "";
-let notice = "";
 let noticeTimer: ReturnType<typeof setTimeout> | undefined;
 
 function showNotice(text: string): void {
-  notice = text;
+  toast.textContent = text;
+  toast.style.opacity = "1";
   clearTimeout(noticeTimer);
   noticeTimer = setTimeout(() => {
-    notice = "";
-    updateHud();
+    toast.style.opacity = "0";
   }, 1800);
-  updateHud();
+}
+
+function updateStatus(): void {
+  const others = [...remotePlayers.keys()].map((id) => playerNames.get(id) ?? "Player");
+  statusPanel.textContent =
+    `${connectionState}${myName ? ` as ${myName}` : ""}` +
+    `\nPlayers: ${remotePlayers.size + 1}` +
+    (others.length > 0 ? ` (${others.join(", ")})` : "") +
+    `\nRollbacks: ${rollbacks}`;
+}
+
+function updateHotbar(): void {
+  for (let item = 0; item < hotbarSlots.length; item++) {
+    const slot = hotbarSlots[item];
+    const owned = item === HAND || invCount(item) > 0;
+    slot.root.style.borderColor = item === equippedItem ? "#fff" : "rgba(255,255,255,0.25)";
+    slot.root.style.opacity = owned ? "1" : "0.35";
+    slot.count.textContent = item === HAND || invCount(item) === 0 ? "" : String(invCount(item));
+  }
+}
+
+function ownedBlockItems(): number[] {
+  return [...inventory.keys()]
+    .filter((item) => isBlockItem(item) && invCount(item) > 0)
+    .sort((a, b) => a - b);
+}
+
+function updateBlockBar(): void {
+  const owned = ownedBlockItems();
+  // auto-select a sensible placement block when none is chosen (or it ran out)
+  if ((placeItem === 0 || !owned.includes(placeItem)) && owned.length > 0) {
+    placeItem = owned[0];
+  }
+  for (const [item, slot] of blockSlots) {
+    if (!owned.includes(item)) {
+      slot.root.remove();
+      blockSlots.delete(item);
+    }
+  }
+  for (const item of owned) {
+    if (!blockSlots.has(item)) {
+      blockSlots.set(item, makeSlot(blockBarEl, item, ""));
+    }
+  }
+  // keep DOM order stable by item id
+  for (const item of owned) {
+    const slot = blockSlots.get(item);
+    if (slot) {
+      blockBarEl.appendChild(slot.root);
+      slot.root.style.borderColor = item === placeItem ? "#ffd866" : "rgba(255,255,255,0.2)";
+      slot.count.textContent = String(invCount(item));
+    }
+  }
+  blockBarLabel.style.bottom = "120px";
+  blockBarLabel.textContent =
+    owned.length > 0 && placeItem !== 0 ? `R cycles · placing: ${itemName(placeItem)}` : "";
 }
 
 function updateHud(): void {
-  const others = [...remotePlayers.keys()].map((id) => playerNames.get(id) ?? "Player");
-  const hotbar = ITEMS.map((name, i) =>
-    i === equippedItem ? `[${i + 1} ${name}]` : ` ${i + 1} ${name} `,
-  ).join(" ");
-  const bag = [...inventory.entries()]
-    .filter(([, count]) => count > 0)
-    .sort((a, b) => a[0] - b[0])
-    .map(([item, count]) => `${itemName(item)}×${count}`)
-    .slice(0, 10)
-    .join("  ");
-  hud.textContent =
-    `Noa Voxels — ${connectionState}` +
-    (myName ? ` as ${myName}` : "") +
-    `\nPlayers here: ${remotePlayers.size + 1}` +
-    (others.length > 0 ? ` (also: ${others.join(", ")})` : "") +
-    `\nPrediction rollbacks: ${rollbacks}` +
-    `\n${hotbar}` +
-    `\nBag: ${bag || "empty"}` +
-    `\nWASD move, shift sprint, space jump, V ${firstPerson ? "third" : "first"}-person` +
-    "\nLeft-click dig, right-click/E place, Q throw, scroll zoom" +
-    (notice ? `\n>> ${notice}` : "");
+  updateStatus();
+  updateHotbar();
+  updateBlockBar();
 }
 updateHud();
 
@@ -1049,10 +1271,22 @@ updateHud();
  *      Block interaction
  */
 
-let placeBlock = DIRT_ID;
+noa.inputs.bind("cycle-block", "KeyR");
+noa.inputs.down.on("cycle-block", () => {
+  const owned = ownedBlockItems();
+  if (owned.length === 0) {
+    showNotice("No blocks in your bag yet — dig some");
+    return;
+  }
+  const index = owned.indexOf(placeItem);
+  placeItem = owned[(index + 1) % owned.length];
+  updateHud();
+  showNotice(`Placing: ${itemName(placeItem)}`);
+});
 
+// dev/test backdoor: raw edits go through the server like everything else
+// so all clients (including this one) apply them in identical order
 function sendEdit(block: number, x: number, y: number, z: number): void {
-  applyEdit({ block, x, y, z });
   void client.streams.send({ type: "edit", block, x, y, z }).catch(() => {});
 }
 
@@ -1070,7 +1304,8 @@ noa.inputs.down.on("fire", () => {
   }
   const [x, y, z] = noa.targetedBlock.position;
   // remember the last block type you worked on for placement
-  placeBlock = block;
+  placeItem = blockToItem(block);
+  updateHud();
   void client.streams.send({ type: "hit", x, y, z }).catch(() => {});
 });
 
@@ -1079,13 +1314,12 @@ noa.inputs.down.on("alt-fire", () => {
   if (!noa.targetedBlock) {
     return;
   }
-  const item = blockToItem(placeBlock);
-  if (invCount(item) <= 0) {
-    showNotice(`No ${itemName(item)} blocks to place — dig some first`);
+  if (placeItem === 0 || invCount(placeItem) <= 0) {
+    showNotice("No blocks to place — dig some first (R cycles)");
     return;
   }
   const [x, y, z] = noa.targetedBlock.adjacent;
-  void client.streams.send({ type: "place", item, x, y, z }).catch(() => {});
+  void client.streams.send({ type: "place", item: placeItem, x, y, z }).catch(() => {});
 });
 
 /*

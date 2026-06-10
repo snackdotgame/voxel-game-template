@@ -134,4 +134,11 @@ replay, and disconnect handling. It then degrades the network (150ms latency, 40
 authoritative and predicted states converge. `window.__voxels` exposes the dev hooks the
 script uses.
 
+A separate synchronization suite, `scripts/sync-test.mjs` (same invocation), drives **five
+concurrent clients** and cross-verifies: position agreement between every client pair after
+concurrent movement, concurrent block edits visible identically everywhere, conflicting
+writes to the same block converging to one value on all clients, hit-dug blocks and drops
+shared consistently, equipment visibility, inventory isolation, and position convergence
+after movement under 120ms latency / 30ms jitter / 10% datagram loss.
+
 Checks: `npm run check` (format, client+server typecheck, lint).

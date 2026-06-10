@@ -274,17 +274,14 @@ function sendChunkState(id: string, cx: number, cz: number, edits: BlockEdit[]) 
   }
 }
 
-// dev/test backdoor: raw edits, applied verbatim
+// dev/test backdoor: raw edits, applied verbatim. Echoed to the sender too,
+// so every client applies conflicting writes in the same server order.
 function handleEdit(world: World, event: StreamEvent, value: unknown) {
   const message = parseEditMessage(value);
   if (!message) {
     return;
   }
-  emitEdit(
-    world,
-    { block: message.block, x: message.x, y: message.y, z: message.z },
-    event.connection.id,
-  );
+  emitEdit(world, { block: message.block, x: message.x, y: message.y, z: message.z }, null);
 }
 
 function emitEdit(world: World, edit: BlockEdit, exceptId: string | null) {
