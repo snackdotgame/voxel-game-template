@@ -106,20 +106,22 @@ export function dropsOnImpact(item: number): boolean {
 export function blockHP(block: number): number {
   switch (block) {
     case LEAVES_ID:
+      return 1;
     case SAND_ID:
     case SNOW_ID:
-      return 1;
+      return 2;
     case GRASS_ID:
     case DIRT_ID:
-      return 2;
+      return 3;
     case LOG_ID:
+      return 6;
     case STONE_ID:
-      return 4;
+      return 8;
     case COAL_ORE_ID:
     case IRON_ORE_ID:
     case GOLD_ORE_ID:
     case DIAMOND_ORE_ID:
-      return 6;
+      return 12;
     default:
       return 0;
   }

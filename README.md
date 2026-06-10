@@ -87,10 +87,11 @@ identically on client and server, so collision and prediction agree everywhere.
 
 ### Digging, drops, and inventory
 
-Blocks have HP and take multiple hits to break (leaves crumble instantly, ores take six
-half-damage hits without the right tool; matching tools — axe for wood, shovel for earth,
-pickaxe for stone — hit for double, and stone/ore can only be dug with the pickaxe; partial
-damage heals after 10s). A broken block becomes a Minecraft-style item drop: a floating,
+Blocks have HP and take multiple hits to break (leaves crumble instantly; earth takes a few
+hits by hand; stone takes four pickaxe hits and ores six; matching tools — axe for wood,
+shovel for earth, pickaxe for stone — hit for double, and stone/ore can only be dug with
+the pickaxe; partial damage heals after 10s, and damaged blocks show Minecraft-style
+breaking cracks that deepen with every hit). A broken block becomes a Minecraft-style item drop: a floating,
 bobbing, slowly spinning miniature that anyone can walk over to collect after a short delay.
 Stone also yields a rock and snow a snowball, keeping throwing ammo renewable. Landed
 projectiles persist as drops too, so a thrown pickaxe can be retrieved — or stolen.
