@@ -1,4 +1,10 @@
-splash_000.ogg is "waterReentry" from the Skippy Fish Water Sound
-Collection by jcpmcdonald
+splash_big_000.wav and splash_big_001.wav are "Water splashes" by
+Michel Baradari (apollo-music.de), via OpenGameArt
+(https://opengameart.org/content/water-splashes), licensed CC-BY 3.0
+(https://creativecommons.org/licenses/by/3.0/). Attribution: water
+splash sounds by Michel Baradari.
+
+splash_small_000.ogg is "waterReentry" from the Skippy Fish Water
+Sound Collection by jcpmcdonald
 (https://opengameart.org/content/skippy-fish-water-sound-collection),
 released under Creative Commons Zero (CC0).

@@ -388,22 +388,37 @@ setInterval(() => {
  *  click/keypress.
  */
 
-const SOUND_FAMILIES: Record<string, number> = {
-  impactMining: 5,
-  impactSoft_medium: 5,
-  impactSoft_heavy: 5,
-  impactWood_medium: 5,
-  footstep_grass: 5,
-  footstep_concrete: 5,
-  footstep_snow: 5,
-  impactPunch_medium: 5,
-  splash: 1,
+const kenneyVariants = (family: string) =>
+  Array.from({ length: 5 }, (_, i) => `/assets/sounds/${family}_00${i}.ogg`);
+
+const SOUND_FILES: Record<string, string[]> = {
+  impactMining: kenneyVariants("impactMining"),
+  impactSoft_medium: kenneyVariants("impactSoft_medium"),
+  impactSoft_heavy: kenneyVariants("impactSoft_heavy"),
+  impactWood_medium: kenneyVariants("impactWood_medium"),
+  footstep_grass: kenneyVariants("footstep_grass"),
+  footstep_concrete: kenneyVariants("footstep_concrete"),
+  footstep_snow: kenneyVariants("footstep_snow"),
+  impactPunch_medium: kenneyVariants("impactPunch_medium"),
+  // entering water: big Baradari splashes; leaving: a short light plunge
+  splash_big: ["/assets/sounds/splash_big_000.wav", "/assets/sounds/splash_big_001.wav"],
+  splash_small: ["/assets/sounds/splash_small_000.ogg"],
 };
 
 let audioCtx: AudioContext | null = null;
 let masterGain: GainNode | null = null;
 const soundBuffers = new Map<string, AudioBuffer[]>();
 let soundsPlayed = 0;
+// ring log of recently played families, for tests/debugging
+const soundLog: string[] = [];
+
+function logSound(tag: string): void {
+  soundsPlayed += 1;
+  soundLog.push(tag);
+  if (soundLog.length > 30) {
+    soundLog.shift();
+  }
+}
 
 function initAudio(): void {
   if (audioCtx) {
@@ -415,11 +430,11 @@ function initAudio(): void {
   masterGain = audioCtx.createGain();
   masterGain.gain.value = 0.6;
   masterGain.connect(audioCtx.destination);
-  for (const [family, variants] of Object.entries(SOUND_FAMILIES)) {
+  for (const [family, urls] of Object.entries(SOUND_FILES)) {
     const buffers: AudioBuffer[] = [];
     soundBuffers.set(family, buffers);
-    for (let i = 0; i < variants; i++) {
-      void fetch(`/assets/sounds/${family}_00${i}.ogg`)
+    for (const url of urls) {
+      void fetch(url)
         .then((response) => response.arrayBuffer())
         .then((bytes) => audioCtx!.decodeAudioData(bytes))
         .then((buffer) => {
@@ -448,7 +463,7 @@ function playSound(family: string, volume = 1, pitch = 1): void {
   source.connect(gain);
   gain.connect(masterGain);
   source.start();
-  soundsPlayed += 1;
+  logSound(family);
 }
 
 // volume falls off linearly to silence at 24 blocks from the player
@@ -479,16 +494,16 @@ function playPop(volume = 0.5): void {
   gain.connect(masterGain);
   osc.start(t);
   osc.stop(t + 0.13);
-  soundsPlayed += 1;
+  logSound("pop");
 }
 
-// real splash recording (CC0 - see assets/sounds/LICENSE-water-splash
-// .txt), with extra pitch spread to vary the single sample per play
-function playSplash(volume = 0.7): void {
+// real splash recordings (see assets/sounds/LICENSE-water-splash.txt):
+// a big plunge entering the water, a short light one leaving it
+function playSplash(volume = 0.7, entering = true): void {
   if (volume < 0.03) {
     return;
   }
-  playSound("splash", volume, 0.85 + Math.random() * 0.3);
+  playSound(entering ? "splash_big" : "splash_small", volume, 0.9 + Math.random() * 0.2);
 }
 
 // short synthesized whoosh for swings and throws (no CC0 sample fit)
@@ -521,7 +536,7 @@ function playWhoosh(volume = 0.35): void {
   filter.connect(gain);
   gain.connect(masterGain);
   source.start();
-  soundsPlayed += 1;
+  logSound("whoosh");
 }
 
 // which sample family a block speaks with, per interaction
@@ -1698,7 +1713,7 @@ function pushRemoteSample(remote: RemotePlayer, snap: PlayerSnapshot): void {
         snap.state.y - predicted.y,
         snap.state.z - predicted.z,
       );
-      playSplash((isIn ? 0.7 : 0.35) * Math.max(0, 1 - dist / 24));
+      playSplash((isIn ? 0.7 : 0.35) * Math.max(0, 1 - dist / 24), isIn);
     }
   }
   if (
@@ -1819,7 +1834,7 @@ noa.on("beforeRender", () => {
   );
   if (inWater !== wasInWater) {
     const speed = Math.min(1, 0.35 + Math.abs(predicted.vy) * 0.08);
-    playSplash(inWater ? speed : speed * 0.5);
+    playSplash(inWater ? speed : speed * 0.5, inWater);
     wasInWater = inWater;
   }
 
@@ -2696,6 +2711,7 @@ declare global {
       editCount(): number;
       digTargeted(): void;
       soundsPlayed(): number;
+      soundLog(): string[];
     };
   }
 }
@@ -2771,6 +2787,7 @@ window.__voxels = {
   hasEdit: (x, y, z) => lookupEdit(x, y, z) !== undefined,
   editCount: () => [...editBuckets.values()].reduce((sum, bucket) => sum + bucket.size, 0),
   soundsPlayed: () => soundsPlayed,
+  soundLog: () => [...soundLog],
   digTargeted: () => {
     if (noa.targetedBlock) {
       const [x, y, z] = noa.targetedBlock.position;
