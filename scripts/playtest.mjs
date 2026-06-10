@@ -90,7 +90,7 @@ try {
     () => window.__voxels.remoteCount() === 1,
     null,
     "player1 sees 1 remote player",
-    45000, // leftover ghosts from prior sessions despawn within the AFK window
+    30000, // leftover ghosts from prior sessions despawn once the runtime reaps them (~20s)
   );
   await waitFor(
     p2.frame,
@@ -658,8 +658,8 @@ try {
 
   // disconnect: close player3, others should drop to 1 remote. Usually the
   // broker reports the closed connection within seconds; when it doesn't
-  // (load, abrupt teardown), the server's 30s AFK timeout is the fallback —
-  // so the budget must sit comfortably past it.
+  // (load, abrupt teardown), the runtime's liveness reap (~20s of inbound
+  // silence) is the fallback — the budget sits comfortably past that.
   await p3.context.close();
   live.pop();
   const t0 = Date.now();
@@ -668,14 +668,14 @@ try {
     () => window.__voxels.remoteCount() === 1,
     null,
     "player1 sees player3 leave",
-    45000,
+    30000,
   );
   await waitFor(
     p2.frame,
     () => window.__voxels.remoteCount() === 1,
     null,
     "player2 sees player3 leave",
-    45000,
+    30000,
   );
   log(`leave detected in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
 

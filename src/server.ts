@@ -62,13 +62,12 @@ const MAX_EDITS = 200_000;
 // Allow short input bursts (catch-up after client jank) but bound per-player CPU.
 const MAX_STEPS_PER_TICK = 8;
 const MAX_QUEUED_INPUTS = 32;
-// Players whose inputs stop freeze in place as AFK and are removed after
-// this long (or on a real disconnect). Backgrounded tabs keep sending via
-// the worker pump, so this only catches fully-frozen tabs and dead
-// sessions the broker hasn't reaped yet — parking makes returns seamless.
-const AFK_TIMEOUT_MS = 30_000;
-// Removed players' characters are parked by userId for this long, so
-// AFK-timeouts and tab reloads resume where they left off.
+// Connection liveness is runtime-owned: the Minion runtime's QUIC
+// keep-alives and app-level ping/pong force-disconnect a dead client
+// within ~20s, and that flows through the normal disconnect path below
+// (a vanished connection in syncConnections). The game only keeps
+// parking: removed players' characters are stored by userId for this
+// long, so reconnects and tab reloads resume where they left off.
 const PARK_TTL_MS = 300_000;
 
 // Edit-log sync windows, in chunk-column units (32 blocks). SYNC_RADIUS must
@@ -148,11 +147,9 @@ type Parked = {
 
 type World = {
   players: Map<string, Player>;
-  lastSeen: Map<string, number>;
-  // connections that have been sent their welcome (lastSeen can't double
-  // as this marker: handleInput touches it before the first greet pass)
+  // connections that have been sent their welcome/roster
   greeted: Set<string>;
-  // inventories are keyed by userId so they survive reconnects and AFK
+  // inventories are keyed by userId so they survive reconnects
   inventories: Map<string, InvSlot[]>;
   // characters of removed players, keyed by userId, for seamless resume
   parked: Map<string, Parked>;
@@ -181,7 +178,6 @@ export async function main() {
   const isFluid = makeIsFluid(lookupEdit);
   const world: World = {
     players: new Map(),
-    lastSeen: new Map(),
     greeted: new Set(),
     inventories: new Map(),
     parked: new Map(),
@@ -210,7 +206,7 @@ export async function main() {
 
   while (server.running && !stopped) {
     syncConnections(world);
-    dropStalePlayers(world);
+    pruneParked(world);
     stepProjectiles(world);
     tickDrops(world);
     tickRegen(world);
@@ -423,7 +419,6 @@ function handleStream(world: World, event: StreamEvent) {
     (value as Record<string, unknown>).type === "debug"
   ) {
     const players = [];
-    const now = server.elapsedMs();
     for (const [id, player] of world.players) {
       players.push({
         id,
@@ -432,14 +427,12 @@ function handleStream(world: World, event: StreamEvent) {
         x: Math.round(player.char.x * 10) / 10,
         y: Math.round(player.char.y * 10) / 10,
         z: Math.round(player.char.z * 10) / 10,
-        lastSeenAgoMs: Math.round(now - (world.lastSeen.get(id) ?? 0)),
       });
     }
     server.streams.send(event.connection.id, {
       type: "debugState",
       players,
       connections: server.connections.length,
-      lastSeenEntries: world.lastSeen.size,
       drops: world.drops.size,
       projectiles: world.projectiles.size,
     });
@@ -857,10 +850,11 @@ function handleInput(world: World, event: DatagramEvent) {
   if (!messages || messages.length === 0) {
     return;
   }
-  world.lastSeen.set(event.connection.id, server.elapsedMs());
   let player = world.players.get(event.connection.id);
   if (!player) {
-    // Player was dropped as stale (e.g. backgrounded tab) and is active again.
+    // First input from this connection: materialize the body now (never
+    // on connect), so connections that never send anything can't leave a
+    // phantom at spawn while the runtime reaps them.
     addPlayer(world, event.connection);
     player = world.players.get(event.connection.id);
   }
@@ -913,7 +907,7 @@ function addPlayer(world: World, connection: Connection) {
     }
   }
 
-  // resume a recently parked character (AFK return or tab reload)
+  // resume a recently parked character (reconnect or tab reload)
   const parked = world.parked.get(connection.userId);
   const fresh = parked && server.elapsedMs() - parked.at < PARK_TTL_MS ? parked : undefined;
   world.parked.delete(connection.userId);
@@ -934,7 +928,6 @@ function addPlayer(world: World, connection: Connection) {
     syncedChunks: new Set(),
     lastChunk: "none",
   });
-  world.lastSeen.set(connection.id, server.elapsedMs());
   server.streams.broadcast(
     { type: "join", id: connection.id, name: connection.userName },
     { except: [connection.id] },
@@ -954,7 +947,6 @@ function removePlayer(world: World, id: string) {
     });
   }
   world.players.delete(id);
-  world.lastSeen.delete(id);
   server.streams.broadcast({ type: "leave", id });
 }
 
@@ -972,9 +964,6 @@ function syncConnections(world: World) {
     // never send anything (mid-load reloads, dead sessions) never leave a
     // phantom floating at spawn
     world.greeted.add(connection.id);
-    if (!world.lastSeen.has(connection.id)) {
-      world.lastSeen.set(connection.id, server.elapsedMs());
-    }
     const roster: RosterEntry[] = [];
     for (const [id, player] of world.players) {
       roster.push({ id, name: player.name });
@@ -982,34 +971,22 @@ function syncConnections(world: World) {
     connection.streams.send({ type: "welcome", you: connection.id, players: roster });
   }
 
-  for (const id of world.lastSeen.keys()) {
+  // a connection the runtime no longer reports is gone: park its player
+  // (removePlayer) and forget the greeting
+  for (const id of world.players.keys()) {
     if (!connected.has(id)) {
       removePlayer(world, id);
+    }
+  }
+  for (const id of world.greeted) {
+    if (!connected.has(id)) {
       world.greeted.delete(id);
     }
   }
 }
 
-function dropStalePlayers(world: World) {
+function pruneParked(world: World) {
   const now = server.elapsedMs();
-  for (const [id, seenAt] of world.lastSeen) {
-    if (world.players.has(id) && now - seenAt > AFK_TIMEOUT_MS) {
-      // Long-AFK: park the character and remove; lastSeen stays so a
-      // resumed connection re-adds (and resumes) via handleInput.
-      const player = world.players.get(id);
-      if (player) {
-        world.parked.set(player.userId, {
-          char: player.char,
-          heading: player.heading,
-          item: player.item,
-          hp: player.hp,
-          at: now,
-        });
-      }
-      world.players.delete(id);
-      server.streams.broadcast({ type: "leave", id });
-    }
-  }
   for (const [userId, parked] of world.parked) {
     if (now - parked.at > PARK_TTL_MS) {
       world.parked.delete(userId);

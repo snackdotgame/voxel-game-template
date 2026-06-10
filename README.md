@@ -34,10 +34,12 @@ Movement is **server-authoritative with client-side prediction and rollback**, r
   counter.
 - `src/server.ts` — steps each player's authoritative sim from received inputs (burst-buffered
   and rate-capped), broadcasts 20 Hz state snapshots over **datagrams**, and owns the edit log.
-  Players whose inputs stop freeze in place as AFK and are removed after 30s or on a real
-  disconnect; characters and inventories are parked by userId so returns and reconnects
-  resume where they left off. Players only materialize on their first input, so connections
-  that never send anything can't leave phantom bodies floating at spawn.
+  Connection liveness is owned by the Minion runtime (QUIC keep-alives plus app-level
+  ping/pong force-disconnect a dead client within ~20s), so a player is removed exactly when
+  its connection disappears; the game adds no liveness tracking of its own. What it does keep
+  is lifecycle UX: characters and inventories are parked by userId so returns and reconnects
+  resume where they left off, and players only materialize on their first input, so
+  connections that never send anything can't leave phantom bodies floating at spawn.
 
   Known runtime-layer issue (minion platform, not this game): under long heavy multi-client
   sessions on a long-lived dev server, reliable stream delivery to idle clients can starve or
