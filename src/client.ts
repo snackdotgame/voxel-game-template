@@ -395,7 +395,6 @@ const SOUND_FAMILIES: Record<string, number> = {
   footstep_concrete: 5,
   footstep_snow: 5,
   impactPunch_medium: 5,
-  impactGlass_light: 5,
 };
 
 let audioCtx: AudioContext | null = null;
@@ -456,6 +455,28 @@ function playSoundAt(family: string, x: number, y: number, z: number, volume = 1
   if (attenuated > 0.02) {
     playSound(family, attenuated, pitch);
   }
+}
+
+// Minecraft-style pickup "pop": a short sine blip swept upward, with a
+// randomized base pitch per play (no sample in the pack reads as pickup)
+function playPop(volume = 0.5): void {
+  if (!audioCtx || !masterGain) {
+    return;
+  }
+  const t = audioCtx.currentTime;
+  const osc = audioCtx.createOscillator();
+  osc.type = "sine";
+  const base = 320 + Math.random() * 160;
+  osc.frequency.setValueAtTime(base, t);
+  osc.frequency.exponentialRampToValueAtTime(base * 2.2, t + 0.09);
+  const gain = audioCtx.createGain();
+  gain.gain.setValueAtTime(volume, t);
+  gain.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+  osc.connect(gain);
+  gain.connect(masterGain);
+  osc.start(t);
+  osc.stop(t + 0.13);
+  soundsPlayed += 1;
 }
 
 // short synthesized whoosh for swings and throws (no CC0 sample fit)
@@ -2349,7 +2370,7 @@ function handleStreamEvent(event: { bytes: Uint8Array; json<T = unknown>(): T })
       }
       const invTotal = invSlots.reduce((sum, slot) => sum + (slot ? slot.count : 0), 0);
       if (lastInvTotal >= 0 && invTotal > lastInvTotal) {
-        playSound("impactGlass_light", 0.45, 1.2);
+        playPop(0.5);
       }
       lastInvTotal = invTotal;
       // the stack in the selected slot may have changed or moved

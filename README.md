@@ -158,7 +158,8 @@ hit player's own screen through the normal prediction-rollback path — no speci
 WebAudio effects with per-play variant and pitch randomization, Minecraft-style: per-material
 dig ticks and breaks (mining clinks for stone/ore, soft thuds for earth, wood knocks for
 logs), placement thuds, footsteps that follow the walk cycle and the surface underfoot,
-melee/hurt punches, a pickup clink, and synthesized whooshes for swings and throws.
+melee/hurt punches, and synthesized effects where no sample fit: an upward pickup pop
+and whooshes for swings and throws.
 World-positioned events attenuate with distance. Audio starts on the first input gesture,
 as browsers require.
 
