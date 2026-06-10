@@ -479,6 +479,41 @@ function playPop(volume = 0.5): void {
   soundsPlayed += 1;
 }
 
+// synthesized water splash: a noise burst through a lowpass filter that
+// sweeps downward - the plunge - with a fast attack and ~0.35s decay
+function playSplash(volume = 0.7): void {
+  if (!audioCtx || !masterGain || volume < 0.03) {
+    return;
+  }
+  const t = audioCtx.currentTime;
+  const dur = 0.4;
+  const buffer = audioCtx.createBuffer(
+    1,
+    Math.ceil(audioCtx.sampleRate * dur),
+    audioCtx.sampleRate,
+  );
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < data.length; i++) {
+    data[i] = Math.random() * 2 - 1;
+  }
+  const source = audioCtx.createBufferSource();
+  source.buffer = buffer;
+  const filter = audioCtx.createBiquadFilter();
+  filter.type = "lowpass";
+  filter.Q.value = 0.8;
+  filter.frequency.setValueAtTime(1400, t);
+  filter.frequency.exponentialRampToValueAtTime(320, t + dur);
+  const gain = audioCtx.createGain();
+  gain.gain.setValueAtTime(0, t);
+  gain.gain.linearRampToValueAtTime(volume, t + 0.03);
+  gain.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  source.connect(filter);
+  filter.connect(gain);
+  gain.connect(masterGain);
+  source.start(t);
+  soundsPlayed += 1;
+}
+
 // short synthesized whoosh for swings and throws (no CC0 sample fit)
 function playWhoosh(volume = 0.35): void {
   if (!audioCtx || !masterGain) {
@@ -1462,6 +1497,26 @@ function lerpAngle(a: number, b: number, t: number): number {
 
 function pushRemoteSample(remote: RemotePlayer, snap: PlayerSnapshot): void {
   const last = remote.buffer[remote.buffer.length - 1];
+  if (last) {
+    const wasIn = isFluid(
+      Math.floor(last.state.x),
+      Math.floor(last.state.y + 0.3),
+      Math.floor(last.state.z),
+    );
+    const isIn = isFluid(
+      Math.floor(snap.state.x),
+      Math.floor(snap.state.y + 0.3),
+      Math.floor(snap.state.z),
+    );
+    if (isIn !== wasIn) {
+      const dist = Math.hypot(
+        snap.state.x - predicted.x,
+        snap.state.y - predicted.y,
+        snap.state.z - predicted.z,
+      );
+      playSplash((isIn ? 0.7 : 0.35) * Math.max(0, 1 - dist / 24));
+    }
+  }
   if (
     last &&
     Math.hypot(
@@ -1543,6 +1598,7 @@ function removeRemotePlayer(id: string): void {
 
 let lastFrameAt = performance.now();
 let lastStepIndex = -1;
+let wasInWater = false;
 
 noa.on("beforeRender", () => {
   const now = performance.now();
@@ -1569,6 +1625,19 @@ noa.on("beforeRender", () => {
   const selfSpeed = Math.hypot(predicted.vx, predicted.vz);
   const selfMoving = onGround(predicted) && selfSpeed > 0.4;
   animateRig(selfRig, selfSpeed, onGround(predicted), dtSec, swingT > 0);
+
+  // splash on crossing the water surface, scaled by entry speed; leaving
+  // the water gets a softer one
+  const inWater = isFluid(
+    Math.floor(predicted.x),
+    Math.floor(predicted.y + 0.3),
+    Math.floor(predicted.z),
+  );
+  if (inWater !== wasInWater) {
+    const speed = Math.min(1, 0.35 + Math.abs(predicted.vy) * 0.08);
+    playSplash(inWater ? speed : speed * 0.5);
+    wasInWater = inWater;
+  }
 
   // footsteps: the walk cycle plants a foot every half phase-cycle
   if (selfMoving) {
