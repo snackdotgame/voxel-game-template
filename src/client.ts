@@ -672,13 +672,25 @@ function buildToolMesh(name: string, item: number): Mesh | null {
   return root;
 }
 
+// rocks, snowballs, and blocks are origin-centered lumps cupped in the
+// fist; handle tools have their grip half a handle-length below the origin
+function isLumpItem(item: number): boolean {
+  return item === ROCK || item === SNOWBALL || isBlockItem(item);
+}
+
 function attachToolToRig(rig: Rig, name: string, item: number): void {
   rig.tool?.dispose();
   rig.tool = buildToolMesh(name, item);
-  if (rig.tool) {
-    rig.tool.parent = rig.rightArm;
-    // grip near the hand (arm spans y 0..-0.675); positive rotation.x takes
-    // local +y (the tool head) forward, so this is a head-up 54-degree hold
+  if (!rig.tool) {
+    return;
+  }
+  rig.tool.parent = rig.rightArm;
+  if (isLumpItem(item)) {
+    // sits just past the hand (arm spans y 0..-0.675), no handle pitch
+    rig.tool.position.set(0, -0.7, 0.16);
+  } else {
+    // grip near the hand; positive rotation.x takes local +y (the tool
+    // head) forward, so this is a head-up 54-degree hold
     rig.tool.position.set(0, -0.62, 0.12);
     rig.tool.rotation.x = Math.PI * 0.3;
   }
@@ -719,11 +731,17 @@ function refreshViewModel(): void {
   const tool = buildToolMesh("view", equippedItem);
   if (tool) {
     tool.parent = root;
-    // handle runs diagonally out of the fist toward upper-left, head tipped
-    // away from the camera (positive x takes +y forward, positive z rolls
-    // +y toward -x in our left-handed camera space)
-    tool.position.set(-0.02, -0.06, 0.1);
-    tool.rotation.set(0.5, -0.2, 0.45);
+    if (isLumpItem(equippedItem)) {
+      // cupped on top of the fist (the hand ends up near (0, -0.2, 0.11))
+      tool.position.set(0, -0.08, 0.16);
+      tool.rotation.set(0.25, 0.4, 0.15);
+    } else {
+      // handle runs diagonally out of the fist toward upper-left, head
+      // tipped away from the camera (positive x takes +y forward, positive
+      // z rolls +y toward -x in our left-handed camera space)
+      tool.position.set(-0.02, -0.06, 0.1);
+      tool.rotation.set(0.5, -0.2, 0.45);
+    }
   }
   root.scaling.setAll(0.9);
   root.parent = noa.rendering.camera;
