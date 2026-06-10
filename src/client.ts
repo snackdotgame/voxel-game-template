@@ -7,7 +7,6 @@ import {
   type MeshLambertMaterial,
   NearestFilter,
   type Object3D,
-  SRGBColorSpace,
 } from "three";
 import { client } from "minion:client";
 import { Engine } from "./noa/index.js";
@@ -408,7 +407,6 @@ function makeSkinMaterial(name: string, hueShiftDegrees: number): MeshLambertMat
   const texture = new CanvasTexture(canvas);
   texture.magFilter = NearestFilter;
   texture.minFilter = NearestFilter;
-  texture.colorSpace = SRGBColorSpace;
   drawSkin(texture, hueShiftDegrees);
   const material = noa.rendering.makeStandardMaterial(name);
   material.map = texture;
@@ -492,10 +490,11 @@ function buildRig(name: string, hueShiftDegrees: number): Rig {
   return rig;
 }
 
-// Animation math ported from skinview3d (MIT, bs-community/skinview3d
+// Animation math based on skinview3d (MIT, bs-community/skinview3d
 // src/animation.ts) and minecraft-web-client (MIT, zardoy/minecraft-web-client
-// renderer/viewer/three/entity/animations.js). Sign convention verified:
-// negative rotation.x swings a limb forward in our rig, matching theirs.
+// renderer/viewer/three/entity/animations.js), with walk/run amplitudes
+// toned down from the references. Sign convention verified: negative
+// rotation.x swings a limb forward in our rig, matching theirs.
 // between vanilla walk (4.317) and sprint (5.612) ground speeds
 const RUN_SPEED_THRESHOLD = 5;
 
@@ -526,25 +525,26 @@ function animateRig(rig: Rig, speed: number, grounded: boolean, dtSec: number, s
     lArmX = -0.55;
     rArmX = -0.55;
   } else if (running) {
-    // RunningAnimation / WalkingGeneralSwing isRunning branch
-    lLegX = Math.cos(t + PI) * 1.3;
-    rLegX = Math.cos(t) * 1.3;
-    lArmX = Math.cos(t) * 1.5;
-    rArmX = Math.cos(t + PI) * 1.5;
-    lArmZ = Math.cos(t) * 0.1 + PI * 0.1;
-    rArmZ = Math.cos(t + PI) * 0.1 - PI * 0.1;
-    bodyBob = Math.abs(Math.cos(t)) * 0.06;
+    // RunningAnimation / WalkingGeneralSwing isRunning branch, with the
+    // amplitudes toned well down from the reference's windmilling
+    lLegX = Math.cos(t + PI) * 0.75;
+    rLegX = Math.cos(t) * 0.75;
+    lArmX = Math.cos(t) * 0.65;
+    rArmX = Math.cos(t + PI) * 0.65;
+    lArmZ = Math.cos(t) * 0.05 + PI * 0.04;
+    rArmZ = Math.cos(t + PI) * 0.05 - PI * 0.04;
+    bodyBob = Math.abs(Math.cos(t)) * 0.04;
   } else if (moving) {
-    // WalkingAnimation
-    lLegX = Math.sin(t) * 0.5;
-    rLegX = Math.sin(t + PI) * 0.5;
-    lArmX = Math.sin(t + PI) * 0.5;
-    rArmX = Math.sin(t) * 0.5;
-    lArmZ = Math.cos(t) * 0.03 + PI * 0.02;
-    rArmZ = Math.cos(t + PI) * 0.03 - PI * 0.02;
-    headY = Math.sin(t / 4) * 0.2;
-    headX = Math.sin(t / 5) * 0.1;
-    bodyBob = Math.abs(Math.cos(t)) * 0.035;
+    // WalkingAnimation, amplitudes toned down
+    lLegX = Math.sin(t) * 0.35;
+    rLegX = Math.sin(t + PI) * 0.35;
+    lArmX = Math.sin(t + PI) * 0.28;
+    rArmX = Math.sin(t) * 0.28;
+    lArmZ = Math.cos(t) * 0.02 + PI * 0.012;
+    rArmZ = Math.cos(t + PI) * 0.02 - PI * 0.012;
+    headY = Math.sin(t / 4) * 0.08;
+    headX = Math.sin(t / 5) * 0.04;
+    bodyBob = Math.abs(Math.cos(t)) * 0.025;
   } else {
     // IdleAnimation: subtle arm breathe
     const it = rig.idleT * 2;
@@ -1329,7 +1329,7 @@ noa.on("beforeRender", () => {
   // bridged by real data instead of extrapolation
   const renderTime = now - INTERP_DELAY_MS;
   for (const remote of remotePlayers.values()) {
-    remote.rig.skin.emissive = now < remote.hurtUntil ? HURT_FLASH : NO_FLASH;
+    remote.rig.skin.emissive.copy(now < remote.hurtUntil ? HURT_FLASH : NO_FLASH);
     const buf = remote.buffer;
     while (buf.length > 2 && buf[1].at <= renderTime) {
       buf.shift();

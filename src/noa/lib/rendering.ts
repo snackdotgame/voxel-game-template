@@ -5,8 +5,10 @@ import {
   AmbientLight,
   BufferGeometry,
   Color,
+  ColorManagement,
   DirectionalLight,
   DoubleSide,
+  LinearSRGBColorSpace,
   Group,
   Line,
   LineBasicMaterial,
@@ -107,6 +109,8 @@ export class Rendering {
   light!: DirectionalLight;
   /** ambient light for the scene */
   ambientLight!: AmbientLight;
+  /** the scene ambient color (from engine options) */
+  ambientColor!: Color;
   /** the three.js PerspectiveCamera that renders the scene */
   camera!: PerspectiveCamera;
 
@@ -152,11 +156,16 @@ export class Rendering {
    */
   _initScene(canvas: HTMLCanvasElement, opts: any) {
     this._canvas = canvas;
+    // Babylon's legacy pipeline lights in gamma space with no sRGB
+    // decode/encode; disable three's color management to match, so the
+    // textures and shading reproduce the original look
+    ColorManagement.enabled = false;
     this.engine = new WebGLRenderer({
       canvas,
       antialias: !!opts.antiAlias,
       preserveDrawingBuffer: !!opts.preserveDrawingBuffer,
     });
+    this.engine.outputColorSpace = LinearSRGBColorSpace;
     this.engine.setClearColor(new Color(...(opts.clearColor as [number, number, number])), 1);
 
     var scene = new Scene();
@@ -203,18 +212,21 @@ export class Rendering {
     this.camera.add(this._camScreen);
     this._camLocBlock = 0;
 
-    // lighting: scene ambient + one directional light. The light vector
-    // is in game coords, so z flips at the boundary like everything else
-    this.ambientLight = new AmbientLight(
-      new Color(...(opts.ambientColor as [number, number, number])),
-      1,
-    );
+    // lighting: scene ambient + one directional light, calibrated against
+    // the Babylon build by sampling its rendered pixels:
+    //   babylon pixel = texture * clamp(ambient + N.L, 0, 1) * vertexColor
+    // in gamma space. three's Lambert BRDF divides irradiance by PI, so
+    // light intensities carry a PI factor; the directional intensity is
+    // scaled so fully lit faces land at 1.0 - the value Babylon's clamp
+    // produced - instead of overshooting (its N.L peak is 1/1.5).
+    this.ambientColor = new Color(...(opts.ambientColor as [number, number, number]));
+    this.ambientLight = new AmbientLight(this.ambientColor, Math.PI);
     scene.add(this.ambientLight);
 
     var lv = opts.lightVector;
     this.light = new DirectionalLight(
       new Color(...(opts.lightDiffuse as [number, number, number])),
-      1,
+      0.75 * Math.PI,
     );
     this.light.position.set(-lv[0], -lv[1], lv[2]);
     this.light.target.position.set(0, 0, 0);

@@ -1,4 +1,4 @@
-import { NearestFilter, SRGBColorSpace, TextureLoader } from "three";
+import { NearestFilter, TextureLoader } from "three";
 import type { Material, MeshLambertMaterial } from "three";
 
 import type { Engine as NoaEngine } from "../index";
@@ -148,7 +148,6 @@ function createTerrainMat(self: TerrainMatManager, blockMatID = 0): Material {
   var tex = new TextureLoader().load(texURL);
   tex.magFilter = NearestFilter;
   tex.minFilter = NearestFilter;
-  tex.colorSpace = SRGBColorSpace;
   if (matInfo.texHasAlpha) mat.alphaTest = 0.5;
   mat.map = tex;
 
