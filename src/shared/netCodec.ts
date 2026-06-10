@@ -1,0 +1,212 @@
+// Binary encodings for the high-frequency datagram traffic: client inputs
+// and server player-state snapshots. Both are little-endian DataView
+// layouts with a 2-byte magic so receivers can distinguish them from the
+// JSON stream messages.
+//
+// Input packet 'VI' (12 bytes):
+//   0  u8   0x56 'V'
+//   1  u8   0x49 'I'
+//   2  u8   version = 1
+//   3  u8   buttons: fwd 1, back 2, left 4, right 8, jump 16, sprint 32
+//   4  u32  input seq
+//   8  f32  heading (radians)
+//
+// Snapshot packet 'VS':
+//   0  u8   0x56 'V'
+//   1  u8   0x53 'S'
+//   2  u8   version = 1
+//   3  u8   record count
+//   then per player:
+//     u8   id length, followed by that many bytes of UTF-8 connection id
+//     u32  lastSeq          (last input seq applied by the server)
+//     f32  heading
+//     f64  x, y, z          (f64: these restore the prediction sim on ack)
+//     f32  vx, vy, vz
+//     f32  jumpMsLeft
+//     u8   flags: resting x/y/z as 2-bit values (-1 -> 0, 0 -> 1, 1 -> 2)
+//          in bits 0-5, jumping in bit 6
+//     u8   sleep frame count
+//     u8   jump count
+//   Names travel on the reliable channel (welcome roster / join), not here.
+
+import type { PlayerSnapshot } from "./messages.js";
+import type { CharInput, CharState } from "./sim.js";
+
+const MAGIC_V = 0x56;
+const MAGIC_I = 0x49;
+const MAGIC_S = 0x53;
+export const NET_CODEC_VERSION = 1;
+
+const INPUT_BYTES = 12;
+const SNAPSHOT_HEADER_BYTES = 4;
+const RECORD_FIXED_BYTES = 51;
+
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
+
+/*
+ *      Inputs
+ */
+
+export function encodeInput(input: CharInput): Uint8Array {
+  const bytes = new Uint8Array(INPUT_BYTES);
+  const view = new DataView(bytes.buffer);
+  bytes[0] = MAGIC_V;
+  bytes[1] = MAGIC_I;
+  bytes[2] = NET_CODEC_VERSION;
+  bytes[3] =
+    (input.fwd ? 1 : 0) |
+    (input.back ? 2 : 0) |
+    (input.left ? 4 : 0) |
+    (input.right ? 8 : 0) |
+    (input.jump ? 16 : 0) |
+    (input.sprint ? 32 : 0);
+  view.setUint32(4, input.seq, true);
+  view.setFloat32(8, input.heading, true);
+  return bytes;
+}
+
+export function decodeInput(bytes: Uint8Array): CharInput | undefined {
+  if (bytes.length !== INPUT_BYTES || bytes[0] !== MAGIC_V || bytes[1] !== MAGIC_I) {
+    return undefined;
+  }
+  if (bytes[2] !== NET_CODEC_VERSION) {
+    return undefined;
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const buttons = bytes[3];
+  const heading = view.getFloat32(8, true);
+  if (!Number.isFinite(heading)) {
+    return undefined;
+  }
+  return {
+    seq: view.getUint32(4, true),
+    heading,
+    fwd: (buttons & 1) !== 0,
+    back: (buttons & 2) !== 0,
+    left: (buttons & 4) !== 0,
+    right: (buttons & 8) !== 0,
+    jump: (buttons & 16) !== 0,
+    sprint: (buttons & 32) !== 0,
+  };
+}
+
+/*
+ *      Player-state snapshots
+ */
+
+function packResting(state: CharState): number {
+  const two = (v: number) => (v < 0 ? 0 : v > 0 ? 2 : 1);
+  return two(state.rx) | (two(state.ry) << 2) | (two(state.rz) << 4) | (state.jumping ? 64 : 0);
+}
+
+function unpackResting(flags: number, shift: number): number {
+  return ((flags >> shift) & 3) - 1;
+}
+
+function recordSize(idBytes: number): number {
+  return 1 + idBytes + RECORD_FIXED_BYTES;
+}
+
+// Encodes snapshots into one or more packets, each at most maxBytes long.
+export function encodeSnapshots(
+  players: readonly PlayerSnapshot[],
+  maxBytes: number,
+): Uint8Array[] {
+  const packets: Uint8Array[] = [];
+  let group: { snap: PlayerSnapshot; idBytes: Uint8Array }[] = [];
+  let groupSize = SNAPSHOT_HEADER_BYTES;
+
+  const flush = () => {
+    if (group.length === 0) {
+      return;
+    }
+    const bytes = new Uint8Array(groupSize);
+    const view = new DataView(bytes.buffer);
+    bytes[0] = MAGIC_V;
+    bytes[1] = MAGIC_S;
+    bytes[2] = NET_CODEC_VERSION;
+    bytes[3] = group.length;
+    let offset = SNAPSHOT_HEADER_BYTES;
+    for (const { snap, idBytes } of group) {
+      bytes[offset++] = idBytes.length;
+      bytes.set(idBytes, offset);
+      offset += idBytes.length;
+      view.setUint32(offset, snap.lastSeq, true);
+      view.setFloat32(offset + 4, snap.heading, true);
+      view.setFloat64(offset + 8, snap.state.x, true);
+      view.setFloat64(offset + 16, snap.state.y, true);
+      view.setFloat64(offset + 24, snap.state.z, true);
+      view.setFloat32(offset + 32, snap.state.vx, true);
+      view.setFloat32(offset + 36, snap.state.vy, true);
+      view.setFloat32(offset + 40, snap.state.vz, true);
+      view.setFloat32(offset + 44, snap.state.jumpMsLeft, true);
+      bytes[offset + 48] = packResting(snap.state);
+      bytes[offset + 49] = Math.max(0, Math.min(255, snap.state.sleep));
+      bytes[offset + 50] = Math.max(0, Math.min(255, snap.state.jumpCount));
+      offset += RECORD_FIXED_BYTES;
+    }
+    packets.push(bytes);
+    group = [];
+    groupSize = SNAPSHOT_HEADER_BYTES;
+  };
+
+  for (const snap of players) {
+    const idBytes = textEncoder.encode(snap.id);
+    const size = recordSize(idBytes.length);
+    if (group.length > 0 && (groupSize + size > maxBytes || group.length >= 255)) {
+      flush();
+    }
+    group.push({ snap, idBytes });
+    groupSize += size;
+  }
+  flush();
+  return packets;
+}
+
+export function decodeSnapshots(bytes: Uint8Array): PlayerSnapshot[] | undefined {
+  if (bytes.length < SNAPSHOT_HEADER_BYTES || bytes[0] !== MAGIC_V || bytes[1] !== MAGIC_S) {
+    return undefined;
+  }
+  if (bytes[2] !== NET_CODEC_VERSION) {
+    return undefined;
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const count = bytes[3];
+  const players: PlayerSnapshot[] = [];
+  let offset = SNAPSHOT_HEADER_BYTES;
+  for (let i = 0; i < count; i++) {
+    if (offset + 1 > bytes.length) {
+      return undefined;
+    }
+    const idLength = bytes[offset++];
+    if (offset + idLength + RECORD_FIXED_BYTES > bytes.length) {
+      return undefined;
+    }
+    const id = textDecoder.decode(bytes.subarray(offset, offset + idLength));
+    offset += idLength;
+    const flags = bytes[offset + 48];
+    players.push({
+      id,
+      lastSeq: view.getUint32(offset, true),
+      heading: view.getFloat32(offset + 4, true),
+      state: {
+        x: view.getFloat64(offset + 8, true),
+        y: view.getFloat64(offset + 16, true),
+        z: view.getFloat64(offset + 24, true),
+        vx: view.getFloat32(offset + 32, true),
+        vy: view.getFloat32(offset + 36, true),
+        vz: view.getFloat32(offset + 40, true),
+        jumpMsLeft: view.getFloat32(offset + 44, true),
+        rx: unpackResting(flags, 0),
+        ry: unpackResting(flags, 2),
+        rz: unpackResting(flags, 4),
+        jumping: (flags & 64) !== 0,
+        sleep: bytes[offset + 49],
+        jumpCount: bytes[offset + 50],
+      },
+    });
+    offset += RECORD_FIXED_BYTES;
+  }
+  return players;
+}

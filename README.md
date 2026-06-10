@@ -32,6 +32,12 @@ Movement is **server-authoritative with client-side prediction and rollback**, r
 Datagrams carry everything frequent and loss-tolerant (inputs, snapshots); reliable streams
 carry only what must arrive (block edits, join/leave, chunk state).
 
+All high-frequency traffic is **binary** (`src/shared/netCodec.ts`): inputs are 12-byte
+packets (button bitfield + seq + heading) and snapshots are ~60 bytes per player (positions
+as f64 since they restore the prediction sim on ack; velocities/heading as f32; resting and
+jump flags bit-packed), split to fit the datagram size limit. Player names aren't repeated at
+20 Hz — they arrive once over the reliable channel (welcome roster + join messages).
+
 ### Chunk-scoped world sync
 
 Chunk voxel data never crosses the network — terrain regenerates deterministically on every

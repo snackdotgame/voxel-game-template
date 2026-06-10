@@ -9,9 +9,9 @@ import { Engine } from "noa-engine";
 import {
   type BlockEdit,
   type PlayerSnapshot,
-  parsePlayersMessage,
   parseServerStreamMessage,
 } from "./shared/messages.js";
+import { decodeSnapshots, encodeInput } from "./shared/netCodec.js";
 import {
   type CharInput,
   type CharState,
@@ -466,7 +466,7 @@ function simTick(): void {
   if (pending.length > 200) {
     pending.splice(0, pending.length - 100);
   }
-  void client.datagrams.send({ type: "input", ...input }).catch(() => {});
+  void client.datagrams.send(encodeInput(input)).catch(() => {});
 }
 
 // Fixed-step accumulator driven from the render loop: if worldgen or GC
@@ -538,12 +538,13 @@ function reconcile(snap: PlayerSnapshot) {
 type RemotePlayer = {
   entityId: number;
   rig: Rig;
-  name: string;
   target: CharState;
   heading: number;
 };
 
 const remotePlayers = new Map<string, RemotePlayer>();
+// id -> display name, from the welcome roster and join messages
+const playerNames = new Map<string, string>();
 
 function upsertRemotePlayer(snap: PlayerSnapshot): void {
   const existing = remotePlayers.get(snap.id);
@@ -566,7 +567,6 @@ function upsertRemotePlayer(snap: PlayerSnapshot): void {
   remotePlayers.set(snap.id, {
     entityId,
     rig,
-    name: snap.name,
     target: snap.state,
     heading: snap.heading,
   });
@@ -648,7 +648,7 @@ let connectionState = "connecting";
 let myName = "";
 
 function updateHud(): void {
-  const others = [...remotePlayers.values()].map((remote) => remote.name);
+  const others = [...remotePlayers.keys()].map((id) => playerNames.get(id) ?? "Player");
   hud.textContent =
     `Noa Voxels — ${connectionState}` +
     (myName ? ` as ${myName}` : "") +
@@ -707,7 +707,16 @@ async function readStreams(): Promise<void> {
     }
     if (message.type === "edit") {
       applyEdit(message);
+    } else if (message.type === "welcome") {
+      for (const entry of message.players) {
+        playerNames.set(entry.id, entry.name);
+      }
+      updateHud();
+    } else if (message.type === "join") {
+      playerNames.set(message.id, message.name);
+      updateHud();
     } else if (message.type === "leave") {
+      playerNames.delete(message.id);
       removeRemotePlayer(message.id);
     }
   }
@@ -716,12 +725,12 @@ async function readStreams(): Promise<void> {
 async function readDatagrams(): Promise<void> {
   while (true) {
     const event = await client.datagrams.recv();
-    const message = parsePlayersMessage(safeJson(event));
-    if (!message || myId === "") {
+    const players = decodeSnapshots(event.bytes);
+    if (!players || myId === "") {
       continue;
     }
     const seen = new Set<string>();
-    for (const player of message.players) {
+    for (const player of players) {
       if (player.id === myId) {
         reconcile(player);
         continue;
@@ -798,7 +807,7 @@ window.__voxels = {
   remotes: () =>
     [...remotePlayers.entries()].map(([id, remote]) => {
       const [x, y, z] = ents.getPosition(remote.entityId);
-      return { id, name: remote.name, x, y, z };
+      return { id, name: playerNames.get(id) ?? "Player", x, y, z };
     }),
   playerPosition: () => [predicted.x, predicted.y, predicted.z],
   connectionState: () => connectionState,

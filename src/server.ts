@@ -1,13 +1,14 @@
 import { server, type Connection, type DatagramEvent, type StreamEvent } from "minion:server";
+import { encodeSnapshots, decodeInput } from "./shared/netCodec.js";
 import {
   type BlockEdit,
-  type InputMessage,
   type PlayerSnapshot,
+  type RosterEntry,
   parseEditMessage,
-  parseInputMessage,
 } from "./shared/messages.js";
 import {
   SIM_TICK_MS,
+  type CharInput,
   type CharState,
   type Stepper,
   makeStepper,
@@ -39,7 +40,7 @@ type Player = {
   stepsThisTick: number;
   // inputs beyond the per-tick step budget wait here instead of dropping,
   // so client catch-up bursts don't force prediction rollbacks
-  inputQueue: InputMessage[];
+  inputQueue: CharInput[];
   syncedChunks: Set<string>;
   lastChunk: string;
 };
@@ -85,13 +86,14 @@ export async function main() {
         syncChunkWindow(world, id, player);
         players.push({
           id,
-          name: player.name,
           lastSeq: player.lastSeq,
           heading: player.heading,
           state: player.char,
         });
       }
-      server.datagrams.broadcast({ type: "players", players });
+      for (const packet of encodeSnapshots(players, server.datagrams.maxSize)) {
+        server.datagrams.broadcast(packet);
+      }
     }
 
     await Promise.race([server.sleep(SIM_TICK_MS), pumps]);
@@ -199,7 +201,7 @@ async function pumpEdits(world: World) {
 }
 
 function handleInput(world: World, event: DatagramEvent) {
-  const message = parseInputMessage(safeJson(event));
+  const message = decodeInput(event.bytes);
   if (!message) {
     return;
   }
@@ -227,7 +229,7 @@ function handleInput(world: World, event: DatagramEvent) {
   applyInput(world, player, message);
 }
 
-function applyInput(world: World, player: Player, message: InputMessage) {
+function applyInput(world: World, player: Player, message: CharInput) {
   player.char = world.step(player.char, message);
   player.heading = message.heading;
   player.lastSeq = message.seq;
@@ -276,8 +278,12 @@ function syncConnections(world: World) {
       continue;
     }
 
+    const roster: RosterEntry[] = [];
+    for (const [id, player] of world.players) {
+      roster.push({ id, name: player.name });
+    }
     addPlayer(world, connection);
-    connection.streams.send({ type: "welcome", you: connection.id });
+    connection.streams.send({ type: "welcome", you: connection.id, players: roster });
   }
 
   for (const id of world.lastSeen.keys()) {

@@ -1,10 +1,11 @@
-import type { CharInput, CharState } from "./sim.js";
+import type { CharState } from "./sim.js";
 
 export const READY_MESSAGE = "ready";
 
+// One player's authoritative state, carried in binary snapshot datagrams
+// (see netCodec.ts). Names travel separately on the reliable channel.
 export type PlayerSnapshot = {
   id: string;
-  name: string;
   // last input sequence number the server has applied for this player;
   // clients use it to ack prediction history and reconcile
   lastSeq: number;
@@ -19,10 +20,6 @@ export type BlockEdit = {
   z: number;
 };
 
-// Client -> server, sent as datagrams every sim tick (frequent, loss-tolerant;
-// a lost input shows up as a prediction mismatch and gets rolled back).
-export type InputMessage = { type: "input" } & CharInput;
-
 // Client -> server, sent as reliable stream messages.
 export type EditMessage = {
   type: "edit";
@@ -32,16 +29,17 @@ export type EditMessage = {
   z: number;
 };
 
-// Server -> client, datagram snapshot of authoritative player states.
-export type PlayersMessage = {
-  type: "players";
-  players: PlayerSnapshot[];
+// Server -> client stream messages.
+export type RosterEntry = {
+  id: string;
+  name: string;
 };
 
-// Server -> client stream messages.
 export type WelcomeMessage = {
   type: "welcome";
   you: string;
+  // players already in the session, so names resolve before their first join
+  players: RosterEntry[];
 };
 
 export type JoinMessage = {
@@ -65,28 +63,6 @@ function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
-export function parseInputMessage(value: unknown): InputMessage | undefined {
-  if (
-    isRecord(value) &&
-    value.type === "input" &&
-    Number.isInteger(value.seq) &&
-    isFiniteNumber(value.heading)
-  ) {
-    return {
-      type: "input",
-      seq: value.seq as number,
-      heading: value.heading,
-      fwd: value.fwd === true,
-      back: value.back === true,
-      left: value.left === true,
-      right: value.right === true,
-      jump: value.jump === true,
-      sprint: value.sprint === true,
-    };
-  }
-  return undefined;
-}
-
 export function parseEditMessage(value: unknown): EditMessage | undefined {
   if (
     isRecord(value) &&
@@ -107,84 +83,20 @@ export function parseEditMessage(value: unknown): EditMessage | undefined {
   return undefined;
 }
 
-function parseCharState(value: unknown): CharState | undefined {
-  if (
-    isRecord(value) &&
-    isFiniteNumber(value.x) &&
-    isFiniteNumber(value.y) &&
-    isFiniteNumber(value.z) &&
-    isFiniteNumber(value.vx) &&
-    isFiniteNumber(value.vy) &&
-    isFiniteNumber(value.vz) &&
-    isFiniteNumber(value.rx) &&
-    isFiniteNumber(value.ry) &&
-    isFiniteNumber(value.rz) &&
-    isFiniteNumber(value.jumpCount) &&
-    isFiniteNumber(value.jumpMsLeft) &&
-    isFiniteNumber(value.sleep)
-  ) {
-    return {
-      x: value.x,
-      y: value.y,
-      z: value.z,
-      vx: value.vx,
-      vy: value.vy,
-      vz: value.vz,
-      rx: value.rx,
-      ry: value.ry,
-      rz: value.rz,
-      jumpCount: value.jumpCount,
-      jumpMsLeft: value.jumpMsLeft,
-      jumping: value.jumping === true,
-      sleep: value.sleep,
-    };
-  }
-  return undefined;
-}
-
-export function parsePlayerSnapshot(value: unknown): PlayerSnapshot | undefined {
-  if (
-    !isRecord(value) ||
-    typeof value.id !== "string" ||
-    typeof value.name !== "string" ||
-    !Number.isInteger(value.lastSeq) ||
-    !isFiniteNumber(value.heading)
-  ) {
-    return undefined;
-  }
-  const state = parseCharState(value.state);
-  if (!state) {
-    return undefined;
-  }
-  return {
-    id: value.id,
-    name: value.name,
-    lastSeq: value.lastSeq as number,
-    heading: value.heading,
-    state,
-  };
-}
-
-export function parsePlayersMessage(value: unknown): PlayersMessage | undefined {
-  if (!isRecord(value) || value.type !== "players" || !Array.isArray(value.players)) {
-    return undefined;
-  }
-  const players: PlayerSnapshot[] = [];
-  for (const entry of value.players) {
-    const player = parsePlayerSnapshot(entry);
-    if (player) {
-      players.push(player);
-    }
-  }
-  return { type: "players", players };
-}
-
 export function parseServerStreamMessage(value: unknown): ServerStreamMessage | undefined {
   if (!isRecord(value)) {
     return undefined;
   }
   if (value.type === "welcome" && typeof value.you === "string") {
-    return { type: "welcome", you: value.you };
+    const players: RosterEntry[] = [];
+    if (Array.isArray(value.players)) {
+      for (const entry of value.players) {
+        if (isRecord(entry) && typeof entry.id === "string" && typeof entry.name === "string") {
+          players.push({ id: entry.id, name: entry.name });
+        }
+      }
+    }
+    return { type: "welcome", you: value.you, players };
   }
   if (value.type === "edit") {
     return parseEditMessage(value);
