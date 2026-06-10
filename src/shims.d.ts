@@ -1,8 +1,14 @@
-// Type shims for noa-engine's untyped transitive dependencies, so the
+// Type shims for noa's untyped transitive dependencies, so the
 // EventEmitter/ECS base classes in noa's declarations resolve.
 declare module "events";
 declare module "ent-comp";
 declare module "gl-vec3";
+declare module "ndarray";
+declare module "fast-voxel-raycast";
+declare module "game-inputs";
+declare module "micro-game-shell";
+declare module "voxel-aabb-sweep";
+declare module "box-intersect";
 
 // Shapes for the physics modules the shared sim drives directly.
 declare module "aabb-3d" {
@@ -33,6 +39,8 @@ declare module "voxel-physics-engine" {
     _forces: number[];
     _impulses: number[];
     _sleepFrameCount: number;
+    onCollide: ((impulse: number[]) => void) | null;
+    onStep: (() => void) | null;
     applyForce(f: number[]): void;
     applyImpulse(i: number[]): void;
     atRestY(): number;
@@ -57,26 +65,4 @@ declare module "voxel-physics-engine" {
     testSolid: (x: number, y: number, z: number) => boolean,
     testFluid: (x: number, y: number, z: number) => boolean,
   ) => PhysicsWorld;
-}
-
-declare module "noa-engine/src/components/movement.js" {
-  export class MovementState {
-    heading: number;
-    running: boolean;
-    jumping: boolean;
-    maxSpeed: number;
-    moveForce: number;
-    responsiveness: number;
-    runningFriction: number;
-    standingFriction: number;
-    airMoveMult: number;
-    jumpImpulse: number;
-    jumpForce: number;
-    jumpTime: number;
-    airJumps: number;
-    _jumpCount: number;
-    _currjumptime: number;
-    _isJumping: boolean;
-  }
-  export function applyMovementPhysics(dt: number, state: MovementState, body: unknown): void;
 }

@@ -10,8 +10,9 @@ animate as they move. Block edits are shared live and replayed to anyone who joi
 Movement is **server-authoritative with client-side prediction and rollback**, running
 **noa's exact physics on both sides**:
 
-- `vendor/noa` — noa-engine 0.33 vendored as an npm workspace, with one patch: its internal
-  movement controller (`applyMovementPhysics`) is exported so the headless sim can drive it.
+- `src/noa` — noa-engine 0.33 vendored into the source tree and converted to TypeScript,
+  with one patch: its internal movement controller (`applyMovementPhysics`) is exported so
+  the headless sim can drive it.
 - `src/shared/sim.ts` — a fixed-tick (20 Hz) stepper around noa's `voxel-physics-engine`
   rigid body + noa's movement controller (auto-step, Quake-style acceleration, variable-height
   jumps). The body and movement state are fully captured into a plain `CharState` after every

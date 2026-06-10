@@ -6,7 +6,7 @@ import { CreateBox } from "@babylonjs/core/Meshes/Builders/boxBuilder";
 import { Mesh } from "@babylonjs/core/Meshes/mesh";
 import { TransformNode } from "@babylonjs/core/Meshes/transformNode";
 import { client } from "minion:client";
-import { Engine } from "noa-engine";
+import { Engine } from "./noa/index.js";
 import {
   type BlockEdit,
   type PlayerSnapshot,

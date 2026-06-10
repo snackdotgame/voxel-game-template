@@ -2,13 +2,13 @@
 // client (prediction) and the server (authority).
 //
 // This is noa's exact player physics: a voxel-physics-engine rigid body
-// driven by noa's own movement controller (vendored in vendor/noa, which
+// driven by noa's own movement controller (vendored in src/noa, which
 // exports applyMovementPhysics). The body state is fully captured into a
 // plain CharState after every step so the client can roll back to a
 // server state and replay pending inputs through the same code.
 
 import aabb from "aabb-3d";
-import { MovementState, applyMovementPhysics } from "noa-engine/src/components/movement.js";
+import { MovementState, applyMovementPhysics } from "../noa/components/movement.js";
 import { Physics } from "voxel-physics-engine";
 
 export const SIM_TICK_MS = 50;
