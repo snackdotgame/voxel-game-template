@@ -1,4 +1,4 @@
-import { NearestFilter, TextureLoader } from "three";
+import { NearestFilter, RepeatWrapping, TextureLoader } from "three";
 import type { Material, MeshLambertMaterial } from "three";
 
 import type { Engine as NoaEngine } from "../index";
@@ -142,10 +142,22 @@ function createTerrainMat(self: TerrainMatManager, blockMatID = 0): Material {
     throw new Error("Texture-atlas terrain materials are not supported by the three.js renderer");
   }
 
-  // remaining case is a new material with a diffuse texture
+  // remaining case is a new material with a diffuse texture.
+  // The texture settings reproduce how the original engine created
+  // Babylon textures (`new Texture(url, scene, true, false, NEAREST)`):
+  // - Babylon's default address mode is wrap/repeat (three defaults to
+  //   clamp-to-edge, which smears the greedy mesher's multi-tile and
+  //   negative UV ranges)
+  // - noa passed invertY=false (three's flipY=true would vertically
+  //   mirror every face relative to the mesher's UV math)
+  // - noMipmap=true
   var mat = makeTerrainMaterial(self.noa, "terrain-textured-" + blockMatID);
   var texURL = matInfo.texture;
   var tex = new TextureLoader().load(texURL);
+  tex.wrapS = RepeatWrapping;
+  tex.wrapT = RepeatWrapping;
+  tex.flipY = false;
+  tex.generateMipmaps = false;
   tex.magFilter = NearestFilter;
   tex.minFilter = NearestFilter;
   if (matInfo.texHasAlpha) mat.alphaTest = 0.5;
