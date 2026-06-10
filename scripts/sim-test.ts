@@ -64,7 +64,7 @@ function check(label: string, ok: boolean, detail = "") {
   for (let i = 0; i < 40; i++) s = step(s, input(++seq, { fwd: true })); // 2s
   const dist = Math.hypot(s.x - start.x, s.z - start.z);
   console.log("walked:", dist.toFixed(2), "blocks in 2s,", fmt(s));
-  check("walking covers ~2x maxSpeed in 2s", dist > 8 && dist < 14, `${dist.toFixed(2)} blocks`);
+  check("walking covers ~2x maxSpeed in 2s", dist > 7 && dist < 10, `${dist.toFixed(2)} blocks`);
 }
 
 // 3. jumping

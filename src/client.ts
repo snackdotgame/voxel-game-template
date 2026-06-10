@@ -468,7 +468,8 @@ function buildRig(name: string, hueShiftDegrees: number): Rig {
 // src/animation.ts) and minecraft-web-client (MIT, zardoy/minecraft-web-client
 // renderer/viewer/three/entity/animations.js). Sign convention verified:
 // negative rotation.x swings a limb forward in our rig, matching theirs.
-const RUN_SPEED_THRESHOLD = 7;
+// between vanilla walk (4.317) and sprint (5.612) ground speeds
+const RUN_SPEED_THRESHOLD = 5;
 
 function animateRig(rig: Rig, speed: number, grounded: boolean, dtSec: number, swinging = false) {
   rig.idleT += dtSec;

@@ -17,8 +17,9 @@ export const CHAR_WIDTH = 0.6;
 export const CHAR_HEIGHT = 1.8;
 const HALF_W = CHAR_WIDTH / 2;
 
-const WALK_SPEED = 6;
-const SPRINT_SPEED = 9.5;
+// vanilla Minecraft ground speeds: walk 4.317 blocks/s, sprint +30%
+const WALK_SPEED = 4.317;
+const SPRINT_SPEED = 5.612;
 
 export type CharInput = {
   seq: number;
@@ -91,9 +92,10 @@ export function makeStepper(isSolid: IsSolid, isFluid: IsSolid = () => false): S
 
   const move = new MovementState();
   move.airJumps = 0;
-  // noa's defaults launch ~4 blocks; tune to a Minecraft-ish single-block hop
-  move.jumpImpulse = 8.5;
-  move.jumpTime = 150;
+  // vanilla jump apex is ~1.25 blocks with a fixed height (holding jump
+  // does not extend it): pure impulse, no hold time
+  move.jumpImpulse = 7.7;
+  move.jumpTime = 0;
 
   return (prev, input) => {
     // restore the body from the previous tick's snapshot
