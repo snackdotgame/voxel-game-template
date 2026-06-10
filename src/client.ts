@@ -12,8 +12,13 @@ import {
   type PlayerSnapshot,
   parseServerStreamMessage,
 } from "./shared/messages.js";
-import { decodeSnapshots, encodeInput } from "./shared/netCodec.js";
-import { HAND, ITEMS, PICKAXE, AXE, SHOVEL } from "./shared/items.js";
+import {
+  type ProjectileSnapshot,
+  decodeProjectiles,
+  decodeSnapshots,
+  encodeInput,
+} from "./shared/netCodec.js";
+import { HAND, ITEMS, PICKAXE, AXE, SHOVEL, ROCK, SNOWBALL, isThrowable } from "./shared/items.js";
 import {
   type CharInput,
   type CharState,
@@ -443,6 +448,20 @@ function buildToolMesh(name: string, item: number): Mesh | null {
     mesh.rotation.z = tiltZ;
   };
 
+  if (item === ROCK) {
+    part("rock", 0.22, 0.18, 0.2, colorMaterial("tool-rock", "#7d756b"), 0, 0, 0, 0.3);
+    for (const mesh of root.getChildMeshes()) {
+      noa.rendering.addMeshToScene(mesh);
+    }
+    return root;
+  }
+  if (item === SNOWBALL) {
+    part("snowball", 0.18, 0.18, 0.18, colorMaterial("tool-snow", "#eef3f6"), 0, 0, 0, 0.78);
+    for (const mesh of root.getChildMeshes()) {
+      noa.rendering.addMeshToScene(mesh);
+    }
+    return root;
+  }
   part("handle", 0.06, 0.55, 0.06, wood, 0, 0, 0);
   if (item === PICKAXE) {
     part("head", 0.44, 0.07, 0.07, metal, 0, 0.28, 0);
@@ -530,6 +549,54 @@ for (let slot = 0; slot < ITEMS.length; slot++) {
 }
 noa.inputs.bind("toggle-view", "KeyV");
 noa.inputs.down.on("toggle-view", () => setFirstPerson(!firstPerson));
+
+// throw the equipped item along the camera's view direction (Q / middle mouse)
+noa.inputs.down.on("mid-fire", () => {
+  if (!isThrowable(equippedItem)) {
+    showNotice("Nothing throwable equipped — try the rock (5)");
+    return;
+  }
+  swingT = 1;
+  const dir = noa.rendering.camera.getForwardRay().direction;
+  void client.streams.send({ type: "throw", dx: dir.x, dy: dir.y, dz: dir.z }).catch(() => {});
+});
+
+/*
+ *      Projectiles: rendered from server broadcasts, interpolated and spun
+ */
+
+type ProjectileView = {
+  entityId: number;
+  mesh: Mesh;
+  target: ProjectileSnapshot;
+};
+
+const projectileViews = new Map<number, ProjectileView>();
+
+function applyProjectiles(snapshots: ProjectileSnapshot[]): void {
+  const seen = new Set<number>();
+  for (const snap of snapshots) {
+    seen.add(snap.id);
+    const existing = projectileViews.get(snap.id);
+    if (existing) {
+      existing.target = snap;
+      continue;
+    }
+    const mesh = buildToolMesh(`proj-${snap.id}`, snap.item);
+    if (!mesh) {
+      continue;
+    }
+    mesh.scaling.setAll(0.8);
+    const entityId = ents.add([snap.x, snap.y, snap.z], 0.2, 0.2, mesh, [0, 0, 0], false, false);
+    projectileViews.set(snap.id, { entityId, mesh, target: snap });
+  }
+  for (const [id, view] of projectileViews) {
+    if (!seen.has(id)) {
+      projectileViews.delete(id);
+      ents.deleteEntity(view.entityId, true);
+    }
+  }
+}
 
 /*
  *      Local player: third-person camera + own rig
@@ -768,6 +835,19 @@ noa.on("beforeRender", () => {
     viewModel.position.y = VIEW_MODEL_POS[1];
   }
 
+  // projectiles: ease toward broadcast positions, tumbling as they fly
+  const pt = 1 - Math.exp(-dtSec * 18);
+  for (const view of projectileViews.values()) {
+    const current = ents.getPosition(view.entityId);
+    ents.setPosition(
+      view.entityId,
+      current[0] + (view.target.x - current[0]) * pt,
+      current[1] + (view.target.y - current[1]) * pt,
+      current[2] + (view.target.z - current[2]) * pt,
+    );
+    view.mesh.rotation.x += dtSec * 9;
+  }
+
   // remote players: ease toward their latest authoritative state
   const t = 1 - Math.exp(-dtSec * 12);
   for (const remote of remotePlayers.values()) {
@@ -834,7 +914,7 @@ function updateHud(): void {
     `\nPrediction rollbacks: ${rollbacks}` +
     `\n${hotbar}` +
     `\nWASD move, shift sprint, space jump, V ${firstPerson ? "third" : "first"}-person` +
-    "\nLeft-click dig, right-click/E place, scroll zoom" +
+    "\nLeft-click dig, right-click/E place, Q throw, scroll zoom" +
     (notice ? `\n>> ${notice}` : "");
 }
 updateHud();
@@ -916,6 +996,11 @@ async function readStreams(): Promise<void> {
 async function readDatagrams(): Promise<void> {
   while (true) {
     const event = await client.datagrams.recv();
+    const projectiles = decodeProjectiles(event.bytes);
+    if (projectiles) {
+      applyProjectiles(projectiles);
+      continue;
+    }
     const players = decodeSnapshots(event.bytes);
     if (!players || myId === "") {
       continue;
@@ -979,6 +1064,7 @@ declare global {
       remoteCount(): number;
       remotes(): { id: string; name: string; item: number; x: number; y: number; z: number }[];
       equipped(): number;
+      projectileCount(): number;
       playerPosition(): number[];
       connectionState(): string;
       rollbacks(): number;
@@ -1002,6 +1088,7 @@ window.__voxels = {
       return { id, name: playerNames.get(id) ?? "Player", item: remote.item, x, y, z };
     }),
   equipped: () => equippedItem,
+  projectileCount: () => projectileViews.size,
   playerPosition: () => [predicted.x, predicted.y, predicted.z],
   connectionState: () => connectionState,
   rollbacks: () => rollbacks,

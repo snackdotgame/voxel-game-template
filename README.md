@@ -69,10 +69,20 @@ clothing so everyone looks different.
 ### Equipment and views
 
 V toggles first/third person (first person gets a camera-attached arm + held-item view
-model). The hotbar (keys 1-4) equips hand, pickaxe, axe, or shovel as procedural box models
-held in the right hand, with a swing animation on dig/place. Stone and ores require the
-pickaxe. The equipped item id rides in the binary snapshots, so everyone sees what everyone
-is holding.
+model). The hotbar (keys 1-6) equips hand, pickaxe, axe, shovel, rock, or snowball as
+procedural box models held in the right hand, with a swing animation on dig/place. Stone and
+ores require the pickaxe. The equipped item id rides in the binary snapshots, so everyone
+sees what everyone is holding.
+
+### Projectiles
+
+Q (or middle-click) throws the equipped item along the view direction. Every item except the
+bare hand is throwable, each with its own throw speed — and therefore distance: a rock flies
+far, a snowball decently, tools are heavy and land short. Projectiles are simulated
+server-side (ballistic arc, voxel collision, 5s lifetime) and broadcast as compact binary
+datagrams; clients render them as tumbling meshes on interpolated entities. Hitting another
+player applies a per-item knockback impulse to their authoritative state, which reaches the
+hit player's own screen through the normal prediction-rollback path — no special casing.
 
 ### Asset credits
 

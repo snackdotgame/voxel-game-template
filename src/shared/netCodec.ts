@@ -33,9 +33,18 @@
 import type { PlayerSnapshot } from "./messages.js";
 import type { CharInput, CharState } from "./sim.js";
 
+export type ProjectileSnapshot = {
+  id: number;
+  item: number;
+  x: number;
+  y: number;
+  z: number;
+};
+
 const MAGIC_V = 0x56;
 const MAGIC_I = 0x49;
 const MAGIC_S = 0x53;
+const MAGIC_P = 0x50;
 export const NET_CODEC_VERSION = 2;
 
 const INPUT_BYTES = 12;
@@ -164,6 +173,70 @@ export function encodeSnapshots(
   }
   flush();
   return packets;
+}
+
+/*
+ *      Projectiles
+ *
+ *  Packet 'VP': header (4 bytes: magic, version, count u8), then 15-byte
+ *  records: id u16, item u8, x/y/z f32. Render-only, so f32 is plenty.
+ */
+
+const PROJ_RECORD_BYTES = 15;
+
+export function encodeProjectiles(
+  projectiles: readonly ProjectileSnapshot[],
+  maxBytes: number,
+): Uint8Array[] {
+  const perPacket = Math.max(1, Math.min(255, Math.floor((maxBytes - 4) / PROJ_RECORD_BYTES)));
+  const packets: Uint8Array[] = [];
+  for (let start = 0; start === 0 || start < projectiles.length; start += perPacket) {
+    const group = projectiles.slice(start, start + perPacket);
+    const bytes = new Uint8Array(4 + group.length * PROJ_RECORD_BYTES);
+    const view = new DataView(bytes.buffer);
+    bytes[0] = MAGIC_V;
+    bytes[1] = MAGIC_P;
+    bytes[2] = NET_CODEC_VERSION;
+    bytes[3] = group.length;
+    let offset = 4;
+    for (const proj of group) {
+      view.setUint16(offset, proj.id, true);
+      bytes[offset + 2] = proj.item;
+      view.setFloat32(offset + 3, proj.x, true);
+      view.setFloat32(offset + 7, proj.y, true);
+      view.setFloat32(offset + 11, proj.z, true);
+      offset += PROJ_RECORD_BYTES;
+    }
+    packets.push(bytes);
+  }
+  return packets;
+}
+
+export function decodeProjectiles(bytes: Uint8Array): ProjectileSnapshot[] | undefined {
+  if (bytes.length < 4 || bytes[0] !== MAGIC_V || bytes[1] !== MAGIC_P) {
+    return undefined;
+  }
+  if (bytes[2] !== NET_CODEC_VERSION) {
+    return undefined;
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const count = bytes[3];
+  if (bytes.length < 4 + count * PROJ_RECORD_BYTES) {
+    return undefined;
+  }
+  const projectiles: ProjectileSnapshot[] = [];
+  let offset = 4;
+  for (let i = 0; i < count; i++) {
+    projectiles.push({
+      id: view.getUint16(offset, true),
+      item: bytes[offset + 2],
+      x: view.getFloat32(offset + 3, true),
+      y: view.getFloat32(offset + 7, true),
+      z: view.getFloat32(offset + 11, true),
+    });
+    offset += PROJ_RECORD_BYTES;
+  }
+  return projectiles;
 }
 
 export function decodeSnapshots(bytes: Uint8Array): PlayerSnapshot[] | undefined {

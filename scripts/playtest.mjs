@@ -221,6 +221,64 @@ try {
     "player1 back to third person",
   );
 
+  // projectiles: lob a rock upward and verify it broadcasts while in flight
+  await p1.page.keyboard.press("5");
+  await waitFor(
+    p1.frame,
+    () => window.__voxels.equipped() === 4,
+    null,
+    "player1 equipped the rock",
+  );
+  await p1.frame.evaluate(() => {
+    const noa = window.__voxels.noa;
+    noa.camera.pitch = -1.1;
+  });
+  await p1.page.waitForTimeout(150);
+  await p1.frame.evaluate(() => {
+    const noa = window.__voxels.noa;
+    if (noa.rendering.camera.getForwardRay().direction.y < 0.3) {
+      noa.camera.pitch = 1.1;
+    }
+  });
+  await p1.page.waitForTimeout(150);
+  await p1.page.keyboard.press("q");
+  await waitFor(
+    p1.frame,
+    () => window.__voxels.projectileCount() > 0,
+    null,
+    "thrown rock is visible in flight",
+    5000,
+  );
+  await waitFor(
+    p2.frame,
+    () => window.__voxels.projectileCount() > 0,
+    null,
+    "player2 sees the rock too",
+    5000,
+  );
+
+  // now hit player2 with one; the knockback lands as a server-side velocity
+  // change that reaches p2's own client through prediction rollback
+  const p2Before = await p2.frame.evaluate(() => window.__voxels.playerPosition());
+  await p1.frame.evaluate((target) => {
+    const v = window.__voxels;
+    const pos = v.playerPosition();
+    v.noa.camera.heading = Math.atan2(target[0] - pos[0], target[2] - pos[2]);
+    v.noa.camera.pitch = 0;
+  }, p2Before);
+  await p1.page.waitForTimeout(150);
+  await p1.page.keyboard.press("q");
+  await waitFor(
+    p2.frame,
+    (before) => {
+      const pos = window.__voxels.playerPosition();
+      return Math.hypot(pos[0] - before[0], pos[2] - before[2]) > 0.4;
+    },
+    p2Before,
+    "player2 knocked back by the rock",
+    8000,
+  );
+
   // chunk-scoped sync: an edit in a far-away chunk (nobody nearby) must not
   // be delivered to other players' edit state
   await p1.frame.evaluate(() => window.__voxels.setBlockAt(2, 3000, 10, 3000));

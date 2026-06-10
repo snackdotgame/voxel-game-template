@@ -1,12 +1,18 @@
 import { server, type Connection, type DatagramEvent, type StreamEvent } from "minion:server";
-import { encodeSnapshots, decodeInput } from "./shared/netCodec.js";
-import { isValidItem } from "./shared/items.js";
+import {
+  type ProjectileSnapshot,
+  decodeInput,
+  encodeProjectiles,
+  encodeSnapshots,
+} from "./shared/netCodec.js";
+import { KNOCKBACK, THROW_SPEED, isThrowable, isValidItem } from "./shared/items.js";
 import {
   type BlockEdit,
   type PlayerSnapshot,
   type RosterEntry,
   parseEditMessage,
   parseEquipMessage,
+  parseThrowMessage,
 } from "./shared/messages.js";
 import {
   SIM_TICK_MS,
@@ -34,6 +40,10 @@ const STALE_MS = 5_000;
 const SYNC_RADIUS = 4;
 const UNSYNC_RADIUS = 6;
 
+const PROJECTILE_GRAVITY = -16;
+const PROJECTILE_TTL_MS = 5_000;
+const MAX_PROJECTILES = 256;
+
 type Player = {
   name: string;
   char: CharState;
@@ -48,6 +58,19 @@ type Player = {
   lastChunk: string;
 };
 
+type Projectile = {
+  id: number;
+  item: number;
+  owner: string;
+  x: number;
+  y: number;
+  z: number;
+  vx: number;
+  vy: number;
+  vz: number;
+  ttlMs: number;
+};
+
 type World = {
   players: Map<string, Player>;
   lastSeen: Map<string, number>;
@@ -55,6 +78,10 @@ type World = {
   edits: Map<string, Map<string, BlockEdit>>;
   editCount: number;
   step: Stepper;
+  isSolid: (x: number, y: number, z: number) => boolean;
+  projectiles: Map<number, Projectile>;
+  nextProjectileId: number;
+  hadProjectiles: boolean;
 };
 
 export async function main() {
@@ -68,6 +95,10 @@ export async function main() {
     edits,
     editCount: 0,
     step: makeStepper(isSolid),
+    isSolid,
+    projectiles: new Map(),
+    nextProjectileId: 1,
+    hadProjectiles: false,
   };
 
   // recv() rejects when the runtime is shutting down; the pumps ending is
@@ -80,6 +111,7 @@ export async function main() {
   while (server.running && !stopped) {
     syncConnections(world);
     dropStalePlayers(world);
+    stepProjectiles(world);
 
     if (world.players.size > 0) {
       const players: PlayerSnapshot[] = [];
@@ -98,6 +130,19 @@ export async function main() {
       for (const packet of encodeSnapshots(players, server.datagrams.maxSize)) {
         server.datagrams.broadcast(packet);
       }
+    }
+
+    // broadcast projectile positions; one trailing empty packet clears
+    // them client-side after the last projectile despawns
+    if (world.projectiles.size > 0 || world.hadProjectiles) {
+      const snapshots: ProjectileSnapshot[] = [];
+      for (const proj of world.projectiles.values()) {
+        snapshots.push({ id: proj.id, item: proj.item, x: proj.x, y: proj.y, z: proj.z });
+      }
+      for (const packet of encodeProjectiles(snapshots, server.datagrams.maxSize)) {
+        server.datagrams.broadcast(packet);
+      }
+      world.hadProjectiles = world.projectiles.size > 0;
     }
 
     await Promise.race([server.sleep(SIM_TICK_MS), pumps]);
@@ -214,7 +259,98 @@ function handleStream(world: World, event: StreamEvent) {
     }
     return;
   }
+  const throwMsg = parseThrowMessage(value);
+  if (throwMsg) {
+    handleThrow(world, event.connection.id, throwMsg.dx, throwMsg.dy, throwMsg.dz);
+    return;
+  }
   handleEdit(world, event, value);
+}
+
+/*
+ *      Projectiles: server-authoritative ballistics
+ */
+
+function handleThrow(world: World, ownerId: string, dx: number, dy: number, dz: number) {
+  const player = world.players.get(ownerId);
+  if (!player || !isThrowable(player.item) || world.projectiles.size >= MAX_PROJECTILES) {
+    return;
+  }
+  const len = Math.hypot(dx, dy, dz);
+  if (len < 1e-6) {
+    return;
+  }
+  const nx = dx / len;
+  const ny = dy / len;
+  const nz = dz / len;
+  const speed = THROW_SPEED[player.item];
+  const id = world.nextProjectileId;
+  world.nextProjectileId = (world.nextProjectileId + 1) % 65536 || 1;
+  world.projectiles.set(id, {
+    id,
+    item: player.item,
+    owner: ownerId,
+    // spawn at eye height, pushed forward clear of the thrower's AABB
+    x: player.char.x + nx * 0.9,
+    y: player.char.y + 1.5 + ny * 0.9,
+    z: player.char.z + nz * 0.9,
+    vx: nx * speed,
+    vy: ny * speed,
+    vz: nz * speed,
+    ttlMs: PROJECTILE_TTL_MS,
+  });
+}
+
+function stepProjectiles(world: World) {
+  const dt = SIM_TICK_MS / 1000;
+  for (const proj of world.projectiles.values()) {
+    proj.ttlMs -= SIM_TICK_MS;
+    if (proj.ttlMs <= 0) {
+      world.projectiles.delete(proj.id);
+      continue;
+    }
+    proj.vy += PROJECTILE_GRAVITY * dt;
+
+    // substep so fast projectiles don't tunnel through blocks or players
+    const steps = 3;
+    let alive = true;
+    for (let s = 0; s < steps && alive; s++) {
+      proj.x += (proj.vx * dt) / steps;
+      proj.y += (proj.vy * dt) / steps;
+      proj.z += (proj.vz * dt) / steps;
+      if (world.isSolid(Math.floor(proj.x), Math.floor(proj.y), Math.floor(proj.z))) {
+        alive = false;
+        break;
+      }
+      for (const [id, player] of world.players) {
+        if (id === proj.owner) {
+          continue;
+        }
+        const c = player.char;
+        if (
+          Math.abs(proj.x - c.x) <= 0.45 &&
+          proj.y >= c.y - 0.1 &&
+          proj.y <= c.y + 1.9 &&
+          Math.abs(proj.z - c.z) <= 0.45
+        ) {
+          // knockback: server-side velocity change that reaches the hit
+          // player's own client as a prediction rollback
+          const kb = KNOCKBACK[proj.item];
+          const hlen = Math.hypot(proj.vx, proj.vz) || 1;
+          c.vx += (proj.vx / hlen) * kb;
+          c.vz += (proj.vz / hlen) * kb;
+          c.vy += kb * 0.5;
+          c.ry = 0;
+          c.sleep = 10;
+          alive = false;
+          break;
+        }
+      }
+    }
+    if (!alive) {
+      world.projectiles.delete(proj.id);
+    }
+  }
 }
 
 function handleInput(world: World, event: DatagramEvent) {

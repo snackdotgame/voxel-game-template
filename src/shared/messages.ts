@@ -41,6 +41,27 @@ export function parseEquipMessage(value: unknown): EquipMessage | undefined {
   return undefined;
 }
 
+// Client -> server: throw the equipped item along a view direction.
+export type ThrowMessage = {
+  type: "throw";
+  dx: number;
+  dy: number;
+  dz: number;
+};
+
+export function parseThrowMessage(value: unknown): ThrowMessage | undefined {
+  if (
+    isRecord(value) &&
+    value.type === "throw" &&
+    isFiniteNumber(value.dx) &&
+    isFiniteNumber(value.dy) &&
+    isFiniteNumber(value.dz)
+  ) {
+    return { type: "throw", dx: value.dx, dy: value.dy, dz: value.dz };
+  }
+  return undefined;
+}
+
 // Client -> server, sent as reliable stream messages.
 export type EditMessage = {
   type: "edit";
