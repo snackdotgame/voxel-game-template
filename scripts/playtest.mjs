@@ -188,6 +188,39 @@ try {
     "player1 sees 2 remote players",
   );
 
+  // equipment: p1 equips the pickaxe; p2 must see it on p1's rig via snapshots
+  await p1.page.keyboard.press("2");
+  await waitFor(
+    p1.frame,
+    () => window.__voxels.equipped() === 1,
+    null,
+    "player1 equipped the pickaxe",
+  );
+  await waitFor(
+    p2.frame,
+    () => window.__voxels.remotes().some((r) => r.item === 1),
+    null,
+    "player2 sees player1 holding the pickaxe",
+  );
+
+  // first-person toggle
+  await p1.page.keyboard.press("v");
+  await waitFor(
+    p1.frame,
+    () => window.__voxels.noa.camera.zoomDistance === 0,
+    null,
+    "player1 toggled to first person",
+  );
+  await p1.page.waitForTimeout(400);
+  await p1.page.screenshot({ path: `${SHOTS}first-person.png` });
+  await p1.page.keyboard.press("v");
+  await waitFor(
+    p1.frame,
+    () => window.__voxels.noa.camera.zoomDistance === 6,
+    null,
+    "player1 back to third person",
+  );
+
   // chunk-scoped sync: an edit in a far-away chunk (nobody nearby) must not
   // be delivered to other players' edit state
   await p1.frame.evaluate(() => window.__voxels.setBlockAt(2, 3000, 10, 3000));

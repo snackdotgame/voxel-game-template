@@ -10,6 +10,8 @@ export type PlayerSnapshot = {
   // clients use it to ack prediction history and reconcile
   lastSeq: number;
   heading: number;
+  // equipped item id (see ITEMS in items.ts)
+  item: number;
   state: CharState;
 };
 
@@ -19,6 +21,25 @@ export type BlockEdit = {
   y: number;
   z: number;
 };
+
+// Client -> server, sent as a reliable stream message on hotbar change.
+export type EquipMessage = {
+  type: "equip";
+  item: number;
+};
+
+export function parseEquipMessage(value: unknown): EquipMessage | undefined {
+  if (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    (value as Record<string, unknown>).type === "equip" &&
+    Number.isInteger((value as Record<string, unknown>).item)
+  ) {
+    return { type: "equip", item: (value as Record<string, unknown>).item as number };
+  }
+  return undefined;
+}
 
 // Client -> server, sent as reliable stream messages.
 export type EditMessage = {

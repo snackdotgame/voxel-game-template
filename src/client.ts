@@ -1,3 +1,4 @@
+import { Color3 } from "@babylonjs/core/Maths/math.color";
 import { DynamicTexture } from "@babylonjs/core/Materials/Textures/dynamicTexture";
 import { Texture } from "@babylonjs/core/Materials/Textures/texture";
 import { Vector4 } from "@babylonjs/core/Maths/math.vector";
@@ -12,6 +13,7 @@ import {
   parseServerStreamMessage,
 } from "./shared/messages.js";
 import { decodeSnapshots, encodeInput } from "./shared/netCodec.js";
+import { HAND, ITEMS, PICKAXE, AXE, SHOVEL } from "./shared/items.js";
 import {
   type CharInput,
   type CharState,
@@ -178,6 +180,7 @@ type Rig = {
   rightLeg: TransformNode;
   body: TransformNode;
   phase: number;
+  tool: Mesh | null;
 };
 
 // pixel rects (x0, y0, x1, y1 from top-left) in the classic 64x32 skin layout,
@@ -346,6 +349,7 @@ function buildRig(name: string, hueShiftDegrees: number): Rig {
     leftLeg: limb("left-leg", LEG_FACES, 0.675, -0.1125),
     rightLeg: limb("right-leg", LEG_FACES, 0.675, 0.1125),
     phase: 0,
+    tool: null,
   };
 
   // noa renders through an octree selection; the mesh component only
@@ -389,6 +393,143 @@ function hueForId(id: string): number {
   }
   return 40 + (hash % 280);
 }
+
+/*
+ *      Tools and equipment
+ *
+ *  Procedural box models held in the right hand. The equipped item id is
+ *  sent to the server over the reliable stream and rebroadcast in the
+ *  binary snapshots, so remote rigs hold the same tool.
+ */
+
+const materialCache = new Map<string, ReturnType<typeof makeSkinMaterial>>();
+
+function colorMaterial(name: string, hex: string) {
+  let material = materialCache.get(name);
+  if (!material) {
+    material = noa.rendering.makeStandardMaterial(name);
+    const color = Color3.FromHexString(hex);
+    material.diffuseColor = color;
+    material.ambientColor = color;
+    // matte: the default white specular washes near-camera meshes out
+    material.specularColor = Color3.Black();
+    materialCache.set(name, material);
+  }
+  return material;
+}
+
+function buildToolMesh(name: string, item: number): Mesh | null {
+  if (item === HAND) {
+    return null;
+  }
+  const root = new Mesh(`${name}-item`, scene);
+  const wood = colorMaterial("tool-wood", "#8a5a2b");
+  const metal = colorMaterial("tool-metal", "#aab4be");
+  const part = (
+    label: string,
+    w: number,
+    h: number,
+    d: number,
+    material: ReturnType<typeof colorMaterial>,
+    x: number,
+    y: number,
+    z: number,
+    tiltZ = 0,
+  ) => {
+    const mesh = CreateBox(`${name}-${label}`, { width: w, height: h, depth: d }, scene);
+    mesh.material = material;
+    mesh.parent = root;
+    mesh.position.set(x, y, z);
+    mesh.rotation.z = tiltZ;
+  };
+
+  part("handle", 0.06, 0.55, 0.06, wood, 0, 0, 0);
+  if (item === PICKAXE) {
+    part("head", 0.44, 0.07, 0.07, metal, 0, 0.28, 0);
+    part("tip-l", 0.14, 0.06, 0.06, metal, -0.26, 0.22, 0, 0.9);
+    part("tip-r", 0.14, 0.06, 0.06, metal, 0.26, 0.22, 0, -0.9);
+  } else if (item === AXE) {
+    part("blade", 0.2, 0.18, 0.06, metal, 0.13, 0.24, 0);
+  } else if (item === SHOVEL) {
+    part("scoop", 0.15, 0.2, 0.08, metal, 0, 0.33, 0);
+  }
+  for (const mesh of root.getChildMeshes()) {
+    noa.rendering.addMeshToScene(mesh);
+  }
+  return root;
+}
+
+function attachToolToRig(rig: Rig, name: string, item: number): void {
+  rig.tool?.dispose();
+  rig.tool = buildToolMesh(name, item);
+  if (rig.tool) {
+    rig.tool.parent = rig.rightArm;
+    rig.tool.position.set(0, -0.6, 0.1);
+    rig.tool.rotation.x = -Math.PI * 0.45;
+  }
+}
+
+let equippedItem: number = HAND;
+let firstPerson = false;
+let swingT = 0;
+
+// first-person view model: arm + tool fixed to the camera
+let viewModel: Mesh | null = null;
+const VIEW_MODEL_POS: [number, number, number] = [0.42, -0.42, 1.1];
+
+function refreshViewModel(): void {
+  viewModel?.dispose();
+  viewModel = null;
+  if (!firstPerson) {
+    return;
+  }
+  const root = new Mesh("view-model", scene);
+  const arm = CreateBox("view-arm", { width: 0.1, height: 0.1, depth: 0.35 }, scene);
+  arm.material = colorMaterial("view-skin", "#e0ac69");
+  arm.parent = root;
+  arm.position.set(0, -0.1, -0.14);
+  arm.rotation.x = 0.35;
+  const tool = buildToolMesh("view", equippedItem);
+  if (tool) {
+    tool.parent = root;
+    tool.position.set(0, 0.08, 0.05);
+    tool.rotation.set(-Math.PI * 0.38, -0.6, 0.15);
+  }
+  root.scaling.setAll(0.9);
+  root.parent = noa.rendering.camera;
+  root.position.fromArray(VIEW_MODEL_POS);
+  root.rotation.y = -0.3;
+  for (const mesh of root.getChildMeshes()) {
+    noa.rendering.addMeshToScene(mesh);
+  }
+  viewModel = root;
+}
+
+function setEquipped(item: number): void {
+  if (item === equippedItem) {
+    return;
+  }
+  equippedItem = item;
+  attachToolToRig(selfRig, "self", item);
+  refreshViewModel();
+  void client.streams.send({ type: "equip", item }).catch(() => {});
+  updateHud();
+}
+
+function setFirstPerson(on: boolean): void {
+  firstPerson = on;
+  noa.camera.zoomDistance = on ? 0 : 6;
+  selfRig.root.setEnabled(!on);
+  refreshViewModel();
+  updateHud();
+}
+
+for (let slot = 0; slot < ITEMS.length; slot++) {
+  noa.inputs.bind(`hotbar-${slot + 1}`, `Digit${slot + 1}`);
+  noa.inputs.down.on(`hotbar-${slot + 1}`, () => setEquipped(slot));
+}
+noa.inputs.bind("toggle-view", "KeyV");
+noa.inputs.down.on("toggle-view", () => setFirstPerson(!firstPerson));
 
 /*
  *      Local player: third-person camera + own rig
@@ -540,6 +681,7 @@ type RemotePlayer = {
   rig: Rig;
   target: CharState;
   heading: number;
+  item: number;
 };
 
 const remotePlayers = new Map<string, RemotePlayer>();
@@ -551,10 +693,15 @@ function upsertRemotePlayer(snap: PlayerSnapshot): void {
   if (existing) {
     existing.target = snap.state;
     existing.heading = snap.heading;
+    if (existing.item !== snap.item) {
+      existing.item = snap.item;
+      attachToolToRig(existing.rig, `remote-${snap.id}`, snap.item);
+    }
     return;
   }
 
   const rig = buildRig(`remote-${snap.id}`, hueForId(snap.id));
+  attachToolToRig(rig, `remote-${snap.id}`, snap.item);
   const entityId = ents.add(
     [snap.state.x, snap.state.y, snap.state.z],
     0.6,
@@ -569,6 +716,7 @@ function upsertRemotePlayer(snap: PlayerSnapshot): void {
     rig,
     target: snap.state,
     heading: snap.heading,
+    item: snap.item,
   });
   updateHud();
 }
@@ -605,6 +753,20 @@ noa.on("beforeRender", () => {
   );
   selfRig.root.rotation.y = noa.camera.heading;
   animateRig(selfRig, Math.hypot(predicted.vx, predicted.vz), onGround(predicted), dtSec);
+
+  // tool swing arc, applied on top of the walk animation
+  if (swingT > 0) {
+    swingT = Math.max(0, swingT - dtSec * 4.5);
+    const arc = Math.sin(swingT * Math.PI);
+    selfRig.rightArm.rotation.x -= arc * 1.6;
+    if (viewModel) {
+      viewModel.rotation.x = -arc * 0.9;
+      viewModel.position.y = VIEW_MODEL_POS[1] - arc * 0.08;
+    }
+  } else if (viewModel) {
+    viewModel.rotation.x = 0;
+    viewModel.position.y = VIEW_MODEL_POS[1];
+  }
 
   // remote players: ease toward their latest authoritative state
   const t = 1 - Math.exp(-dtSec * 12);
@@ -646,17 +808,34 @@ document.body.appendChild(crosshair);
 
 let connectionState = "connecting";
 let myName = "";
+let notice = "";
+let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+
+function showNotice(text: string): void {
+  notice = text;
+  clearTimeout(noticeTimer);
+  noticeTimer = setTimeout(() => {
+    notice = "";
+    updateHud();
+  }, 1800);
+  updateHud();
+}
 
 function updateHud(): void {
   const others = [...remotePlayers.keys()].map((id) => playerNames.get(id) ?? "Player");
+  const hotbar = ITEMS.map((name, i) =>
+    i === equippedItem ? `[${i + 1} ${name}]` : ` ${i + 1} ${name} `,
+  ).join(" ");
   hud.textContent =
     `Noa Voxels — ${connectionState}` +
     (myName ? ` as ${myName}` : "") +
     `\nPlayers here: ${remotePlayers.size + 1}` +
     (others.length > 0 ? ` (also: ${others.join(", ")})` : "") +
     `\nPrediction rollbacks: ${rollbacks}` +
-    "\nClick to look, WASD move, shift sprint, space jump" +
-    "\nLeft-click dig, right-click/E place, scroll zoom";
+    `\n${hotbar}` +
+    `\nWASD move, shift sprint, space jump, V ${firstPerson ? "third" : "first"}-person` +
+    "\nLeft-click dig, right-click/E place, scroll zoom" +
+    (notice ? `\n>> ${notice}` : "");
 }
 updateHud();
 
@@ -671,16 +850,28 @@ function sendEdit(block: number, x: number, y: number, z: number): void {
   void client.streams.send({ type: "edit", block, x, y, z }).catch(() => {});
 }
 
+function needsPickaxe(block: number): boolean {
+  return block === STONE_ID || block >= COAL_ORE_ID;
+}
+
 noa.inputs.down.on("fire", () => {
-  if (noa.targetedBlock) {
-    const [x, y, z] = noa.targetedBlock.position;
-    // place what you dig: remember the last broken block type
-    placeBlock = noa.targetedBlock.blockID;
-    sendEdit(0, x, y, z);
+  swingT = 1;
+  if (!noa.targetedBlock) {
+    return;
   }
+  const block = noa.targetedBlock.blockID;
+  if (needsPickaxe(block) && equippedItem !== PICKAXE) {
+    showNotice("Too hard to dig by hand — equip the pickaxe (2)");
+    return;
+  }
+  const [x, y, z] = noa.targetedBlock.position;
+  // place what you dig: remember the last broken block type
+  placeBlock = block;
+  sendEdit(0, x, y, z);
 });
 
 noa.inputs.down.on("alt-fire", () => {
+  swingT = 1;
   if (noa.targetedBlock) {
     const [x, y, z] = noa.targetedBlock.adjacent;
     sendEdit(placeBlock, x, y, z);
@@ -786,7 +977,8 @@ declare global {
     __voxels?: {
       noa: Engine;
       remoteCount(): number;
-      remotes(): { id: string; name: string; x: number; y: number; z: number }[];
+      remotes(): { id: string; name: string; item: number; x: number; y: number; z: number }[];
+      equipped(): number;
       playerPosition(): number[];
       connectionState(): string;
       rollbacks(): number;
@@ -807,8 +999,9 @@ window.__voxels = {
   remotes: () =>
     [...remotePlayers.entries()].map(([id, remote]) => {
       const [x, y, z] = ents.getPosition(remote.entityId);
-      return { id, name: playerNames.get(id) ?? "Player", x, y, z };
+      return { id, name: playerNames.get(id) ?? "Player", item: remote.item, x, y, z };
     }),
+  equipped: () => equippedItem,
   playerPosition: () => [predicted.x, predicted.y, predicted.z],
   connectionState: () => connectionState,
   rollbacks: () => rollbacks,

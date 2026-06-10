@@ -66,12 +66,20 @@ speed, body bob, an airborne pose, and yaw following each player's view heading.
 character is visible in third person; remote players get a deterministic hue shift on the
 clothing so everyone looks different.
 
+### Equipment and views
+
+V toggles first/third person (first person gets a camera-attached arm + held-item view
+model). The hotbar (keys 1-4) equips hand, pickaxe, axe, or shovel as procedural box models
+held in the right hand, with a swing animation on dig/place. Stone and ores require the
+pickaxe. The equipped item id rides in the binary snapshots, so everyone sees what everyone
+is holding.
+
 ### Asset credits
 
 Block textures and the character skin are from
-[minetest_game](https://github.com/luanti-org/minetest_game) (Luanti/Minetest), licensed
-CC BY-SA 3.0 — see `assets/textures/LICENSE-minetest-textures.txt`. Ore tiles are composited
-from their stone + mineral overlay textures.
+[Soothing 32](https://content.luanti.org/packages/Zughy/soothing32/) by Zughy and
+contributors, licensed CC BY-SA 4.0 — see `assets/textures/LICENSE-soothing32.txt`. Ore and
+grass/snow side tiles are composited from the pack's base + overlay textures.
 
 ## Develop
 

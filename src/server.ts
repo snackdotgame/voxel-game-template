@@ -1,10 +1,12 @@
 import { server, type Connection, type DatagramEvent, type StreamEvent } from "minion:server";
 import { encodeSnapshots, decodeInput } from "./shared/netCodec.js";
+import { isValidItem } from "./shared/items.js";
 import {
   type BlockEdit,
   type PlayerSnapshot,
   type RosterEntry,
   parseEditMessage,
+  parseEquipMessage,
 } from "./shared/messages.js";
 import {
   SIM_TICK_MS,
@@ -37,6 +39,7 @@ type Player = {
   char: CharState;
   heading: number;
   lastSeq: number;
+  item: number;
   stepsThisTick: number;
   // inputs beyond the per-tick step budget wait here instead of dropping,
   // so client catch-up bursts don't force prediction rollbacks
@@ -70,7 +73,7 @@ export async function main() {
   // recv() rejects when the runtime is shutting down; the pumps ending is
   // the signal to unwind the tick loop and return from main().
   let stopped = false;
-  const pumps = Promise.all([pumpInputs(world), pumpEdits(world)]).then(() => {
+  const pumps = Promise.all([pumpInputs(world), pumpStreams(world)]).then(() => {
     stopped = true;
   });
 
@@ -88,6 +91,7 @@ export async function main() {
           id,
           lastSeq: player.lastSeq,
           heading: player.heading,
+          item: player.item,
           state: player.char,
         });
       }
@@ -146,8 +150,8 @@ function sendChunkState(id: string, cx: number, cz: number, edits: BlockEdit[]) 
   }
 }
 
-function handleEdit(world: World, event: StreamEvent) {
-  const message = parseEditMessage(safeJson(event));
+function handleEdit(world: World, event: StreamEvent, value: unknown) {
+  const message = parseEditMessage(value);
   if (!message || world.editCount >= MAX_EDITS) {
     return;
   }
@@ -190,14 +194,27 @@ async function pumpInputs(world: World) {
   }
 }
 
-async function pumpEdits(world: World) {
+async function pumpStreams(world: World) {
   try {
     while (true) {
-      handleEdit(world, await server.streams.recv());
+      handleStream(world, await server.streams.recv());
     }
   } catch {
     // runtime is shutting down
   }
+}
+
+function handleStream(world: World, event: StreamEvent) {
+  const value = safeJson(event);
+  const equip = parseEquipMessage(value);
+  if (equip) {
+    const player = world.players.get(event.connection.id);
+    if (player && isValidItem(equip.item)) {
+      player.item = equip.item;
+    }
+    return;
+  }
+  handleEdit(world, event, value);
 }
 
 function handleInput(world: World, event: DatagramEvent) {
@@ -251,6 +268,7 @@ function addPlayer(world: World, connection: Connection) {
     char: spawnState(),
     heading: 0,
     lastSeq: 0,
+    item: 0,
     stepsThisTick: 0,
     inputQueue: [],
     syncedChunks: new Set(),

@@ -27,6 +27,7 @@
 //          in bits 0-5, jumping in bit 6
 //     u8   sleep frame count
 //     u8   jump count
+//     u8   equipped item id
 //   Names travel on the reliable channel (welcome roster / join), not here.
 
 import type { PlayerSnapshot } from "./messages.js";
@@ -35,11 +36,11 @@ import type { CharInput, CharState } from "./sim.js";
 const MAGIC_V = 0x56;
 const MAGIC_I = 0x49;
 const MAGIC_S = 0x53;
-export const NET_CODEC_VERSION = 1;
+export const NET_CODEC_VERSION = 2;
 
 const INPUT_BYTES = 12;
 const SNAPSHOT_HEADER_BYTES = 4;
-const RECORD_FIXED_BYTES = 51;
+const RECORD_FIXED_BYTES = 52;
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
@@ -144,6 +145,7 @@ export function encodeSnapshots(
       bytes[offset + 48] = packResting(snap.state);
       bytes[offset + 49] = Math.max(0, Math.min(255, snap.state.sleep));
       bytes[offset + 50] = Math.max(0, Math.min(255, snap.state.jumpCount));
+      bytes[offset + 51] = Math.max(0, Math.min(255, snap.item));
       offset += RECORD_FIXED_BYTES;
     }
     packets.push(bytes);
@@ -190,6 +192,7 @@ export function decodeSnapshots(bytes: Uint8Array): PlayerSnapshot[] | undefined
       id,
       lastSeq: view.getUint32(offset, true),
       heading: view.getFloat32(offset + 4, true),
+      item: bytes[offset + 51],
       state: {
         x: view.getFloat64(offset + 8, true),
         y: view.getFloat64(offset + 16, true),
