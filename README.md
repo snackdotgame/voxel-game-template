@@ -27,7 +27,9 @@ Movement is **server-authoritative with client-side prediction and rollback**, r
   state and replays its pending inputs. The HUD shows a live rollback counter.
 - `src/server.ts` — steps each player's authoritative sim from received inputs (burst-buffered
   and rate-capped), broadcasts 20 Hz state snapshots over **datagrams**, and owns the edit log.
-  Players whose inputs stop for 5s are dropped without waiting for transport timeouts.
+  Players whose inputs stop (backgrounded tabs) freeze in place as AFK and are removed only
+  after 120s or a real disconnect; characters and inventories are parked by userId so returns
+  and reconnects resume where they left off.
 
 Datagrams carry everything frequent and loss-tolerant (inputs, snapshots); reliable streams
 carry only what must arrive (block edits, join/leave, chunk state).
