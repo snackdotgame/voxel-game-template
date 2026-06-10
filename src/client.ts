@@ -745,6 +745,11 @@ function heldStack(): InvSlot {
 // values are the Babylon calibration with z (and x/y rotations) negated.
 let viewModel: Group | null = null;
 const VIEW_MODEL_POS: [number, number, number] = [0.42, -0.42, -1.1];
+// walk/run hand bob (minecraft-web-client's HandIdleAnimator pattern:
+// x sways with the cycle, y dips on each step at double rate), eased so
+// starting/stopping movement never pops the arm
+let vmBobPhase = 0;
+const vmBob = { x: 0, y: 0 };
 
 function refreshViewModel(): void {
   if (viewModel) {
@@ -1298,8 +1303,20 @@ noa.on("beforeRender", () => {
       viewModel.rotation.z = -0.0873 * sinP; // -5deg
     }
   } else if (viewModel) {
-    viewModel.position.fromArray(VIEW_MODEL_POS);
-    viewModel.rotation.set(0, 0.3, 0);
+    if (selfMoving) {
+      vmBobPhase += dtSec * (selfSpeed > RUN_SPEED_THRESHOLD ? 16 : 8);
+    }
+    const bobBlend = 1 - Math.exp(-dtSec * 20);
+    const targetX = selfMoving ? Math.sin(vmBobPhase) * 0.03 : 0;
+    const targetY = selfMoving ? -Math.abs(Math.cos(vmBobPhase)) * 0.055 : 0;
+    vmBob.x += (targetX - vmBob.x) * bobBlend;
+    vmBob.y += (targetY - vmBob.y) * bobBlend;
+    viewModel.position.set(
+      VIEW_MODEL_POS[0] + vmBob.x,
+      VIEW_MODEL_POS[1] + vmBob.y,
+      VIEW_MODEL_POS[2],
+    );
+    viewModel.rotation.set(0, 0.3, vmBob.x * 0.6);
   }
 
   // projectiles: ease toward broadcast positions, tumbling as they fly
