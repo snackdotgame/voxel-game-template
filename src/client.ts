@@ -397,7 +397,7 @@ const SOUND_FAMILIES: Record<string, number> = {
   footstep_concrete: 5,
   footstep_snow: 5,
   impactPunch_medium: 5,
-  splash: 5,
+  splash: 1,
 };
 
 let audioCtx: AudioContext | null = null;
@@ -482,13 +482,13 @@ function playPop(volume = 0.5): void {
   soundsPlayed += 1;
 }
 
-// real splash samples (rubberduck, CC0 - see assets/sounds/LICENSE-
-// water-splash.txt); the synthesized version read as a generic whoomp
+// real splash recording (CC0 - see assets/sounds/LICENSE-water-splash
+// .txt), with extra pitch spread to vary the single sample per play
 function playSplash(volume = 0.7): void {
   if (volume < 0.03) {
     return;
   }
-  playSound("splash", volume);
+  playSound("splash", volume, 0.85 + Math.random() * 0.3);
 }
 
 // short synthesized whoosh for swings and throws (no CC0 sample fit)
