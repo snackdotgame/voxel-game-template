@@ -1,4 +1,6 @@
-import { Color3 } from "@babylonjs/core/Maths/math.color";
+import { DynamicTexture } from "@babylonjs/core/Materials/Textures/dynamicTexture";
+import { Texture } from "@babylonjs/core/Materials/Textures/texture";
+import { Vector4 } from "@babylonjs/core/Maths/math.vector";
 import { CreateBox } from "@babylonjs/core/Meshes/Builders/boxBuilder";
 import { Mesh } from "@babylonjs/core/Meshes/mesh";
 import { TransformNode } from "@babylonjs/core/Meshes/transformNode";
@@ -20,8 +22,16 @@ import {
   stepCharacter,
 } from "./shared/sim.js";
 import {
+  COAL_ORE_ID,
+  DIAMOND_ORE_ID,
   DIRT_ID,
+  GOLD_ORE_ID,
   GRASS_ID,
+  IRON_ORE_ID,
+  LEAVES_ID,
+  LOG_ID,
+  SAND_ID,
+  SNOW_ID,
   STONE_ID,
   baseVoxelID,
   editKey,
@@ -35,19 +45,48 @@ const noa = new Engine({
   chunkAddDistance: 2.5,
   chunkRemoveDistance: 3.5,
   playerStart: [0.5, 16, 0.5],
+  texturePath: "",
 });
 
 /*
  *      Blocks and terrain
+ *
+ *  Textures are from minetest_game (CC BY-SA 3.0), served out of
+ *  assets/textures. See assets/textures/LICENSE-minetest-textures.txt.
  */
 
-noa.registry.registerMaterial("grass", { color: [0.32, 0.78, 0.36] });
-noa.registry.registerMaterial("dirt", { color: [0.51, 0.38, 0.25] });
-noa.registry.registerMaterial("stone", { color: [0.55, 0.56, 0.6] });
+const TEX = "/assets/textures";
 
-noa.registry.registerBlock(GRASS_ID, { material: "grass" });
+function texMat(name: string, file: string, texHasAlpha = false): void {
+  noa.registry.registerMaterial(name, { textureURL: `${TEX}/${file}`, texHasAlpha });
+}
+
+texMat("grass_top", "grass.png");
+texMat("grass_side", "grass_side.png");
+texMat("dirt", "dirt.png");
+texMat("stone", "stone.png");
+texMat("sand", "sand.png");
+texMat("snow", "snow.png");
+texMat("snow_side", "snow_side.png");
+texMat("log_side", "tree.png");
+texMat("log_top", "tree_top.png");
+texMat("leaves", "leaves.png", true);
+texMat("coal_ore", "coal_ore.png");
+texMat("iron_ore", "iron_ore.png");
+texMat("gold_ore", "gold_ore.png");
+texMat("diamond_ore", "diamond_ore.png");
+
+noa.registry.registerBlock(GRASS_ID, { material: ["grass_top", "dirt", "grass_side"] });
 noa.registry.registerBlock(DIRT_ID, { material: "dirt" });
 noa.registry.registerBlock(STONE_ID, { material: "stone" });
+noa.registry.registerBlock(SAND_ID, { material: "sand" });
+noa.registry.registerBlock(SNOW_ID, { material: ["snow", "dirt", "snow_side"] });
+noa.registry.registerBlock(LOG_ID, { material: ["log_top", "log_top", "log_side"] });
+noa.registry.registerBlock(LEAVES_ID, { material: "leaves", opaque: false });
+noa.registry.registerBlock(COAL_ORE_ID, { material: "coal_ore" });
+noa.registry.registerBlock(IRON_ORE_ID, { material: "iron_ore" });
+noa.registry.registerBlock(GOLD_ORE_ID, { material: "gold_ore" });
+noa.registry.registerBlock(DIAMOND_ORE_ID, { material: "diamond_ore" });
 
 // Edits received from the server, keyed "x,y,z", applied on top of the
 // deterministic base terrain whenever a chunk (re)generates. The prediction
@@ -88,12 +127,15 @@ function applyEdit(edit: BlockEdit) {
  *      Minecraft-style voxel character rig
  *
  *  Box body parts hung off pivot nodes so limbs swing from the
- *  shoulder/hip. Proportions follow the classic 8/12/12 pixel split
- *  of a 1.8-block-tall character. The rig root sits at the entity's
- *  bottom-center, facing +z at yaw 0.
+ *  shoulder/hip, textured with a classic-format 64x32 character skin
+ *  (minetest_game's "Sam", CC BY-SA 3.0). Remote players get a
+ *  deterministic hue shift on the clothing rows. The rig root sits at
+ *  the entity's bottom-center, facing +z at yaw 0.
  */
 
 const scene = noa.rendering.getScene();
+
+const SKIN_PX = 0.05625; // world units per skin pixel: 32px of parts -> 1.8 blocks
 
 type Rig = {
   root: Mesh;
@@ -105,84 +147,171 @@ type Rig = {
   phase: number;
 };
 
-type Palette = {
-  skin: string;
-  shirt: Color3;
-  pants: string;
-};
+// pixel rects (x0, y0, x1, y1 from top-left) in the classic 64x32 skin layout,
+// ordered to match CreateBox faceUV: [+z front, -z back, +x, -x, top, bottom]
+type FaceRects = number[][];
+const HEAD_FACES: FaceRects = [
+  [8, 8, 16, 16],
+  [24, 8, 32, 16],
+  [0, 8, 8, 16],
+  [16, 8, 24, 16],
+  [8, 0, 16, 8],
+  [16, 0, 24, 8],
+];
+const BODY_FACES: FaceRects = [
+  [20, 20, 28, 32],
+  [32, 20, 40, 32],
+  [16, 20, 20, 32],
+  [28, 20, 32, 32],
+  [20, 16, 28, 20],
+  [28, 16, 36, 20],
+];
+const ARM_FACES: FaceRects = [
+  [44, 20, 48, 32],
+  [52, 20, 56, 32],
+  [40, 20, 44, 32],
+  [48, 20, 52, 32],
+  [44, 16, 48, 20],
+  [48, 16, 52, 20],
+];
+const LEG_FACES: FaceRects = [
+  [4, 20, 8, 32],
+  [12, 20, 16, 32],
+  [0, 20, 4, 32],
+  [8, 20, 12, 32],
+  [4, 16, 8, 20],
+  [8, 16, 12, 20],
+];
 
-function makeMaterial(name: string, color: Color3) {
+function faceUVs(rects: FaceRects): Vector4[] {
+  return rects.map(([x0, y0, x1, y1]) => new Vector4(x0 / 64, 1 - y1 / 32, x1 / 64, 1 - y0 / 32));
+}
+
+const skinImage = new Promise<HTMLImageElement>((resolve, reject) => {
+  const img = new Image();
+  img.onload = () => resolve(img);
+  img.onerror = () => reject(new Error("failed to load character skin"));
+  img.src = `${TEX}/character.png`;
+});
+
+function hueRotate(pixels: Uint8ClampedArray, degrees: number): void {
+  for (let i = 0; i < pixels.length; i += 4) {
+    if (pixels[i + 3] === 0) {
+      continue;
+    }
+    const r = pixels[i] / 255;
+    const g = pixels[i + 1] / 255;
+    const b = pixels[i + 2] / 255;
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    const l = (max + min) / 2;
+    const d = max - min;
+    if (d === 0) {
+      continue;
+    }
+    const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    let h: number;
+    if (max === r) {
+      h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
+    } else if (max === g) {
+      h = ((b - r) / d + 2) / 6;
+    } else {
+      h = ((r - g) / d + 4) / 6;
+    }
+    h = (h + degrees / 360) % 1;
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+    const p = 2 * l - q;
+    const channel = (t: number) => {
+      let u = t;
+      if (u < 0) u += 1;
+      if (u > 1) u -= 1;
+      if (u < 1 / 6) return p + (q - p) * 6 * u;
+      if (u < 1 / 2) return q;
+      if (u < 2 / 3) return p + (q - p) * (2 / 3 - u) * 6;
+      return p;
+    };
+    pixels[i] = Math.round(channel(h + 1 / 3) * 255);
+    pixels[i + 1] = Math.round(channel(h) * 255);
+    pixels[i + 2] = Math.round(channel(h - 1 / 3) * 255);
+  }
+}
+
+function makeSkinMaterial(name: string, hueShiftDegrees: number) {
+  const texture = new DynamicTexture(
+    `${name}-skin`,
+    { width: 64, height: 32 },
+    scene,
+    false,
+    Texture.NEAREST_SAMPLINGMODE,
+  );
+  void skinImage.then((img) => {
+    const ctx = texture.getContext() as unknown as CanvasRenderingContext2D;
+    ctx.clearRect(0, 0, 64, 32);
+    ctx.drawImage(img, 0, 0);
+    if (hueShiftDegrees !== 0) {
+      // rows 16-32 hold the body, arms, and legs; the head keeps its skin tone
+      const body = ctx.getImageData(0, 16, 64, 16);
+      hueRotate(body.data, hueShiftDegrees);
+      ctx.putImageData(body, 0, 16);
+    }
+    texture.update();
+  });
   const material = noa.rendering.makeStandardMaterial(name);
-  material.diffuseColor = color;
-  // noa defaults material ambient to white, which washes colors out
-  // against the half-strength scene ambient; tint it with the part color.
-  material.ambientColor = color;
+  material.diffuseTexture = texture;
   return material;
 }
 
-function buildRig(name: string, palette: Palette): Rig {
+function buildRig(name: string, hueShiftDegrees: number): Rig {
   const root = new Mesh(`${name}-root`, scene);
   const body = new TransformNode(`${name}-body`, scene);
   body.parent = root;
-
-  const skin = makeMaterial(`${name}-skin`, Color3.FromHexString(palette.skin));
-  const shirt = makeMaterial(`${name}-shirt`, palette.shirt);
-  const pants = makeMaterial(`${name}-pants`, Color3.FromHexString(palette.pants));
-  const eye = makeMaterial(`${name}-eye`, Color3.FromHexString("#2d2d3a"));
+  const material = makeSkinMaterial(name, hueShiftDegrees);
 
   const box = (
     part: string,
-    w: number,
-    h: number,
-    d: number,
-    material: ReturnType<typeof makeMaterial>,
+    pxW: number,
+    pxH: number,
+    pxD: number,
+    rects: FaceRects,
     parent: TransformNode,
     yInParent: number,
   ) => {
-    const mesh = CreateBox(`${name}-${part}`, { width: w, height: h, depth: d }, scene);
+    const mesh = CreateBox(
+      `${name}-${part}`,
+      {
+        width: pxW * SKIN_PX,
+        height: pxH * SKIN_PX,
+        depth: pxD * SKIN_PX,
+        faceUV: faceUVs(rects),
+        wrap: true,
+      },
+      scene,
+    );
     mesh.material = material;
     mesh.parent = parent;
     mesh.position.y = yInParent;
     return mesh;
   };
 
-  // torso: 0.5 x 0.675 x 0.25, from y 0.675 to 1.35
-  box("torso", 0.5, 0.675, 0.25, shirt, body, 1.0125);
+  // proportions: 12px legs + 12px torso + 8px head = 32px -> 1.8 blocks
+  box("torso", 8, 12, 4, BODY_FACES, body, 1.0125);
+  box("head", 8, 8, 8, HEAD_FACES, body, 1.575);
 
-  // head: 0.45 cube on top, with eyes on the +z face
-  const head = box("head", 0.45, 0.45, 0.45, skin, body, 1.575);
-  for (const side of [-1, 1]) {
-    const eyeBox = CreateBox(
-      `${name}-eye${side}`,
-      { width: 0.08, height: 0.08, depth: 0.03 },
-      scene,
-    );
-    eyeBox.material = eye;
-    eyeBox.parent = head;
-    eyeBox.position.set(side * 0.1, 0.04, 0.225);
-  }
-
-  const limb = (
-    part: string,
-    pivotY: number,
-    w: number,
-    material: ReturnType<typeof makeMaterial>,
-    xOff: number,
-  ) => {
+  const limb = (part: string, rects: FaceRects, pivotY: number, xOff: number) => {
     const pivot = new TransformNode(`${name}-${part}-pivot`, scene);
     pivot.parent = body;
     pivot.position.set(xOff, pivotY, 0);
-    box(part, w, 0.675, w, material, pivot, -0.3375);
+    box(part, 4, 12, 4, rects, pivot, -0.3375);
     return pivot;
   };
 
   const rig: Rig = {
     root,
     body,
-    leftArm: limb("left-arm", 1.305, 0.2, shirt, -0.35),
-    rightArm: limb("right-arm", 1.305, 0.2, shirt, 0.35),
-    leftLeg: limb("left-leg", 0.675, 0.22, pants, -0.125),
-    rightLeg: limb("right-leg", 0.675, 0.22, pants, 0.125),
+    leftArm: limb("left-arm", ARM_FACES, 1.305, -0.3375),
+    rightArm: limb("right-arm", ARM_FACES, 1.305, 0.3375),
+    leftLeg: limb("left-leg", LEG_FACES, 0.675, -0.1125),
+    rightLeg: limb("right-leg", LEG_FACES, 0.675, 0.1125),
     phase: 0,
   };
 
@@ -220,12 +349,12 @@ function animateRig(rig: Rig, speed: number, onGround: boolean, dtSec: number) {
   rig.rightArm.rotation.x += (-armSwing - rig.rightArm.rotation.x) * blend;
 }
 
-function colorForId(id: string): Color3 {
+function hueForId(id: string): number {
   let hash = 0;
   for (let i = 0; i < id.length; i++) {
     hash = (hash * 31 + id.charCodeAt(i)) >>> 0;
   }
-  return Color3.FromHSV(hash % 360, 0.6, 0.85);
+  return 40 + (hash % 280);
 }
 
 /*
@@ -247,11 +376,7 @@ for (const comp of [
   }
 }
 
-const selfRig = buildRig("self", {
-  skin: "#e0ac69",
-  shirt: Color3.FromHexString("#e98a2b"),
-  pants: "#3d4a63",
-});
+const selfRig = buildRig("self", 0);
 ents.addComponent(noa.playerEntity, ents.names.mesh, {
   mesh: selfRig.root,
   offset: [0, 0, 0],
@@ -281,7 +406,7 @@ let prevPredicted = cloneState(predicted);
 let pending: { input: CharInput; state: CharState }[] = [];
 let nextSeq = 1;
 let rollbacks = 0;
-let lastTickAt = performance.now();
+let simAccumMs = 0;
 
 noa.inputs.bind("sprint", "ShiftLeft");
 
@@ -299,7 +424,7 @@ function sampleInput(): CharInput {
   };
 }
 
-setInterval(() => {
+function simTick(): void {
   const input = sampleInput();
   prevPredicted = predicted;
   predicted = stepCharacter(predicted, input, isSolid);
@@ -307,11 +432,23 @@ setInterval(() => {
   if (pending.length > 200) {
     pending.splice(0, pending.length - 100);
   }
-  lastTickAt = performance.now();
   if (connectionState === "connected") {
     void client.datagrams.send({ type: "input", ...input }).catch(() => {});
   }
-}, SIM_TICK_MS);
+}
+
+// Fixed-step accumulator driven from the render loop: if worldgen or GC
+// stalls a frame, the sim runs catch-up steps instead of losing time.
+// The burst is capped to match the server's per-tick input budget.
+const MAX_CATCHUP_TICKS = 6;
+
+function pumpSim(frameMs: number): void {
+  simAccumMs = Math.min(simAccumMs + frameMs, SIM_TICK_MS * MAX_CATCHUP_TICKS);
+  while (simAccumMs >= SIM_TICK_MS) {
+    simAccumMs -= SIM_TICK_MS;
+    simTick();
+  }
+}
 
 function reconcile(snap: PlayerSnapshot) {
   const ackIndex = pending.findIndex((entry) => entry.input.seq === snap.lastSeq);
@@ -365,11 +502,7 @@ function upsertRemotePlayer(snap: PlayerSnapshot): void {
     return;
   }
 
-  const rig = buildRig(`remote-${snap.id}`, {
-    skin: "#e0ac69",
-    shirt: colorForId(snap.id),
-    pants: "#3d4a63",
-  });
+  const rig = buildRig(`remote-${snap.id}`, hueForId(snap.id));
   const entityId = ents.add(
     [snap.state.x, snap.state.y, snap.state.z],
     0.6,
@@ -409,9 +542,10 @@ noa.on("beforeRender", () => {
   const now = performance.now();
   const dtSec = Math.min(0.1, (now - lastFrameAt) / 1000);
   lastFrameAt = now;
+  pumpSim(dtSec * 1000);
 
   // local player: interpolate between the last two predicted sim states
-  const alpha = Math.max(0, Math.min(1, (now - lastTickAt) / SIM_TICK_MS));
+  const alpha = Math.max(0, Math.min(1, simAccumMs / SIM_TICK_MS));
   ents.setPosition(
     noa.playerEntity,
     prevPredicted.x + (predicted.x - prevPredicted.x) * alpha,
@@ -479,6 +613,8 @@ updateHud();
  *      Block interaction
  */
 
+let placeBlock = DIRT_ID;
+
 function sendEdit(block: number, x: number, y: number, z: number): void {
   applyEdit({ block, x, y, z });
   void client.streams.send({ type: "edit", block, x, y, z }).catch(() => {});
@@ -487,6 +623,8 @@ function sendEdit(block: number, x: number, y: number, z: number): void {
 noa.inputs.down.on("fire", () => {
   if (noa.targetedBlock) {
     const [x, y, z] = noa.targetedBlock.position;
+    // place what you dig: remember the last broken block type
+    placeBlock = noa.targetedBlock.blockID;
     sendEdit(0, x, y, z);
   }
 });
@@ -494,7 +632,7 @@ noa.inputs.down.on("fire", () => {
 noa.inputs.down.on("alt-fire", () => {
   if (noa.targetedBlock) {
     const [x, y, z] = noa.targetedBlock.adjacent;
-    sendEdit(DIRT_ID, x, y, z);
+    sendEdit(placeBlock, x, y, z);
   }
 });
 

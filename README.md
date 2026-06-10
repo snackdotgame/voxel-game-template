@@ -26,12 +26,29 @@ Movement is **server-authoritative with client-side prediction and rollback**:
 Datagrams carry everything frequent and loss-tolerant (inputs, snapshots); reliable streams
 carry only what must arrive (block edits, join/leave, welcome replay).
 
+### World
+
+Deterministic value-noise terrain with biomes (plains, forest, desert, snow-capped
+mountains), tree placement with cross-chunk canopies, and ore deposits (coal, iron, gold,
+diamond) clustered in pockets and gated by depth — dig down to find the good stuff. The whole
+generator lives in `src/shared/terrain.ts` and runs identically on client and server, so
+collision and prediction agree everywhere. Digging remembers the block you broke and
+right-click places it.
+
 ### Characters
 
-Minecraft-proportioned box rigs (head with eyes, torso, swinging arms/legs hung off
-shoulder/hip pivots) with procedural animation: walk cycle scaled by speed, body bob, an
-airborne pose, and yaw following each player's view heading. Your own character is visible in
-third person; remote players get a deterministic shirt color from their connection id.
+Minecraft-proportioned box rigs (swinging arms/legs hung off shoulder/hip pivots) UV-mapped
+with a classic-format 64x32 character skin, with procedural animation: walk cycle scaled by
+speed, body bob, an airborne pose, and yaw following each player's view heading. Your own
+character is visible in third person; remote players get a deterministic hue shift on the
+clothing so everyone looks different.
+
+### Asset credits
+
+Block textures and the character skin are from
+[minetest_game](https://github.com/luanti-org/minetest_game) (Luanti/Minetest), licensed
+CC BY-SA 3.0 — see `assets/textures/LICENSE-minetest-textures.txt`. Ore tiles are composited
+from their stone + mineral overlay textures.
 
 ## Develop
 

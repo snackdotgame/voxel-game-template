@@ -70,24 +70,59 @@ function collides(x: number, y: number, z: number, isSolid: IsSolid): boolean {
 
 // Move along one axis in fixed substeps, stopping at the first colliding
 // position. Substepping keeps the math identical on both sides and avoids
-// tunneling at our speeds (max ~0.5 blocks per tick).
+// tunneling at our speeds (max ~0.5 blocks per tick). Returns the
+// un-traveled remainder (0 when the full delta was applied).
 function moveAxis(
   state: CharState,
   axis: "x" | "y" | "z",
   delta: number,
   isSolid: IsSolid,
-): boolean {
+): number {
   let remaining = delta;
   while (Math.abs(remaining) > 1e-9) {
     const step = Math.max(-COLLIDE_STEP, Math.min(COLLIDE_STEP, remaining));
     const next = { ...state, [axis]: state[axis] + step };
     if (collides(next.x, next.y, next.z, isSolid)) {
-      return true;
+      return remaining;
     }
     state[axis] += step;
     remaining -= step;
   }
-  return false;
+  return 0;
+}
+
+const STEP_UP_HEIGHT = 1.05;
+
+// Auto-step: when a grounded horizontal move is blocked, try raising the
+// character one block, finishing the move, and settling back down.
+function moveAxisWithStepUp(
+  state: CharState,
+  axis: "x" | "z",
+  delta: number,
+  isSolid: IsSolid,
+): number {
+  const remaining = moveAxis(state, axis, delta, isSolid);
+  if (remaining === 0 || !state.onGround) {
+    return remaining;
+  }
+
+  const before = cloneState(state);
+  const upBlocked = moveAxis(state, "y", STEP_UP_HEIGHT, isSolid);
+  if (upBlocked !== 0) {
+    state.x = before.x;
+    state.y = before.y;
+    state.z = before.z;
+    return remaining;
+  }
+  const after = moveAxis(state, axis, remaining, isSolid);
+  moveAxis(state, "y", -STEP_UP_HEIGHT, isSolid);
+  if (after === remaining) {
+    // no horizontal progress even when raised; undo the whole attempt
+    state.x = before.x;
+    state.y = before.y;
+    state.z = before.z;
+  }
+  return after;
 }
 
 export function stepCharacter(previous: CharState, input: CharInput, isSolid: IsSolid): CharState {
@@ -129,14 +164,14 @@ export function stepCharacter(previous: CharState, input: CharInput, isSolid: Is
   }
   state.vy = Math.max(TERMINAL_FALL, state.vy + GRAVITY * DT);
 
-  if (moveAxis(state, "x", state.vx * DT, isSolid)) {
+  if (moveAxisWithStepUp(state, "x", state.vx * DT, isSolid) !== 0) {
     state.vx = 0;
   }
-  if (moveAxis(state, "z", state.vz * DT, isSolid)) {
+  if (moveAxisWithStepUp(state, "z", state.vz * DT, isSolid) !== 0) {
     state.vz = 0;
   }
   const falling = state.vy <= 0;
-  if (moveAxis(state, "y", state.vy * DT, isSolid)) {
+  if (moveAxis(state, "y", state.vy * DT, isSolid) !== 0) {
     state.vy = 0;
     state.onGround = falling;
   } else if (falling) {
