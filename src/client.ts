@@ -397,6 +397,7 @@ const SOUND_FAMILIES: Record<string, number> = {
   footstep_concrete: 5,
   footstep_snow: 5,
   impactPunch_medium: 5,
+  splash: 5,
 };
 
 let audioCtx: AudioContext | null = null;
@@ -481,39 +482,13 @@ function playPop(volume = 0.5): void {
   soundsPlayed += 1;
 }
 
-// synthesized water splash: a noise burst through a lowpass filter that
-// sweeps downward - the plunge - with a fast attack and ~0.35s decay
+// real splash samples (rubberduck, CC0 - see assets/sounds/LICENSE-
+// water-splash.txt); the synthesized version read as a generic whoomp
 function playSplash(volume = 0.7): void {
-  if (!audioCtx || !masterGain || volume < 0.03) {
+  if (volume < 0.03) {
     return;
   }
-  const t = audioCtx.currentTime;
-  const dur = 0.4;
-  const buffer = audioCtx.createBuffer(
-    1,
-    Math.ceil(audioCtx.sampleRate * dur),
-    audioCtx.sampleRate,
-  );
-  const data = buffer.getChannelData(0);
-  for (let i = 0; i < data.length; i++) {
-    data[i] = Math.random() * 2 - 1;
-  }
-  const source = audioCtx.createBufferSource();
-  source.buffer = buffer;
-  const filter = audioCtx.createBiquadFilter();
-  filter.type = "lowpass";
-  filter.Q.value = 0.8;
-  filter.frequency.setValueAtTime(1400, t);
-  filter.frequency.exponentialRampToValueAtTime(320, t + dur);
-  const gain = audioCtx.createGain();
-  gain.gain.setValueAtTime(0, t);
-  gain.gain.linearRampToValueAtTime(volume, t + 0.03);
-  gain.gain.exponentialRampToValueAtTime(0.001, t + dur);
-  source.connect(filter);
-  filter.connect(gain);
-  gain.connect(masterGain);
-  source.start(t);
-  soundsPlayed += 1;
+  playSound("splash", volume);
 }
 
 // short synthesized whoosh for swings and throws (no CC0 sample fit)
@@ -931,11 +906,20 @@ type ItemSpriteConfig = {
   /** rotate so the sprite's up-right diagonal becomes vertical (for
    *  tools drawn diagonally but held by a vertical handle) */
   diagonal?: boolean;
+  /** spin the finished mesh 180° about the handle axis, for art whose
+   *  business end would otherwise face the player */
+  aboutFace?: boolean;
 };
 
 const ITEM_SPRITES: Record<number, ItemSpriteConfig> = {
   [PICKAXE]: { url: "/assets/items/pickaxe.png", size: 0.85, grip: [3.5, 12.5], diagonal: true },
-  [AXE]: { url: "/assets/items/axe.png", size: 0.85, grip: [3.5, 12.5], diagonal: true },
+  [AXE]: {
+    url: "/assets/items/axe.png",
+    size: 0.85,
+    grip: [3.5, 12.5],
+    diagonal: true,
+    aboutFace: true,
+  },
   [SHOVEL]: { url: "/assets/items/shovel.png", size: 0.85, grip: [3.5, 12.5], diagonal: true },
   [ROCK]: { url: "/assets/items/rock.png", size: 0.34 },
   [SNOWBALL]: { url: "/assets/items/snowball.png", size: 0.3 },
@@ -1092,6 +1076,9 @@ function extrudePixelArt(img: ImageData, config: ItemSpriteConfig): BufferGeomet
   geometry.setIndex(indices);
   if (config.diagonal) {
     geometry.rotateX(Math.PI / 4);
+  }
+  if (config.aboutFace) {
+    geometry.rotateY(Math.PI);
   }
   geometry.computeBoundingSphere();
   // shared across every mesh using this item; never dispose with a mesh
