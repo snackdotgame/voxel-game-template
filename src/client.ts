@@ -896,20 +896,30 @@ function simTick(): void {
 // The burst is capped to match the server's per-tick input budget.
 const MAX_CATCHUP_TICKS = 6;
 
-// backup pump: occluded/backgrounded pages throttle rAF, which would starve
-// the sim and stale-drop us server-side; a timer keeps inputs flowing
-setInterval(() => {
+// backup pump: backgrounded tabs throttle rAF and clamp DOM timers (1s,
+// then 1/min under intensive throttling), which would starve the sim and
+// make the server think we left. Worker timers are exempt from visibility
+// throttling, so a tiny inline worker keeps ticks flowing while hidden.
+const pumpWorker = new Worker(
+  URL.createObjectURL(
+    new Blob(["setInterval(() => postMessage(0), 100);"], { type: "application/javascript" }),
+  ),
+);
+pumpWorker.onmessage = () => {
   const sinceFrame = performance.now() - lastFrameAt;
   if (sinceFrame > 150) {
     lastFrameAt = performance.now();
     pumpSim(Math.min(sinceFrame, 1000));
   }
-}, 120);
+};
+
+// dev/test: simulate a fully-frozen tab (no sim, no inputs) until this time
+let inputSuspendedUntil = 0;
 
 function pumpSim(frameMs: number): void {
   // don't simulate (or burn input seqs) until the server can hear us;
   // both sides then start the spawn fall from the same first input
-  if (connectionState !== "connected") {
+  if (connectionState !== "connected" || performance.now() < inputSuspendedUntil) {
     simAccumMs = 0;
     return;
   }
@@ -1762,6 +1772,7 @@ declare global {
       lastDeath(): { victim: string; attacker: string } | null;
       attack(target: string): void;
       swing(): number;
+      suspendInput(ms: number): void;
       remoteSwingsSeen(): number;
       streamEventsSeen(): number;
       requestServerDebug(): void;
@@ -1807,6 +1818,9 @@ window.__voxels = {
     void client.streams.send({ type: "attack", target }).catch(() => {});
   },
   swing: () => swingT,
+  suspendInput: (ms) => {
+    inputSuspendedUntil = performance.now() + ms;
+  },
   remoteSwingsSeen: () => remoteSwingsSeen,
   streamEventsSeen: () => streamEventsSeen,
   requestServerDebug: () => {

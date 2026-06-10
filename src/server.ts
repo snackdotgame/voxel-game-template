@@ -57,9 +57,12 @@ const MAX_EDITS = 200_000;
 // Allow short input bursts (catch-up after client jank) but bound per-player CPU.
 const MAX_STEPS_PER_TICK = 8;
 const MAX_QUEUED_INPUTS = 32;
-// Drop players whose input datagrams stop, without waiting for the
-// transport-level disconnect timeout. They rejoin when datagrams resume.
-const STALE_MS = 5_000;
+// Players whose inputs stop (backgrounded tabs) freeze in place as AFK and
+// are only removed after this long — or on a real disconnect.
+const AFK_TIMEOUT_MS = 120_000;
+// Removed players' characters are parked by userId for this long, so
+// AFK-timeouts and tab reloads resume where they left off.
+const PARK_TTL_MS = 300_000;
 
 // Edit-log sync windows, in chunk-column units (32 blocks). SYNC_RADIUS must
 // cover the client's chunk load distance (2.5 chunks) with margin; the gap
@@ -128,11 +131,21 @@ type Drop = {
   noPickupMs: number;
 };
 
+type Parked = {
+  char: CharState;
+  heading: number;
+  item: number;
+  hp: number;
+  at: number;
+};
+
 type World = {
   players: Map<string, Player>;
   lastSeen: Map<string, number>;
-  // inventories survive stale-drop/rejoin; deleted on real disconnect
+  // inventories are keyed by userId so they survive reconnects and AFK
   inventories: Map<string, Map<number, number>>;
+  // characters of removed players, keyed by userId, for seamless resume
+  parked: Map<string, Parked>;
   drops: Map<number, Drop>;
   nextDropId: number;
   dropsDirty: boolean;
@@ -160,6 +173,7 @@ export async function main() {
     players: new Map(),
     lastSeen: new Map(),
     inventories: new Map(),
+    parked: new Map(),
     drops: new Map(),
     nextDropId: 1,
     dropsDirty: false,
@@ -504,39 +518,46 @@ function damagePlayer(
  *      Inventory
  */
 
-function inventoryOf(world: World, id: string): Map<number, number> {
-  let inv = world.inventories.get(id);
+// inventories are keyed by userId (stable across reconnects); helpers take
+// the connection id and resolve through the player entry
+function userIdOf(world: World, connectionId: string): string {
+  return world.players.get(connectionId)?.userId ?? connectionId;
+}
+
+function inventoryOf(world: World, connectionId: string): Map<number, number> {
+  const key = userIdOf(world, connectionId);
+  let inv = world.inventories.get(key);
   if (!inv) {
     inv = starterKit();
-    world.inventories.set(id, inv);
+    world.inventories.set(key, inv);
   }
   return inv;
 }
 
-function sendInventory(world: World, id: string) {
+function sendInventory(world: World, connectionId: string) {
   const items: Record<string, number> = {};
-  for (const [item, count] of inventoryOf(world, id)) {
+  for (const [item, count] of inventoryOf(world, connectionId)) {
     if (count > 0) {
       items[String(item)] = count;
     }
   }
-  server.streams.send(id, { type: "inventory", items });
+  server.streams.send(connectionId, { type: "inventory", items });
 }
 
-function addItem(world: World, id: string, item: number, count: number) {
-  const inv = inventoryOf(world, id);
+function addItem(world: World, connectionId: string, item: number, count: number) {
+  const inv = inventoryOf(world, connectionId);
   inv.set(item, (inv.get(item) ?? 0) + count);
-  sendInventory(world, id);
+  sendInventory(world, connectionId);
 }
 
-function tryConsume(world: World, id: string, item: number, count: number): boolean {
-  const inv = inventoryOf(world, id);
+function tryConsume(world: World, connectionId: string, item: number, count: number): boolean {
+  const inv = inventoryOf(world, connectionId);
   const have = inv.get(item) ?? 0;
   if (have < count) {
     return false;
   }
   inv.set(item, have - count);
-  sendInventory(world, id);
+  sendInventory(world, connectionId);
   return true;
 }
 
@@ -787,21 +808,26 @@ function drainInputQueue(world: World, player: Player) {
 
 function addPlayer(world: World, connection: Connection) {
   // a reconnect (tab reload) is the same user on a new connection: evict
-  // the old body immediately instead of leaving an "echo" until stale-drop
+  // the old body immediately instead of leaving an "echo" until timeout
   for (const [otherId, other] of world.players) {
     if (other.userId === connection.userId && otherId !== connection.id) {
       removePlayer(world, otherId);
     }
   }
 
+  // resume a recently parked character (AFK return or tab reload)
+  const parked = world.parked.get(connection.userId);
+  const fresh = parked && server.elapsedMs() - parked.at < PARK_TTL_MS ? parked : undefined;
+  world.parked.delete(connection.userId);
+
   world.players.set(connection.id, {
     name: connection.userName,
     userId: connection.userId,
-    char: spawnState(),
-    heading: 0,
+    char: fresh ? fresh.char : spawnState(),
+    heading: fresh ? fresh.heading : 0,
     lastSeq: 0,
-    item: 0,
-    hp: MAX_HP,
+    item: fresh ? fresh.item : 0,
+    hp: fresh ? fresh.hp : MAX_HP,
     lastDamageAt: -100000,
     lastAttackAt: -100000,
     protectedUntil: 0,
@@ -818,9 +844,18 @@ function addPlayer(world: World, connection: Connection) {
 }
 
 function removePlayer(world: World, id: string) {
+  const player = world.players.get(id);
+  if (player) {
+    world.parked.set(player.userId, {
+      char: player.char,
+      heading: player.heading,
+      item: player.item,
+      hp: player.hp,
+      at: server.elapsedMs(),
+    });
+  }
   world.players.delete(id);
   world.lastSeen.delete(id);
-  world.inventories.delete(id);
   server.streams.broadcast({ type: "leave", id });
 }
 
@@ -852,10 +887,26 @@ function syncConnections(world: World) {
 function dropStalePlayers(world: World) {
   const now = server.elapsedMs();
   for (const [id, seenAt] of world.lastSeen) {
-    if (world.players.has(id) && now - seenAt > STALE_MS) {
-      // Keep lastSeen so a resumed connection re-adds via handleInput.
+    if (world.players.has(id) && now - seenAt > AFK_TIMEOUT_MS) {
+      // Long-AFK: park the character and remove; lastSeen stays so a
+      // resumed connection re-adds (and resumes) via handleInput.
+      const player = world.players.get(id);
+      if (player) {
+        world.parked.set(player.userId, {
+          char: player.char,
+          heading: player.heading,
+          item: player.item,
+          hp: player.hp,
+          at: now,
+        });
+      }
       world.players.delete(id);
       server.streams.broadcast({ type: "leave", id });
+    }
+  }
+  for (const [userId, parked] of world.parked) {
+    if (now - parked.at > PARK_TTL_MS) {
+      world.parked.delete(userId);
     }
   }
 }
