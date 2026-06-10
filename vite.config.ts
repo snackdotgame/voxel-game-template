@@ -429,20 +429,75 @@ function createNetworkStats() {
   };
 }
 
+// Keep-alive pings must keep flowing while the tab is backgrounded: page
+// timers throttle to once a minute under intensive throttling, but worker
+// timers and worker message delivery are exempt, so the ping cadence comes
+// from a Worker. Falls back to page timers when workers are unavailable
+// (e.g. a worker-src CSP).
+function createPingTicker(intervalMs) {
+  try {
+    const source = "setInterval(() => postMessage(0), " + intervalMs + ");";
+    // the URL must outlive worker startup (it is fetched asynchronously);
+    // it is revoked in stop()
+    const url = URL.createObjectURL(new Blob([source], { type: "application/javascript" }));
+    const worker = new Worker(url);
+    let workerFailed = false;
+    worker.addEventListener("error", () => {
+      workerFailed = true;
+    });
+    return {
+      next() {
+        if (workerFailed) {
+          return sleep(intervalMs);
+        }
+        return new Promise((resolve) => {
+          let settled = false;
+          const finish = () => {
+            if (!settled) {
+              settled = true;
+              resolve();
+            }
+          };
+          worker.addEventListener("message", finish, { once: true });
+          // a silently-dead worker must never stall the ping loop; this
+          // page timer may be throttled, which only degrades cadence
+          window.setTimeout(finish, intervalMs * 4);
+        });
+      },
+      stop() {
+        worker.terminate();
+        URL.revokeObjectURL(url);
+      },
+    };
+  } catch {
+    return {
+      next() {
+        return sleep(intervalMs);
+      },
+      stop() {},
+    };
+  }
+}
+
 async function sampleNetworkRtt(transport, networkStats) {
   const closed = transport.closed.then(() => true, () => true);
+  const ticker = createPingTicker(NETWORK_RTT_PING_INTERVAL_MS);
 
-  while (true) {
-    const pingId = networkStats.nextPingId();
-    await sendControlMessage(transport, { type: "ping", id: pingId });
-    networkStats.recordPing(pingId, performance.now());
-    const isClosed = await Promise.race([
-      sleep(NETWORK_RTT_PING_INTERVAL_MS).then(() => false),
-      closed,
-    ]);
-    if (isClosed) {
-      return;
+  try {
+    while (true) {
+      const pingId = networkStats.nextPingId();
+      await sendControlMessage(transport, { type: "ping", id: pingId });
+      networkStats.recordPing(pingId, performance.now());
+      const isClosed = await Promise.race([
+        ticker.next().then(() => false),
+        closed,
+      ]);
+      if (isClosed) {
+        return;
+      }
     }
+  } finally {
+    ticker.stop();
   }
 }
 
