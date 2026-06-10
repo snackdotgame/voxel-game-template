@@ -1,20 +1,26 @@
 import glvec3 from "gl-vec3";
 import { makeProfileHook } from "./util";
 
-import { SceneOctreeManager } from "./sceneOctreeManager";
-
-import { Scene, ScenePerformancePriority } from "@babylonjs/core/scene";
-import { FreeCamera } from "@babylonjs/core/Cameras/freeCamera";
-import { Engine as BabylonEngine } from "@babylonjs/core/Engines/engine";
-import { DirectionalLight } from "@babylonjs/core/Lights/directionalLight";
-import { StandardMaterial } from "@babylonjs/core/Materials/standardMaterial";
-import { Color3, Color4 } from "@babylonjs/core/Maths/math.color";
-import { Vector3 } from "@babylonjs/core/Maths/math.vector";
-import { TransformNode } from "@babylonjs/core/Meshes/transformNode";
-import { Mesh } from "@babylonjs/core/Meshes/mesh";
-import type { AbstractMesh } from "@babylonjs/core/Meshes/abstractMesh";
-import { CreateLines } from "@babylonjs/core/Meshes/Builders/linesBuilder";
-import { CreatePlane } from "@babylonjs/core/Meshes/Builders/planeBuilder";
+import {
+  AmbientLight,
+  BufferGeometry,
+  Color,
+  DirectionalLight,
+  DoubleSide,
+  Group,
+  Line,
+  LineBasicMaterial,
+  Material,
+  Mesh,
+  MeshBasicMaterial,
+  MeshLambertMaterial,
+  Object3D,
+  PerspectiveCamera,
+  PlaneGeometry,
+  Scene,
+  Vector3,
+  WebGLRenderer,
+} from "three";
 
 import type { Engine } from "../index";
 
@@ -37,9 +43,25 @@ var defaults = {
   renderOnResize: true,
 };
 
+/*
+ *    Coordinate conventions
+ *
+ *  Game logic runs in noa's left-handed voxel coordinates (heading 0
+ *  faces +z). three.js is right-handed, so the renderer negates z at
+ *  the game/render boundary:
+ *
+ *    render position = (x, y, -z)
+ *    camera holder rotation (order YXZ): y = -heading, x = -pitch
+ *
+ *  This is the standard LH->RH conversion: applied consistently to the
+ *  world data and the camera, it produces the same image Babylon did
+ *  (not a mirrored one). Meshes parented into the scene are authored
+ *  directly in three.js conventions (characters face local +z, MC-style).
+ */
+
 /**
  * `noa.rendering` -
- * Manages all rendering, and the BABYLON scene, materials, etc.
+ * Manages all rendering, and the three.js scene, materials, etc.
  *
  * This module uses the following default options (from the options
  * object passed to the {@link Engine}):
@@ -56,7 +78,6 @@ var defaults = {
  *     AOmultipliers: [0.93, 0.8, 0.5],
  *     reverseAOmultiplier: 1.0,
  *     preserveDrawingBuffer: true,
- *     octreeBlockSize: 2,
  *     renderOnResize: true,
  * }
  * ```
@@ -78,23 +99,25 @@ export class Rendering {
   /** @internal */
   meshingCutoffTime: number;
 
-  /** the Babylon.js Engine object for the scene */
-  engine!: BabylonEngine;
-  /** the Babylon.js Scene object for the world */
+  /** the three.js WebGLRenderer for the scene */
+  engine!: WebGLRenderer;
+  /** the three.js Scene object for the world */
   scene!: Scene;
-  /** a Babylon.js DirectionalLight that is added to the scene */
+  /** a three.js DirectionalLight that is added to the scene */
   light!: DirectionalLight;
-  /** the Babylon.js FreeCamera that renders the scene */
-  camera!: FreeCamera;
+  /** ambient light for the scene */
+  ambientLight!: AmbientLight;
+  /** the three.js PerspectiveCamera that renders the scene */
+  camera!: PerspectiveCamera;
 
   /** @internal */
-  _octreeManager!: SceneOctreeManager;
+  _canvas!: HTMLCanvasElement;
   /** @internal */
-  _cameraHolder!: TransformNode;
+  _cameraHolder!: Group;
   /** @internal */
   _camScreen!: Mesh;
   /** @internal */
-  _camScreenMat!: StandardMaterial;
+  _camScreenMat!: MeshBasicMaterial;
   /** @internal */
   _camLocBlock!: number;
   /** @internal */
@@ -116,10 +139,7 @@ export class Rendering {
     this.revAoVal = opts.reverseAOmultiplier;
     this.meshingCutoffTime = 6; // ms
 
-    // the Babylon.js Engine, Scene, DirectionalLight, and FreeCamera
-    // are all declared above, and assigned in _initScene below
-
-    // sets up babylon scene, lights, etc
+    // sets up the three.js scene, lights, etc
     this._initScene(canvas, opts);
 
     // for debugging
@@ -127,62 +147,86 @@ export class Rendering {
   }
 
   /**
-   * Constructor helper - set up the Babylon.js scene and basic components
+   * Constructor helper - set up the three.js scene and basic components
    * @internal
    */
   _initScene(canvas: HTMLCanvasElement, opts: any) {
-    // init internal properties
-    this.engine = new BabylonEngine(canvas, opts.antiAlias, {
-      preserveDrawingBuffer: opts.preserveDrawingBuffer,
+    this._canvas = canvas;
+    this.engine = new WebGLRenderer({
+      canvas,
+      antialias: !!opts.antiAlias,
+      preserveDrawingBuffer: !!opts.preserveDrawingBuffer,
     });
-    var scene = new Scene(this.engine);
+    this.engine.setClearColor(new Color(...(opts.clearColor as [number, number, number])), 1);
+
+    var scene = new Scene();
     this.scene = scene;
-    // remove built-in listeners
-    scene.detachControl();
 
-    // this disables a few babylon features that noa doesn't use
-    scene.performancePriority = ScenePerformancePriority.Intermediate;
-    scene.autoClear = true;
+    // camera, and a node to hold it and accumulate rotations.
+    // Babylon applied .rotation as yaw->pitch->roll, i.e. three's 'YXZ'
+    this._cameraHolder = new Group();
+    this._cameraHolder.name = "camHolder";
+    this._cameraHolder.rotation.order = "YXZ";
+    (this._cameraHolder as any).userData.noaSkipRebase = true;
+    scene.add(this._cameraHolder);
 
-    // octree manager class
-    var blockSize = Math.round(opts.octreeBlockSize);
-    this._octreeManager = new SceneOctreeManager(this, blockSize);
+    var w = canvas.clientWidth || canvas.width || 1;
+    var h = canvas.clientHeight || canvas.height || 1;
+    this.engine.setSize(w, h, false);
+    // Babylon's default vertical FOV is 0.8 radians; three wants degrees
+    this.camera = new PerspectiveCamera(0.8 * (180 / Math.PI), w / h, 0.01, 10000);
+    this._cameraHolder.add(this.camera);
 
-    // camera, and a node to hold it and accumulate rotations
-    this._cameraHolder = new TransformNode("camHolder", scene);
-    this.camera = new FreeCamera("camera", new Vector3(0, 0, 0), scene);
-    this.camera.parent = this._cameraHolder;
-    this.camera.minZ = 0.01;
+    // expose a Babylon-style forward ray accessor, returning the view
+    // direction in GAME coordinates (z un-negated); game code and the
+    // test harnesses rely on this shape
+    var fwd = new Vector3();
+    var cam = this.camera;
+    (this.camera as any).getForwardRay = () => {
+      cam.getWorldDirection(fwd);
+      return { direction: { x: fwd.x, y: fwd.y, z: -fwd.z } };
+    };
 
-    // plane obscuring the camera - for overlaying an effect on the whole view
-    this._camScreen = CreatePlane("camScreen", { size: 10 }, scene);
-    this.addMeshToScene(this._camScreen);
-    this._camScreen.position.z = 0.1;
-    this._camScreen.parent = this.camera;
-    this._camScreenMat = this.makeStandardMaterial("camera_screen_mat");
-    this._camScreen.material = this._camScreenMat;
-    this._camScreen.setEnabled(false);
-    this._camScreenMat.freeze();
+    // plane obscuring the camera - for overlaying an effect on the whole view.
+    // the three camera looks down -z, so "in front" is negative z
+    // unlit overlay: Babylon tinted with ambientColor * scene ambient, so
+    // the equivalent here is a flat (basic) material at half the mat color
+    this._camScreen = new Mesh(
+      new PlaneGeometry(10, 10),
+      new MeshBasicMaterial({ transparent: true, depthWrite: false }),
+    );
+    this._camScreen.name = "camScreen";
+    this._camScreenMat = this._camScreen.material as MeshBasicMaterial;
+    this._camScreen.position.z = -0.1;
+    this._camScreen.frustumCulled = false;
+    this._camScreen.visible = false;
+    this.camera.add(this._camScreen);
     this._camLocBlock = 0;
 
-    // apply some defaults
-    scene.clearColor = Color4.FromArray(opts.clearColor);
-    scene.ambientColor = Color3.FromArray(opts.ambientColor);
+    // lighting: scene ambient + one directional light. The light vector
+    // is in game coords, so z flips at the boundary like everything else
+    this.ambientLight = new AmbientLight(
+      new Color(...(opts.ambientColor as [number, number, number])),
+      1,
+    );
+    scene.add(this.ambientLight);
 
-    var lightVec = Vector3.FromArray(opts.lightVector);
-    this.light = new DirectionalLight("light", lightVec, scene);
-    this.light.diffuse = Color3.FromArray(opts.lightDiffuse);
-    this.light.specular = Color3.FromArray(opts.lightSpecular);
-
-    // scene options
-    scene.skipPointerMovePicking = true;
+    var lv = opts.lightVector;
+    this.light = new DirectionalLight(
+      new Color(...(opts.lightDiffuse as [number, number, number])),
+      1,
+    );
+    this.light.position.set(-lv[0], -lv[1], lv[2]);
+    this.light.target.position.set(0, 0, 0);
+    (this.light as any).userData.noaSkipRebase = true;
+    scene.add(this.light);
   }
 
   /*
    *   PUBLIC API
    */
 
-  /** The Babylon `scene` object representing the game world. */
+  /** The three.js `Scene` object representing the game world. */
   getScene() {
     return this.scene;
   }
@@ -198,13 +242,9 @@ export class Rendering {
     profile_hook("start");
     updateCameraForRender(this);
     profile_hook("updateCamera");
-    this.engine.beginFrame();
-    profile_hook("beginFrame");
-    this.scene.render();
+    this.engine.render(this.scene, this.camera);
     profile_hook("render");
     fps_hook();
-    this.engine.endFrame();
-    profile_hook("endFrame");
     profile_hook("end");
   }
 
@@ -215,9 +255,13 @@ export class Rendering {
 
   /** @internal */
   resize() {
-    this.engine.resize();
+    var w = this._canvas.clientWidth || this._canvas.width || 1;
+    var h = this._canvas.clientHeight || this._canvas.height || 1;
+    this.engine.setSize(w, h, false);
+    this.camera.aspect = w / h;
+    this.camera.updateProjectionMatrix();
     if (this.noa._paused && this.renderOnResize) {
-      this.scene.render();
+      this.engine.render(this.scene, this.camera);
     }
   }
 
@@ -237,73 +281,75 @@ export class Rendering {
           hlpos[i] += normArr![i] > 0 ? 1 + slop : -slop;
         }
       }
-      m.position.copyFromFloats(hlpos[0], hlpos[1], hlpos[2]);
+      m.position.set(hlpos[0], hlpos[1], -hlpos[2]);
       m.rotation.x = normArr![1] ? Math.PI / 2 : 0;
       m.rotation.y = normArr![0] ? Math.PI / 2 : 0;
     }
-    m.setEnabled(show);
+    m.visible = show;
   }
 
   /**
-   * Adds a mesh to the engine's selection/octree logic so that it renders.
+   * Adds a mesh to the engine's scene so that it renders.
    *
-   * @param mesh the mesh to add to the scene
+   * Replaces the Babylon octree bookkeeping; three.js does per-object
+   * frustum culling on its own, so this just parents the mesh into the
+   * scene and positions unparented meshes in local (render) coords.
+   *
+   * @param mesh the mesh (or object tree) to add to the scene
    * @param isStatic pass in true if mesh never moves (i.e. never changes chunks)
    * @param pos (optional) global position where the mesh should be
    * @param containingChunk (optional) chunk to which the mesh is statically bound
    */
   addMeshToScene(
-    mesh: AbstractMesh,
+    mesh: Object3D,
     isStatic: boolean = false,
     pos: number[] | null = null,
     containingChunk: any = null,
   ) {
-    if (!mesh.metadata) mesh.metadata = {};
+    void containingChunk;
 
-    // if mesh is already added, just make sure it's visisble
-    if (mesh.metadata[addedToSceneFlag]) {
-      this._octreeManager.setMeshVisibility(mesh, true);
+    // if mesh is already added, just make sure it's visible
+    if (mesh.userData[addedToSceneFlag]) {
+      mesh.visible = true;
       return;
     }
-    mesh.metadata[addedToSceneFlag] = true;
 
     // find local position for mesh and move it there (unless it's parented)
     if (!mesh.parent) {
-      if (!pos) pos = mesh.position.asArray();
+      if (!pos) pos = [mesh.position.x, mesh.position.y, -mesh.position.z];
       var lpos = this.noa.globalToLocal(pos, null, []);
-      mesh.position.fromArray(lpos);
+      mesh.position.set(lpos[0], lpos[1], -lpos[2]);
+      this.scene.add(mesh);
+      mesh.userData[addedToSceneFlag] = true;
+      if (isStatic) {
+        mesh.matrixAutoUpdate = false;
+        mesh.updateMatrix();
+      }
+    } else {
+      // parented meshes live wherever their parent is; just flag them
+      mesh.userData[addedToSceneFlag] = true;
     }
-
-    // add to the octree, and remove again on disposal
-    this._octreeManager.addMesh(mesh, isStatic, pos as number[], containingChunk);
-    mesh.onDisposeObservable.add(() => {
-      this._octreeManager.removeMesh(mesh);
-      mesh.metadata[addedToSceneFlag] = false;
-    });
   }
 
   /**
    * Use this to toggle the visibility of a mesh without disposing it or
    * removing it from the scene.
    */
-  setMeshVisibility(mesh: AbstractMesh, visible: boolean = false) {
-    if (!mesh.metadata) mesh.metadata = {};
-    if (mesh.metadata[addedToSceneFlag]) {
-      this._octreeManager.setMeshVisibility(mesh, visible);
+  setMeshVisibility(mesh: Object3D, visible: boolean = false) {
+    if (mesh.userData[addedToSceneFlag]) {
+      mesh.visible = visible;
     } else {
       if (visible) this.addMeshToScene(mesh);
     }
   }
 
   /**
-   * Create a default standardMaterial:
-   * flat, nonspecular, fully reflects diffuse and ambient light
+   * Create a default material: flat, nonspecular, fully reflects
+   * diffuse and ambient light. (Kept under its Babylon-era name.)
    */
-  makeStandardMaterial(name: string): StandardMaterial {
-    var mat = new StandardMaterial(name, this.scene);
-    mat.specularColor.copyFromFloats(0, 0, 0);
-    mat.ambientColor.copyFromFloats(1, 1, 1);
-    mat.diffuseColor.copyFromFloats(1, 1, 1);
+  makeStandardMaterial(name: string): MeshLambertMaterial {
+    var mat = new MeshLambertMaterial();
+    mat.name = name;
     return mat;
   }
 
@@ -333,119 +379,40 @@ export class Rendering {
   // change world origin offset, and rebase everything with a position
   /** @internal */
   _rebaseOrigin(delta: number[]) {
-    var dvec = new Vector3(delta[0], delta[1], delta[2]);
+    // game-coord delta, so the render-space z displacement is negated
+    var dx = delta[0];
+    var dy = delta[1];
+    var dz = -delta[2];
 
-    this.scene.meshes.forEach((mesh) => {
-      // parented meshes don't live in the world coord system
-      if (mesh.parent) return;
-
-      // move each mesh by delta (even though most are managed by components)
-      mesh.position.subtractInPlace(dvec);
-
-      if (mesh.isWorldMatrixFrozen) {
-        // paradoxically this unfreezes, then re-freezes the matrix
-        mesh.freezeWorldMatrix();
-      }
+    this.scene.children.forEach((obj) => {
+      if (obj.userData.noaSkipRebase) return;
+      obj.position.x -= dx;
+      obj.position.y -= dy;
+      obj.position.z -= dz;
+      if (obj.matrixAutoUpdate === false) obj.updateMatrix();
     });
-
-    // updates position of all octree blocks
-    this._octreeManager.rebase(dvec);
   }
 
-  /*
-   *
-   *      sanity checks:
-   *
-   */
   /** @internal */
   debug_SceneCheck() {
-    var meshes = this.scene.meshes;
-    var octree = (this.scene as any)._selectionOctree;
-    var dyns = octree.dynamicContent;
-    var octs: any[] = [];
-    var numOcts = 0;
-    var numSubs = 0;
-    var mats = this.scene.materials;
-    var allmats: any[] = [];
-    mats.forEach((mat) => {
-      // @ts-ignore
-      if (mat.subMaterials) mat.subMaterials.forEach((mat) => allmats.push(mat));
-      else allmats.push(mat);
-    });
-    octree.blocks.forEach(function (block: any) {
-      numOcts++;
-      block.entries.forEach((m: any) => octs.push(m));
-    });
-    meshes.forEach(function (m) {
-      if (m.isDisposed()) warn(m, "disposed mesh in scene");
-      if (empty(m)) return;
-      if (missing(m, dyns, octs)) warn(m, "non-empty mesh missing from octree");
-      if (!m.material) {
-        warn(m, "non-empty scene mesh with no material");
-        return;
+    var meshCount = 0;
+    var noMat = 0;
+    this.scene.traverse((obj) => {
+      if ((obj as Mesh).isMesh) {
+        meshCount++;
+        if (!(obj as Mesh).material) noMat++;
       }
-      numSubs += m.subMeshes ? m.subMeshes.length : 1;
-      // @ts-ignore
-      var mats = m.material.subMaterials || [m.material];
-      mats.forEach(function (mat: any) {
-        if (missing(mat, mats)) warn(mat, "mesh material not in scene");
-      });
     });
-    var unusedMats: any[] = [];
-    allmats.forEach((mat) => {
-      var used = false;
-      meshes.forEach((mesh) => {
-        if (mesh.material === mat) used = true;
-        if (!mesh.material) return;
-        // @ts-ignore
-        var mats = mesh.material.subMaterials || [mesh.material];
-        if (mats.includes(mat)) used = true;
-      });
-      if (!used) unusedMats.push(mat.name);
-    });
-    if (unusedMats.length) {
-      console.warn("Materials unused by any mesh: ", unusedMats.join(", "));
-    }
-    dyns.forEach(function (m: any) {
-      if (missing(m, meshes)) warn(m, "octree/dynamic mesh not in scene");
-    });
-    octs.forEach(function (m) {
-      if (missing(m, meshes)) warn(m, "octree block mesh not in scene");
-    });
-    var avgPerOct = Math.round((10 * octs.length) / numOcts) / 10;
-    console.log(
-      "meshes - octree:",
-      octs.length,
-      "  dynamic:",
-      dyns.length,
-      "   subMeshes:",
-      numSubs,
-      "   avg meshes/octreeBlock:",
-      avgPerOct,
-    );
-
-    function warn(obj: any, msg: string) {
-      console.warn(obj.name + " --- " + msg);
-    }
-
-    function empty(mesh: any) {
-      return mesh.getIndices().length === 0;
-    }
-
-    function missing(obj: any, list1: any, list2?: any) {
-      if (!obj) return false;
-      if (list1.includes(obj)) return false;
-      if (list2 && list2.includes(obj)) return false;
-      return true;
-    }
+    console.log("meshes in scene:", meshCount, "  without material:", noMat);
     return "done.";
   }
 
   /** @internal */
   debug_MeshCount() {
     var ct: { [key: string]: number } = {};
-    this.scene.meshes.forEach((m) => {
-      var n = m.name || "";
+    this.scene.traverse((obj) => {
+      if (!(obj as Mesh).isMesh) return;
+      var n = obj.name || "";
       n = n.replace(/-\d+.*/, "#");
       n = n.replace(/\d+.*/, "#");
       n = n.replace(/(rotHolder|camHolder|camScreen)/, "rendering use");
@@ -457,6 +424,32 @@ export class Rendering {
   }
 }
 
+/**
+ * Removes an object tree from the scene and disposes its geometries.
+ * Materials flagged `userData.shared` are left alone (terrain materials
+ * and other caches are reused across meshes); everything else is
+ * disposed along with any textures it owns.
+ * @internal
+ */
+export function disposeObject3D(obj: Object3D) {
+  obj.removeFromParent();
+  obj.traverse((node) => {
+    var mesh = node as Mesh;
+    if (!mesh.isMesh && !(node as Line).isLine) return;
+    var geom = (node as Mesh).geometry as BufferGeometry | undefined;
+    if (geom) geom.dispose();
+    var mat = (node as Mesh).material as Material | Material[] | undefined;
+    if (!mat) return;
+    var mats = Array.isArray(mat) ? mat : [mat];
+    mats.forEach((m) => {
+      if (m.userData.shared) return;
+      var map = (m as MeshLambertMaterial).map;
+      if (map) map.dispose();
+      m.dispose();
+    });
+  });
+}
+
 var hlpos: number[] = [];
 
 var addedToSceneFlag = "noa_added_to_scene";
@@ -466,10 +459,12 @@ var addedToSceneFlag = "noa_added_to_scene";
 function updateCameraForRender(self: Rendering) {
   var cam = self.noa.camera;
   var tgtLoc = cam._localGetTargetPosition();
-  self._cameraHolder.position.copyFromFloats(tgtLoc[0], tgtLoc[1], tgtLoc[2]);
-  self._cameraHolder.rotation.x = cam.pitch;
-  self._cameraHolder.rotation.y = cam.heading;
-  self.camera.position.z = -cam.currentZoom;
+  self._cameraHolder.position.set(tgtLoc[0], tgtLoc[1], -tgtLoc[2]);
+  // game heading/pitch -> render rotations (see coordinate notes up top)
+  self._cameraHolder.rotation.x = -cam.pitch;
+  self._cameraHolder.rotation.y = -cam.heading;
+  // the camera looks down its local -z, so "behind" the target is +z
+  self.camera.position.z = cam.currentZoom;
 
   // applies screen effect when camera is inside a transparent voxel
   var cloc = cam._localGetPosition();
@@ -486,7 +481,7 @@ function updateCameraForRender(self: Rendering) {
 function checkCameraEffect(self: Rendering, id: number) {
   if (id === self._camLocBlock) return;
   if (id === 0) {
-    self._camScreen.setEnabled(false);
+    self._camScreen.visible = false;
   } else {
     var matId = self.noa.registry.getBlockFaceMaterial(id, 0);
     if (matId) {
@@ -494,10 +489,10 @@ function checkCameraEffect(self: Rendering, id: number) {
       var col = matData.color;
       var alpha = matData.alpha;
       if (col && alpha && alpha < 1) {
-        self._camScreenMat.diffuseColor.set(0, 0, 0);
-        self._camScreenMat.ambientColor.set(col[0], col[1], col[2]);
-        self._camScreenMat.alpha = alpha;
-        self._camScreen.setEnabled(true);
+        // matches the Babylon look: ambientColor (col) * scene ambient (0.5)
+        self._camScreenMat.color.setRGB(col[0] * 0.5, col[1] * 0.5, col[2] * 0.5);
+        self._camScreenMat.opacity = alpha;
+        self._camScreen.visible = true;
       }
     }
   }
@@ -508,34 +503,33 @@ function checkCameraEffect(self: Rendering, id: number) {
 function getHighlightMesh(rendering: Rendering): Mesh {
   var mesh = rendering._highlightMesh;
   if (!mesh) {
-    mesh = CreatePlane("highlight", { size: 1.0 }, rendering.scene);
-    var hlm = rendering.makeStandardMaterial("block_highlight_mat");
-    hlm.backFaceCulling = false;
-    hlm.emissiveColor = new Color3(1, 1, 1);
-    hlm.alpha = 0.2;
-    hlm.freeze();
-    mesh.material = hlm;
+    var hlm = new MeshBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.2,
+      side: DoubleSide,
+      depthWrite: false,
+    });
+    mesh = new Mesh(new PlaneGeometry(1, 1), hlm);
+    mesh.name = "highlight";
 
     // outline
     var s = 0.5;
-    var lines = CreateLines(
-      "hightlightLines",
-      {
-        points: [
-          new Vector3(s, s, 0),
-          new Vector3(s, -s, 0),
-          new Vector3(-s, -s, 0),
-          new Vector3(-s, s, 0),
-          new Vector3(s, s, 0),
-        ],
-      },
-      rendering.scene,
+    var pts = [
+      new Vector3(s, s, 0),
+      new Vector3(s, -s, 0),
+      new Vector3(-s, -s, 0),
+      new Vector3(-s, s, 0),
+      new Vector3(s, s, 0),
+    ];
+    var lines = new Line(
+      new BufferGeometry().setFromPoints(pts),
+      new LineBasicMaterial({ color: 0xffffff }),
     );
-    lines.color = new Color3(1, 1, 1);
-    lines.parent = mesh;
+    lines.name = "highlightLines";
+    mesh.add(lines);
 
     rendering.addMeshToScene(mesh);
-    rendering.addMeshToScene(lines);
     rendering._highlightMesh = mesh;
   }
   return mesh;

@@ -1,8 +1,5 @@
-import { Engine } from "@babylonjs/core/Engines/engine";
-import { Texture } from "@babylonjs/core/Materials/Textures/texture";
-import { MaterialPluginBase } from "@babylonjs/core/Materials/materialPluginBase";
-import { RawTexture2DArray } from "@babylonjs/core/Materials/Textures/rawTexture2DArray";
-import type { Material } from "@babylonjs/core/Materials/material";
+import { NearestFilter, SRGBColorSpace, TextureLoader } from "three";
+import type { Material, MeshLambertMaterial } from "three";
 
 import type { Engine as NoaEngine } from "../index";
 
@@ -29,8 +26,7 @@ export class TerrainMatManager {
 
   constructor(noa: NoaEngine) {
     // make a baseline default material for untextured terrain with no alpha
-    this._defaultMat = noa.rendering.makeStandardMaterial("base-terrain");
-    this._defaultMat.freeze();
+    this._defaultMat = makeTerrainMaterial(noa, "base-terrain");
 
     this.allMaterials = [this._defaultMat];
 
@@ -71,7 +67,7 @@ export class TerrainMatManager {
   }
 
   /**
-   * Get a Babylon Material object, given a terrainMatID (gotten from this module)
+   * Get a three.js Material object, given a terrainMatID (gotten from this module)
    */
   getMaterial(terrainMatID = 1) {
     return this._terrainIDtoMatObject[terrainMatID];
@@ -132,127 +128,40 @@ function createTerrainMat(self: TerrainMatManager, blockMatID = 0): Material {
     var needsAlpha = matInfo.alpha > 0 && matInfo.alpha < 1;
     if (!needsAlpha) return self._defaultMat;
     var matName = "terrain-alpha-" + blockMatID;
-    var plainMat = self.noa.rendering.makeStandardMaterial(matName);
-    plainMat.alpha = matInfo.alpha;
-    plainMat.freeze();
+    var plainMat = makeTerrainMaterial(self.noa, matName);
+    plainMat.transparent = true;
+    plainMat.opacity = matInfo.alpha;
+    plainMat.depthWrite = false;
     return plainMat;
   }
 
-  // remaining case is a new material with a diffuse texture
-  var scene = self.noa.rendering.getScene();
-  var mat = self.noa.rendering.makeStandardMaterial("terrain-textured-" + blockMatID);
-  var texURL = matInfo.texture;
-  var sampling = Texture.NEAREST_SAMPLINGMODE;
-  var tex = new Texture(texURL, scene, true, false, sampling);
-  if (matInfo.texHasAlpha) tex.hasAlpha = true;
-  mat.diffuseTexture = tex;
-
-  // it texture is an atlas, apply material plugin
-  // and check whether any material for the atlas needs alpha
+  // the original (Babylon) engine also supported texture-atlas materials
+  // via a custom 2D-texture-array shader plugin; nothing in this game
+  // registers an atlas, so that path is intentionally not ported
   if (matInfo.atlasIndex >= 0) {
-    new TerrainMaterialPlugin(mat, tex);
-    if (self.noa.registry._textureNeedsAlpha(matInfo.texture)) {
-      tex.hasAlpha = true;
-    }
+    throw new Error("Texture-atlas terrain materials are not supported by the three.js renderer");
   }
 
-  mat.freeze();
+  // remaining case is a new material with a diffuse texture
+  var mat = makeTerrainMaterial(self.noa, "terrain-textured-" + blockMatID);
+  var texURL = matInfo.texture;
+  var tex = new TextureLoader().load(texURL);
+  tex.magFilter = NearestFilter;
+  tex.minFilter = NearestFilter;
+  tex.colorSpace = SRGBColorSpace;
+  if (matInfo.texHasAlpha) mat.alphaTest = 0.5;
+  mat.map = tex;
+
   return mat;
 }
 
 /**
- *
- *      Babylon material plugin - twiddles the defines/shaders/etc so that
- *      a standard material can use textures from a 2D texture atlas.
- *
+ * Baseline terrain material: lit by ambient + directional light, tinted
+ * by the per-vertex colors the mesher bakes in (block color and AO).
  */
-
-class TerrainMaterialPlugin extends MaterialPluginBase {
-  _atlasTextureArray: RawTexture2DArray | null;
-
-  constructor(material: Material, texture: Texture) {
-    var priority = 200;
-    var defines = { NOA_TWOD_ARRAY_TEXTURE: false };
-    super(material, "TestPlugin", priority, defines);
-    this._enable(true);
-    this._atlasTextureArray = null;
-
-    texture.onLoadObservable.add((tex) => {
-      this.setTextureArrayData(tex as Texture);
-    });
-  }
-
-  setTextureArrayData(texture: Texture) {
-    var { width, height } = texture.getSize();
-    var numLayers = Math.round(height / width);
-    height = width;
-    var data = texture._readPixelsSync();
-
-    var format = Engine.TEXTUREFORMAT_RGBA;
-    var genMipMaps = true;
-    var invertY = false;
-    var mode = Texture.NEAREST_SAMPLINGMODE;
-    var scene = texture.getScene()!;
-
-    this._atlasTextureArray = new RawTexture2DArray(
-      data,
-      width,
-      height,
-      numLayers,
-      format,
-      scene,
-      genMipMaps,
-      invertY,
-      mode,
-    );
-  }
-
-  prepareDefines(defines: any, _scene: any, _mesh: any) {
-    defines["NOA_TWOD_ARRAY_TEXTURE"] = true;
-  }
-
-  getClassName() {
-    return "TerrainMaterialPluginName";
-  }
-
-  getSamplers(samplers: string[]) {
-    samplers.push("atlasTexture");
-  }
-
-  getAttributes(attributes: string[]) {
-    attributes.push("texAtlasIndices");
-  }
-
-  getUniforms() {
-    return { ubo: [] };
-  }
-
-  bindForSubMesh(uniformBuffer: any, _scene: any, _engine: any, _subMesh: any) {
-    if (this._atlasTextureArray) {
-      uniformBuffer.setTexture("atlasTexture", this._atlasTextureArray);
-    }
-  }
-
-  getCustomCode(shaderType: string): any {
-    if (shaderType === "vertex")
-      return {
-        CUSTOM_VERTEX_MAIN_BEGIN: `
-                texAtlasIndex = texAtlasIndices;
-            `,
-        CUSTOM_VERTEX_DEFINITIONS: `
-                uniform highp sampler2DArray atlasTexture;
-                attribute float texAtlasIndices;
-                varying float texAtlasIndex;
-            `,
-      };
-    if (shaderType === "fragment")
-      return {
-        "!baseColor\\=texture2D\\(diffuseSampler,vDiffuseUV\\+uvOffset\\);": `baseColor = texture(atlasTexture, vec3(vDiffuseUV, texAtlasIndex));`,
-        CUSTOM_FRAGMENT_DEFINITIONS: `
-                uniform highp sampler2DArray atlasTexture;
-                varying float texAtlasIndex;
-            `,
-      };
-    return null;
-  }
+function makeTerrainMaterial(noa: NoaEngine, name: string): MeshLambertMaterial {
+  var mat = noa.rendering.makeStandardMaterial(name);
+  mat.vertexColors = true;
+  mat.userData.shared = true;
+  return mat;
 }

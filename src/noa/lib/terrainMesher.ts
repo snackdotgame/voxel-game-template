@@ -1,7 +1,7 @@
 import ndarray from "ndarray";
-import { Mesh } from "@babylonjs/core/Meshes/mesh";
-import { VertexData } from "@babylonjs/core/Meshes/mesh.vertexData";
+import { BufferAttribute, BufferGeometry, Mesh } from "three";
 import { TerrainMatManager } from "./terrainMaterials";
+import { disposeObject3D } from "./rendering";
 import { makeProfileHook } from "./util";
 import type { Engine } from "../index";
 import type { Chunk } from "./chunk";
@@ -59,7 +59,7 @@ export class TerrainMesher {
     this.disposeChunk = function (chunk) {
       chunk._terrainMeshes.forEach((mesh) => {
         noa.emit("removingTerrainMesh", mesh);
-        mesh.dispose();
+        disposeObject3D(mesh);
       });
       chunk._terrainMeshes.length = 0;
     };
@@ -86,14 +86,10 @@ export class TerrainMesher {
 
       // add meshes to scene and finish
       meshes.forEach((mesh) => {
-        mesh.cullingStrategy = Mesh.CULLINGSTRATEGY_BOUNDINGSPHERE_ONLY;
         noa.rendering.addMeshToScene(mesh, true, chunk.pos, this);
         noa.emit("addingTerrainMesh", mesh);
-        mesh.freezeNormals();
-        mesh.freezeWorldMatrix();
         chunk._terrainMeshes.push(mesh);
-        if (!mesh.metadata) mesh.metadata = {};
-        mesh.metadata[terrainMeshFlag] = true;
+        mesh.userData[terrainMeshFlag] = true;
       });
     };
     var terrainMeshFlag = "noa_chunk_terrain_mesh";
@@ -584,8 +580,6 @@ class MeshBuilder {
      * actual mesehes the 3D engine can render
      */
     this.buildMesh = function (chunk, faceDataSet, ignoreMaterials) {
-      var scene = noa.rendering.getScene();
-
       var doAO = noa.rendering.useAO;
       var aoVals = noa.rendering.aoVals;
       var revAoVal = noa.rendering.revAoVal;
@@ -658,33 +652,24 @@ class MeshBuilder {
           }
         }
 
-        // the mesh and vertexData object
-        var name = `chunk_${chunk.requestID}_${terrainID}`;
-        var mesh = new Mesh(name, scene);
-        var vdat = new VertexData();
+        // the mesh and its geometry. Positions/normals were built in
+        // render coords (z negated); colors are RGBA per vertex
+        var geometry = new BufferGeometry();
+        geometry.setAttribute("position", new BufferAttribute(positions, 3));
+        geometry.setAttribute("normal", new BufferAttribute(normals, 3));
+        geometry.setAttribute("color", new BufferAttribute(colors, 4));
+        geometry.setAttribute("uv", new BufferAttribute(uvs, 2));
+        geometry.setIndex(new BufferAttribute(indices, 1));
+        geometry.computeBoundingSphere();
 
-        // finish the mesh
-        vdat.positions = positions;
-        vdat.indices = indices;
-        vdat.normals = normals;
-        vdat.colors = colors;
-        vdat.uvs = uvs;
-        vdat.applyToMesh(mesh);
-
-        // meshes using a texture atlas need atlasIndices
-        if (usesAtlas) {
-          mesh.setVerticesData("texAtlasIndices", atlasIndexes, false, 1);
-        }
-
-        // disable some unnecessary bounding checks
-        mesh.isPickable = false;
-        mesh.doNotSyncBoundingInfo = true;
-        mesh._refreshBoundingInfo = (() => mesh) as any;
+        // texture-atlas meshes aren't supported by the three renderer
+        // (see terrainMaterials.ts); usesAtlas can't be true here
+        void atlasIndexes;
 
         // materials wrangled by external module
-        if (!ignoreMaterials) {
-          mesh.material = terrainMatManager.getMaterial(terrainID);
-        }
+        var material = ignoreMaterials ? undefined : terrainMatManager.getMaterial(terrainID);
+        var mesh = new Mesh(geometry, material);
+        mesh.name = `chunk_${chunk.requestID}_${terrainID}`;
 
         // done
         meshes.push(mesh);
@@ -713,11 +698,13 @@ class MeshBuilder {
       du[axis === 2 ? 0 : 2] = w;
       dv[axis === 1 ? 0 : 1] = h;
 
+      // game coords -> render coords: negate z
       for (var ix = 0; ix < 3; ix++) {
-        posArr[offset + ix] = loc[ix];
-        posArr[offset + 3 + ix] = loc[ix] + du[ix];
-        posArr[offset + 6 + ix] = loc[ix] + du[ix] + dv[ix];
-        posArr[offset + 9 + ix] = loc[ix] + dv[ix];
+        var flip = ix === 2 ? -1 : 1;
+        posArr[offset + ix] = flip * loc[ix];
+        posArr[offset + 3 + ix] = flip * (loc[ix] + du[ix]);
+        posArr[offset + 6 + ix] = flip * (loc[ix] + du[ix] + dv[ix]);
+        posArr[offset + 9 + ix] = flip * (loc[ix] + dv[ix]);
       }
     }
 
@@ -747,7 +734,9 @@ class MeshBuilder {
     function addNormalValues(normArr: Float32Array, faceNum: number, norms: number[]) {
       var offset = faceNum * 12;
       for (var i = 0; i < 12; i++) {
-        normArr[offset + i] = norms[i % 3];
+        // game coords -> render coords: negate the z component
+        var flip = i % 3 === 2 ? -1 : 1;
+        normArr[offset + i] = flip * norms[i % 3];
       }
     }
 
@@ -761,6 +750,8 @@ class MeshBuilder {
       var offset = faceNum * 6;
       var baseIndex = faceNum * 4;
       if (axis === 0) dir = -dir;
+      // winding choice is unchanged from the Babylon build: its CW-front
+      // (left-handed) convention and the z-mirror's orientation flip cancel
       var ix = dir < 0 ? 0 : 1;
       if (!triDir) ix += 2;
       var indexVals = indexLists[ix];

@@ -1,5 +1,5 @@
 import type { Engine } from "../index";
-import type { TransformNode } from "@babylonjs/core/Meshes";
+import type { Object3D } from "three";
 
 var defaults = {
   texturePath: "",
@@ -441,7 +441,7 @@ class BlockOptions {
   onUnload: ((x: number, y: number, z: number) => void) | null;
   onSet: ((x: number, y: number, z: number) => void) | null;
   onUnset: ((x: number, y: number, z: number) => void) | null;
-  onCustomMeshCreate: ((mesh: TransformNode, x: number, y: number, z: number) => void) | null;
+  onCustomMeshCreate: ((mesh: Object3D, x: number, y: number, z: number) => void) | null;
 
   constructor(isFluid: boolean | null | undefined = false) {
     /** Solidity for physics purposes */

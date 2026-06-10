@@ -1,12 +1,17 @@
-import { Color3 } from "@babylonjs/core/Maths/math.color";
-import { DynamicTexture } from "@babylonjs/core/Materials/Textures/dynamicTexture";
-import { Texture } from "@babylonjs/core/Materials/Textures/texture";
-import { Vector3, Vector4 } from "@babylonjs/core/Maths/math.vector";
-import { CreateBox } from "@babylonjs/core/Meshes/Builders/boxBuilder";
-import { Mesh } from "@babylonjs/core/Meshes/mesh";
-import { TransformNode } from "@babylonjs/core/Meshes/transformNode";
+import {
+  BoxGeometry,
+  CanvasTexture,
+  Color,
+  Group,
+  Mesh,
+  type MeshLambertMaterial,
+  NearestFilter,
+  type Object3D,
+  SRGBColorSpace,
+} from "three";
 import { client } from "minion:client";
 import { Engine } from "./noa/index.js";
+import { disposeObject3D } from "./noa/lib/rendering.js";
 import {
   type BlockEdit,
   type PlayerSnapshot,
@@ -252,64 +257,83 @@ function applyChunkState(state: ChunkState) {
  *  the entity's bottom-center, facing +z at yaw 0.
  */
 
-const scene = noa.rendering.getScene();
 // widen the default ~46° vertical FOV; it reads badly zoomed-in up close
-noa.rendering.camera.fov = 1.25;
+// (1.25 radians; three.js wants degrees)
+noa.rendering.camera.fov = 1.25 * (180 / Math.PI);
+noa.rendering.camera.updateProjectionMatrix();
 
 const SKIN_PX = 0.05625; // world units per skin pixel: 32px of parts -> 1.8 blocks
 
 type Rig = {
-  root: Mesh;
-  head: Mesh;
-  leftArm: TransformNode;
-  rightArm: TransformNode;
-  leftLeg: TransformNode;
-  rightLeg: TransformNode;
-  body: TransformNode;
+  root: Group;
+  head: Group;
+  leftArm: Group;
+  rightArm: Group;
+  leftLeg: Group;
+  rightLeg: Group;
+  body: Group;
   phase: number;
   idleT: number;
-  tool: Mesh | null;
-  skin: ReturnType<typeof makeSkinMaterial>;
+  tool: Group | null;
+  skin: MeshLambertMaterial;
 };
 
-// pixel rects (x0, y0, x1, y1 from top-left) in the classic 64x32 skin layout,
-// ordered to match CreateBox faceUV: [+z front, -z back, +x, -x, top, bottom]
-type FaceRects = number[][];
-const HEAD_FACES: FaceRects = [
-  [8, 8, 16, 16],
-  [24, 8, 32, 16],
-  [0, 8, 8, 16],
-  [16, 8, 24, 16],
-  [8, 0, 16, 8],
-  [16, 0, 24, 8],
-];
-const BODY_FACES: FaceRects = [
-  [20, 20, 28, 32],
-  [32, 20, 40, 32],
-  [16, 20, 20, 32],
-  [28, 20, 32, 32],
-  [20, 16, 28, 20],
-  [28, 16, 36, 20],
-];
-const ARM_FACES: FaceRects = [
-  [44, 20, 48, 32],
-  [52, 20, 56, 32],
-  [40, 20, 44, 32],
-  [48, 20, 52, 32],
-  [44, 16, 48, 20],
-  [48, 16, 52, 20],
-];
-const LEG_FACES: FaceRects = [
-  [4, 20, 8, 32],
-  [12, 20, 16, 32],
-  [0, 20, 4, 32],
-  [8, 20, 12, 32],
-  [4, 16, 8, 20],
-  [8, 16, 12, 20],
-];
+// Box UV origins (u, v, w, h, d in pixels from top-left) in the classic
+// 64x32 skin layout, applied with the standard MC box unwrap below.
+const HEAD_UV: [number, number, number, number, number] = [0, 0, 8, 8, 8];
+const BODY_UV: [number, number, number, number, number] = [16, 16, 8, 12, 4];
+const ARM_UV: [number, number, number, number, number] = [40, 16, 4, 12, 4];
+const LEG_UV: [number, number, number, number, number] = [0, 16, 4, 12, 4];
 
-function faceUVs(rects: FaceRects): Vector4[] {
-  return rects.map(([x0, y0, x1, y1]) => new Vector4(x0 / 64, 1 - y1 / 32, x1 / 64, 1 - y0 / 32));
+// Standard Minecraft box-skin unwrap onto a three BoxGeometry, ported
+// verbatim from skinview3d (MIT, bs-community/skinview3d src/model.ts);
+// the rig uses skinview3d's conventions throughout (character faces
+// local +z, right arm on -x), so its UV order applies directly.
+function setBoxUVs(
+  box: BoxGeometry,
+  [u, v, width, height, depth]: [number, number, number, number, number],
+): void {
+  const textureWidth = 64;
+  const textureHeight = 32;
+  const toFaceVertices = (x1: number, y1: number, x2: number, y2: number) =>
+    [
+      [x1 / textureWidth, 1 - y2 / textureHeight],
+      [x2 / textureWidth, 1 - y2 / textureHeight],
+      [x2 / textureWidth, 1 - y1 / textureHeight],
+      [x1 / textureWidth, 1 - y1 / textureHeight],
+    ] as const;
+
+  const top = toFaceVertices(u + depth, v, u + width + depth, v + depth);
+  const bottom = toFaceVertices(u + width + depth, v, u + width * 2 + depth, v + depth);
+  const left = toFaceVertices(u, v + depth, u + depth, v + depth + height);
+  const front = toFaceVertices(u + depth, v + depth, u + width + depth, v + depth + height);
+  const right = toFaceVertices(
+    u + width + depth,
+    v + depth,
+    u + width + depth * 2,
+    v + height + depth,
+  );
+  const back = toFaceVertices(
+    u + width + depth * 2,
+    v + depth,
+    u + width * 2 + depth * 2,
+    v + height + depth,
+  );
+
+  const uvData: number[] = [];
+  const push = (arr: readonly (readonly [number, number])[]) => {
+    for (const [x, y] of arr) {
+      uvData.push(x, y);
+    }
+  };
+  push([right[3], right[2], right[0], right[1]]);
+  push([left[3], left[2], left[0], left[1]]);
+  push([top[3], top[2], top[0], top[1]]);
+  push([bottom[0], bottom[1], bottom[3], bottom[2]]);
+  push([front[3], front[2], front[0], front[1]]);
+  push([back[3], back[2], back[0], back[1]]);
+  box.attributes.uv.array.set(uvData);
+  box.attributes.uv.needsUpdate = true;
 }
 
 const skinImage = new Promise<HTMLImageElement>((resolve, reject) => {
@@ -361,9 +385,10 @@ function hueRotate(pixels: Uint8ClampedArray, degrees: number): void {
   }
 }
 
-function drawSkin(texture: DynamicTexture, hueShiftDegrees: number): void {
+function drawSkin(texture: CanvasTexture, hueShiftDegrees: number): void {
   void skinImage.then((img) => {
-    const ctx = texture.getContext() as unknown as CanvasRenderingContext2D;
+    const canvas = texture.image as HTMLCanvasElement;
+    const ctx = canvas.getContext("2d")!;
     ctx.clearRect(0, 0, 64, 32);
     ctx.drawImage(img, 0, 0);
     if (hueShiftDegrees !== 0) {
@@ -372,38 +397,40 @@ function drawSkin(texture: DynamicTexture, hueShiftDegrees: number): void {
       hueRotate(body.data, hueShiftDegrees);
       ctx.putImageData(body, 0, 16);
     }
-    texture.update();
+    texture.needsUpdate = true;
   });
 }
 
-function makeSkinMaterial(name: string, hueShiftDegrees: number) {
-  const texture = new DynamicTexture(
-    `${name}-skin`,
-    { width: 64, height: 32 },
-    scene,
-    false,
-    Texture.NEAREST_SAMPLINGMODE,
-  );
+function makeSkinMaterial(name: string, hueShiftDegrees: number): MeshLambertMaterial {
+  const canvas = document.createElement("canvas");
+  canvas.width = 64;
+  canvas.height = 32;
+  const texture = new CanvasTexture(canvas);
+  texture.magFilter = NearestFilter;
+  texture.minFilter = NearestFilter;
+  texture.colorSpace = SRGBColorSpace;
   drawSkin(texture, hueShiftDegrees);
   const material = noa.rendering.makeStandardMaterial(name);
-  material.diffuseTexture = texture;
+  material.map = texture;
   return material;
 }
 
 // re-tint a rig's existing skin texture (used once our own id is known, so
 // the outfit we see on ourselves matches what everyone else sees)
 function tintRig(rig: Rig, hueShiftDegrees: number): void {
-  const texture = rig.skin.diffuseTexture;
-  if (texture instanceof DynamicTexture) {
+  const texture = rig.skin.map;
+  if (texture instanceof CanvasTexture) {
     drawSkin(texture, hueShiftDegrees);
   }
 }
 
 function buildRig(name: string, hueShiftDegrees: number): Rig {
   console.debug(`[rig] build ${name} hue=${hueShiftDegrees}`);
-  const root = new Mesh(`${name}-root`, scene);
-  const body = new TransformNode(`${name}-body`, scene);
-  body.parent = root;
+  const root = new Group();
+  root.name = `${name}-root`;
+  const body = new Group();
+  body.name = `${name}-body`;
+  root.add(body);
   const material = makeSkinMaterial(name, hueShiftDegrees);
 
   const box = (
@@ -411,59 +438,57 @@ function buildRig(name: string, hueShiftDegrees: number): Rig {
     pxW: number,
     pxH: number,
     pxD: number,
-    rects: FaceRects,
-    parent: TransformNode,
+    uv: [number, number, number, number, number],
+    parent: Group,
     yInParent: number,
   ) => {
-    const mesh = CreateBox(
-      `${name}-${part}`,
-      {
-        width: pxW * SKIN_PX,
-        height: pxH * SKIN_PX,
-        depth: pxD * SKIN_PX,
-        faceUV: faceUVs(rects),
-        wrap: true,
-      },
-      scene,
-    );
-    mesh.material = material;
-    mesh.parent = parent;
+    const geometry = new BoxGeometry(pxW * SKIN_PX, pxH * SKIN_PX, pxD * SKIN_PX);
+    setBoxUVs(geometry, uv);
+    const mesh = new Mesh(geometry, material);
+    mesh.name = `${name}-${part}`;
+    parent.add(mesh);
     mesh.position.y = yInParent;
     return mesh;
   };
 
   // proportions: 12px legs + 12px torso + 8px head = 32px -> 1.8 blocks
-  box("torso", 8, 12, 4, BODY_FACES, body, 1.0125);
-  const head = box("head", 8, 8, 8, HEAD_FACES, body, 1.575);
-  head.setPivotPoint(new Vector3(0, -0.225, 0));
+  box("torso", 8, 12, 4, BODY_UV, body, 1.0125);
+  // the head rotates about the neck, so its mesh hangs off a pivot group
+  const head = new Group();
+  head.name = `${name}-head-pivot`;
+  body.add(head);
+  head.position.y = 1.35;
+  box("head", 8, 8, 8, HEAD_UV, head, 0.225);
 
-  const limb = (part: string, rects: FaceRects, pivotY: number, xOff: number) => {
-    const pivot = new TransformNode(`${name}-${part}-pivot`, scene);
-    pivot.parent = body;
+  const limb = (
+    part: string,
+    uv: [number, number, number, number, number],
+    pivotY: number,
+    xOff: number,
+  ) => {
+    const pivot = new Group();
+    pivot.name = `${name}-${part}-pivot`;
+    body.add(pivot);
     pivot.position.set(xOff, pivotY, 0);
-    box(part, 4, 12, 4, rects, pivot, -0.3375);
+    box(part, 4, 12, 4, uv, pivot, -0.3375);
     return pivot;
   };
 
+  // limb sides follow skinview3d: the character faces local +z and its
+  // right arm hangs at negative x (the mirror of the old Babylon rig)
   const rig: Rig = {
     root,
     head,
     body,
-    leftArm: limb("left-arm", ARM_FACES, 1.305, -0.3375),
-    rightArm: limb("right-arm", ARM_FACES, 1.305, 0.3375),
-    leftLeg: limb("left-leg", LEG_FACES, 0.675, -0.1125),
-    rightLeg: limb("right-leg", LEG_FACES, 0.675, 0.1125),
+    leftArm: limb("left-arm", ARM_UV, 1.305, 0.3375),
+    rightArm: limb("right-arm", ARM_UV, 1.305, -0.3375),
+    leftLeg: limb("left-leg", LEG_UV, 0.675, 0.1125),
+    rightLeg: limb("right-leg", LEG_UV, 0.675, -0.1125),
     phase: 0,
     idleT: 0,
     tool: null,
     skin: material,
   };
-
-  // noa renders through an octree selection; the mesh component only
-  // registers the root, so each child part must be registered too.
-  for (const part of root.getChildMeshes()) {
-    noa.rendering.addMeshToScene(part);
-  }
   return rig;
 }
 
@@ -530,7 +555,7 @@ function animateRig(rig: Rig, speed: number, grounded: boolean, dtSec: number, s
   // direct assignment like the references, with a short blend so
   // walk<->idle transitions don't pop
   const blend = 1 - Math.exp(-dtSec * 24);
-  const ease = (node: TransformNode | Mesh, x: number, z: number) => {
+  const ease = (node: Object3D, x: number, z: number) => {
     node.rotation.x += (x - node.rotation.x) * blend;
     node.rotation.z += (z - node.rotation.z) * blend;
   };
@@ -575,17 +600,16 @@ function hueForId(id: string): number {
  *  binary snapshots, so remote rigs hold the same tool.
  */
 
-const materialCache = new Map<string, ReturnType<typeof makeSkinMaterial>>();
+const materialCache = new Map<string, MeshLambertMaterial>();
 
 function colorMaterial(name: string, hex: string) {
   let material = materialCache.get(name);
   if (!material) {
+    // lambert is already matte (no specular term)
     material = noa.rendering.makeStandardMaterial(name);
-    const color = Color3.FromHexString(hex);
-    material.diffuseColor = color;
-    material.ambientColor = color;
-    // matte: the default white specular washes near-camera meshes out
-    material.specularColor = Color3.Black();
+    material.color = new Color(hex);
+    // cached and reused across tool meshes; don't dispose with them
+    material.userData.shared = true;
     materialCache.set(name, material);
   }
   return material;
@@ -607,18 +631,21 @@ const BLOCK_COLORS: readonly string[] = [
   "#4d7fd9", // water
 ];
 
-function buildToolMesh(name: string, item: number): Mesh | null {
+function buildToolMesh(name: string, item: number): Group | null {
   if (item === HAND) {
     return null;
   }
-  const root = new Mesh(`${name}-item`, scene);
+  const root = new Group();
+  root.name = `${name}-item`;
   if (isBlockItem(item)) {
     const block = itemToBlock(item);
     const color = BLOCK_COLORS[block] ?? "#bbbbbb";
-    const mesh = CreateBox(`${name}-block`, { size: 0.34 }, scene);
-    mesh.material = colorMaterial(`block-item-${block}`, color);
-    mesh.parent = root;
-    noa.rendering.addMeshToScene(mesh);
+    const mesh = new Mesh(
+      new BoxGeometry(0.34, 0.34, 0.34),
+      colorMaterial(`block-item-${block}`, color),
+    );
+    mesh.name = `${name}-block`;
+    root.add(mesh);
     return root;
   }
   const wood = colorMaterial("tool-wood", "#8a5a2b");
@@ -635,9 +662,9 @@ function buildToolMesh(name: string, item: number): Mesh | null {
     tiltZ = 0,
     tiltX = 0,
   ) => {
-    const mesh = CreateBox(`${name}-${label}`, { width: w, height: h, depth: d }, scene);
-    mesh.material = material;
-    mesh.parent = root;
+    const mesh = new Mesh(new BoxGeometry(w, h, d), material);
+    mesh.name = `${name}-${label}`;
+    root.add(mesh);
     mesh.position.set(x, y, z);
     mesh.rotation.z = tiltZ;
     mesh.rotation.x = tiltX;
@@ -645,16 +672,10 @@ function buildToolMesh(name: string, item: number): Mesh | null {
 
   if (item === ROCK) {
     part("rock", 0.22, 0.18, 0.2, colorMaterial("tool-rock", "#7d756b"), 0, 0, 0, 0.3);
-    for (const mesh of root.getChildMeshes()) {
-      noa.rendering.addMeshToScene(mesh);
-    }
     return root;
   }
   if (item === SNOWBALL) {
     part("snowball", 0.18, 0.18, 0.18, colorMaterial("tool-snow", "#eef3f6"), 0, 0, 0, 0.78);
-    for (const mesh of root.getChildMeshes()) {
-      noa.rendering.addMeshToScene(mesh);
-    }
     return root;
   }
   part("handle", 0.06, 0.55, 0.06, wood, 0, 0, 0);
@@ -670,9 +691,6 @@ function buildToolMesh(name: string, item: number): Mesh | null {
   } else if (item === SHOVEL) {
     part("scoop", 0.13, 0.2, 0.06, metal, 0, 0.33, 0);
   }
-  for (const mesh of root.getChildMeshes()) {
-    noa.rendering.addMeshToScene(mesh);
-  }
   return root;
 }
 
@@ -683,12 +701,14 @@ function isLumpItem(item: number): boolean {
 }
 
 function attachToolToRig(rig: Rig, name: string, item: number): void {
-  rig.tool?.dispose();
+  if (rig.tool) {
+    disposeObject3D(rig.tool);
+  }
   rig.tool = buildToolMesh(name, item);
   if (!rig.tool) {
     return;
   }
-  rig.tool.parent = rig.rightArm;
+  rig.rightArm.add(rig.tool);
   if (isLumpItem(item)) {
     // sits just past the hand (arm spans y 0..-0.675), no handle pitch
     rig.tool.position.set(0, -0.7, 0.16);
@@ -698,6 +718,13 @@ function attachToolToRig(rig: Rig, name: string, item: number): void {
     rig.tool.position.set(0, -0.62, 0.12);
     rig.tool.rotation.x = Math.PI * 0.3;
   }
+}
+
+// the renderer patches a Babylon-style getForwardRay() onto the camera,
+// returning the view direction in GAME coords (see noa/lib/rendering.ts);
+// the test harnesses rely on the same accessor
+function cameraForward(): { x: number; y: number; z: number } {
+  return (noa.rendering.camera as any).getForwardRay().direction;
 }
 
 let equippedItem: number = HAND;
@@ -713,50 +740,53 @@ function heldStack(): InvSlot {
   return invSlots[selectedSlot] ?? null;
 }
 
-// first-person view model: arm + tool fixed to the camera
-let viewModel: Mesh | null = null;
-const VIEW_MODEL_POS: [number, number, number] = [0.42, -0.42, 1.1];
+// first-person view model: arm + tool fixed to the camera. Camera space
+// looks down -z in three.js, so "into the scene" is negative z; the
+// values are the Babylon calibration with z (and x/y rotations) negated.
+let viewModel: Group | null = null;
+const VIEW_MODEL_POS: [number, number, number] = [0.42, -0.42, -1.1];
 
 function refreshViewModel(): void {
-  viewModel?.dispose();
+  if (viewModel) {
+    disposeObject3D(viewModel);
+  }
   viewModel = null;
   if (!firstPerson) {
     return;
   }
-  const root = new Mesh("view-model", scene);
-  const arm = CreateBox(
-    "view-arm",
-    { width: 0.16, height: 0.5, depth: 0.16, faceUV: faceUVs(ARM_FACES), wrap: true },
-    scene,
-  );
-  arm.material = selfRig.skin;
-  arm.parent = root;
-  // arm extends -y at rest; negative x-rotation tips the hand end forward
-  // into the scene (empirically calibrated)
-  arm.position.set(0, -0.1, -0.12);
-  arm.rotation.x = -1.15;
+  const root = new Group();
+  root.name = "view-model";
+  const armGeometry = new BoxGeometry(0.16, 0.5, 0.16);
+  setBoxUVs(armGeometry, ARM_UV);
+  const arm = new Mesh(armGeometry, selfRig.skin);
+  arm.name = "view-arm";
+  arm.frustumCulled = false;
+  root.add(arm);
+  // arm extends -y at rest; positive x-rotation tips the hand end forward
+  // into the scene (toward -z)
+  arm.position.set(0, -0.1, 0.12);
+  arm.rotation.x = 1.15;
   const tool = buildToolMesh("view", equippedItem);
   if (tool) {
-    tool.parent = root;
+    root.add(tool);
+    tool.traverse((mesh) => {
+      mesh.frustumCulled = false;
+    });
     if (isLumpItem(equippedItem)) {
-      // cupped on top of the fist (the hand ends up near (0, -0.2, 0.11))
-      tool.position.set(0, -0.08, 0.16);
-      tool.rotation.set(0.25, 0.4, 0.15);
+      // cupped on top of the fist (the hand ends up near (0, -0.2, -0.11))
+      tool.position.set(0, -0.08, -0.16);
+      tool.rotation.set(-0.25, -0.4, 0.15);
     } else {
       // handle runs diagonally out of the fist toward upper-left, head
-      // tipped away from the camera (positive x takes +y forward, positive
-      // z rolls +y toward -x in our left-handed camera space)
-      tool.position.set(-0.02, -0.06, 0.1);
-      tool.rotation.set(0.5, -0.2, 0.45);
+      // tipped away from the camera
+      tool.position.set(-0.02, -0.06, -0.1);
+      tool.rotation.set(-0.5, 0.2, 0.45);
     }
   }
-  root.scaling.setAll(0.9);
-  root.parent = noa.rendering.camera;
+  root.scale.setScalar(0.9);
+  noa.rendering.camera.add(root);
   root.position.fromArray(VIEW_MODEL_POS);
-  root.rotation.y = -0.3;
-  for (const mesh of root.getChildMeshes()) {
-    noa.rendering.addMeshToScene(mesh);
-  }
+  root.rotation.y = 0.3;
   viewModel = root;
 }
 
@@ -783,7 +813,7 @@ function selectSlot(slot: number): void {
 function setFirstPerson(on: boolean): void {
   firstPerson = on;
   noa.camera.zoomDistance = on ? 0 : 6;
-  selfRig.root.setEnabled(!on);
+  selfRig.root.visible = !on;
   refreshViewModel();
   updateHud();
 }
@@ -806,7 +836,7 @@ noa.inputs.down.on("mid-fire", () => {
     return;
   }
   swingT = 1;
-  const dir = noa.rendering.camera.getForwardRay().direction;
+  const dir = cameraForward();
   void client.streams
     .send({ type: "throw", item: held.item, slot: selectedSlot, dx: dir.x, dy: dir.y, dz: dir.z })
     .catch(() => {});
@@ -818,7 +848,7 @@ noa.inputs.down.on("mid-fire", () => {
 
 type ProjectileView = {
   entityId: number;
-  mesh: Mesh;
+  mesh: Group;
   target: ProjectileSnapshot;
 };
 
@@ -843,7 +873,7 @@ function applyEntityViews(
     if (!mesh) {
       continue;
     }
-    mesh.scaling.setAll(scale);
+    mesh.scale.setScalar(scale);
     const entityId = ents.add([snap.x, snap.y, snap.z], 0.2, 0.2, mesh, [0, 0, 0], false, false);
     views.set(snap.id, { entityId, mesh, target: snap });
   }
@@ -1151,8 +1181,8 @@ function pushRemoteSample(remote: RemotePlayer, snap: PlayerSnapshot): void {
     remote.buffer.splice(0, remote.buffer.length - 20);
   }
 }
-const HURT_FLASH = new Color3(0.55, 0.05, 0.05);
-const NO_FLASH = Color3.Black();
+const HURT_FLASH = new Color(0.55, 0.05, 0.05);
+const NO_FLASH = new Color(0, 0, 0);
 // id -> display name, from the welcome roster and join messages
 const playerNames = new Map<string, string>();
 
@@ -1236,7 +1266,9 @@ noa.on("beforeRender", () => {
     rp[1] + correction.y,
     rp[2] + correction.z,
   );
-  selfRig.root.rotation.y = noa.camera.heading;
+  // rigs face local +z (skinview3d convention); in render space the
+  // game heading h maps to a yaw of PI - h (see noa/lib/rendering.ts)
+  selfRig.root.rotation.y = Math.PI - noa.camera.heading;
   const selfSpeed = Math.hypot(predicted.vx, predicted.vz);
   const selfMoving = onGround(predicted) && selfSpeed > 0.4;
   animateRig(selfRig, selfSpeed, onGround(predicted), dtSec, swingT > 0);
@@ -1255,14 +1287,14 @@ noa.on("beforeRender", () => {
       const S = 0.5;
       viewModel.position.x = VIEW_MODEL_POS[0] - 0.8 * sinSqrtP * S;
       viewModel.position.y = VIEW_MODEL_POS[1] + (0.2 * sin2SqrtP - 0.6 * p) * S;
-      viewModel.position.z = VIEW_MODEL_POS[2] - 0.2 * sinP * S;
-      viewModel.rotation.x = -0.5236 * sinP; // -30deg * sin(p*pi)
-      viewModel.rotation.y = -0.3 - 0.6109 * sinSqrtP; // -35deg * sin(sqrt(p)*pi)
+      viewModel.position.z = VIEW_MODEL_POS[2] + 0.2 * sinP * S;
+      viewModel.rotation.x = 0.5236 * sinP; // 30deg * sin(p*pi)
+      viewModel.rotation.y = 0.3 + 0.6109 * sinSqrtP; // 35deg * sin(sqrt(p)*pi)
       viewModel.rotation.z = -0.0873 * sinP; // -5deg
     }
   } else if (viewModel) {
     viewModel.position.fromArray(VIEW_MODEL_POS);
-    viewModel.rotation.set(0, -0.3, 0);
+    viewModel.rotation.set(0, 0.3, 0);
   }
 
   // projectiles: ease toward broadcast positions, tumbling as they fly
@@ -1297,7 +1329,7 @@ noa.on("beforeRender", () => {
   // bridged by real data instead of extrapolation
   const renderTime = now - INTERP_DELAY_MS;
   for (const remote of remotePlayers.values()) {
-    remote.rig.skin.emissiveColor = now < remote.hurtUntil ? HURT_FLASH : NO_FLASH;
+    remote.rig.skin.emissive = now < remote.hurtUntil ? HURT_FLASH : NO_FLASH;
     const buf = remote.buffer;
     while (buf.length > 2 && buf[1].at <= renderTime) {
       buf.shift();
@@ -1316,12 +1348,12 @@ noa.on("beforeRender", () => {
         a.state.y + (b.state.y - a.state.y) * f,
         a.state.z + (b.state.z - a.state.z) * f,
       );
-      remote.rig.root.rotation.y = lerpAngle(a.heading, b.heading, f);
+      remote.rig.root.rotation.y = Math.PI - lerpAngle(a.heading, b.heading, f);
       shown = f < 0.5 ? a : b;
     } else if (shown) {
       // buffer underrun (or just spawned): hold the newest known state
       ents.setPosition(remote.entityId, shown.state.x, shown.state.y, shown.state.z);
-      remote.rig.root.rotation.y = shown.heading;
+      remote.rig.root.rotation.y = Math.PI - shown.heading;
     }
     const animState = shown ? shown.state : remote.target;
     const remoteSpeed = Math.hypot(animState.vx, animState.vz);
@@ -1817,7 +1849,7 @@ function sendEdit(block: number, x: number, y: number, z: number): void {
 // aim-corridor player targeting: nearest remote within reach whose center
 // sits close to the camera ray
 function findAttackTarget(): string | null {
-  const dir = noa.rendering.camera.getForwardRay().direction;
+  const dir = cameraForward();
   const ox = predicted.x;
   const oy = predicted.y + 1.5;
   const oz = predicted.z;
@@ -2211,11 +2243,15 @@ window.__voxels = {
   rollbacks: () => rollbacks,
   lastRollback: () => lastRollback,
   pendingInputs: () => pending.length,
-  characterMeshes: () =>
-    noa.rendering
-      .getScene()
-      .meshes.filter((m) => m.name.endsWith("-root") && m.isEnabled())
-      .map((m) => m.name),
+  characterMeshes: () => {
+    const names: string[] = [];
+    noa.rendering.getScene().traverse((obj) => {
+      if (obj.name.endsWith("-root") && obj.visible) {
+        names.push(obj.name);
+      }
+    });
+    return names;
+  },
   blockAt: (x, y, z) => noa.getBlock(x, y, z),
   setBlockAt: (block, x, y, z) => sendEdit(block, x, y, z),
   hasEdit: (x, y, z) => lookupEdit(x, y, z) !== undefined,

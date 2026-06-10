@@ -31,7 +31,6 @@ export default function (noa: Engine) {
 function checkZoom(state: any, zoom: number, noa: Engine) {
   if (!noa.ents.hasMesh(state.__id)) return;
   var mesh = noa.ents.getMeshData(state.__id).mesh;
-  if (!mesh.metadata) return;
   var shouldHide = zoom < state.cutoff;
   noa.rendering.setMeshVisibility(mesh, !shouldHide);
 }

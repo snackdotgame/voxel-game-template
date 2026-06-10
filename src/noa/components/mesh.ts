@@ -1,7 +1,8 @@
 import vec3 from "gl-vec3";
 
 import type { Engine } from "../index";
-import type { Mesh } from "@babylonjs/core/Meshes/mesh";
+import type { Object3D } from "three";
+import { disposeObject3D } from "../lib/rendering";
 
 export default function (noa: Engine) {
   return {
@@ -10,7 +11,7 @@ export default function (noa: Engine) {
     order: 100,
 
     state: {
-      mesh: null as Mesh | null,
+      mesh: null as Object3D | null,
       offset: null as any,
     },
 
@@ -24,17 +25,17 @@ export default function (noa: Engine) {
       }
       if (!state.offset) state.offset = vec3.create();
 
-      // set mesh to correct position
+      // set mesh to correct position (game coords -> render coords)
       var rpos = posDat._renderPosition;
-      state.mesh.position.copyFromFloats(
+      state.mesh.position.set(
         rpos[0] + state.offset[0],
         rpos[1] + state.offset[1],
-        rpos[2] + state.offset[2],
+        -(rpos[2] + state.offset[2]),
       );
     },
 
     onRemove: function (eid: number, state: any) {
-      state.mesh.dispose();
+      disposeObject3D(state.mesh);
     },
 
     renderSystem: function (dt: number, states: any[]) {
@@ -45,10 +46,10 @@ export default function (noa: Engine) {
         var id = state.__id;
 
         var rpos = noa.ents.getPositionData(id)._renderPosition;
-        state.mesh.position.copyFromFloats(
+        state.mesh.position.set(
           rpos[0] + state.offset[0],
           rpos[1] + state.offset[1],
-          rpos[2] + state.offset[2],
+          -(rpos[2] + state.offset[2]),
         );
       }
     },
