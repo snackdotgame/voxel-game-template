@@ -153,12 +153,23 @@ datagrams; clients render them as tumbling meshes on interpolated entities. Hitt
 player applies a per-item knockback impulse to their authoritative state, which reaches the
 hit player's own screen through the normal prediction-rollback path — no special casing.
 
+### Sounds
+
+WebAudio effects with per-play variant and pitch randomization, Minecraft-style: per-material
+dig ticks and breaks (mining clinks for stone/ore, soft thuds for earth, wood knocks for
+logs), placement thuds, footsteps that follow the walk cycle and the surface underfoot,
+melee/hurt punches, a pickup clink, and synthesized whooshes for swings and throws.
+World-positioned events attenuate with distance. Audio starts on the first input gesture,
+as browsers require.
+
 ### Asset credits
 
 Block textures and the character skin are from
 [Soothing 32](https://content.luanti.org/packages/Zughy/soothing32/) by Zughy and
 contributors, licensed CC BY-SA 4.0 — see `assets/textures/LICENSE-soothing32.txt`. Ore and
-grass/snow side tiles are composited from the pack's base + overlay textures.
+grass/snow side tiles are composited from the pack's base + overlay textures. Sound effects
+are from [Kenney's Impact Sounds](https://kenney.nl/assets/impact-sounds), CC0 — see
+`assets/sounds/LICENSE-kenney-impact-sounds.txt`.
 
 ## Develop
 

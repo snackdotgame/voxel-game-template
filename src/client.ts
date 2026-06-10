@@ -227,6 +227,13 @@ function applyEdit(edit: BlockEdit) {
   pendingEdits.delete(editKey(edit.x, edit.y, edit.z));
   // the block changed, so any breaking overlay on it is stale
   clearBlockDamage(editKey(edit.x, edit.y, edit.z));
+  const previous = noa.getBlock(edit.x, edit.y, edit.z);
+  if (edit.block === 0 && previous !== 0) {
+    // breaking: the old block's voice, weightier than a dig tick
+    playSoundAt(blockSoundFamily(previous, "dig"), edit.x, edit.y, edit.z, 1, 0.8);
+  } else if (edit.block !== 0) {
+    playSoundAt("impactSoft_heavy", edit.x, edit.y, edit.z, 0.8, 1.15);
+  }
   noa.setBlock(edit.block, edit.x, edit.y, edit.z);
 }
 
@@ -367,6 +374,139 @@ setInterval(() => {
     }
   }
 }, 1000);
+
+/*
+ *      Sounds
+ *
+ *  Kenney "Impact Sounds" (CC0 — assets/sounds/LICENSE-kenney-impact-
+ *  sounds.txt), played through WebAudio with a random variant and a
+ *  little pitch jitter per play, Minecraft-style. World-positioned
+ *  events attenuate with distance from the player. The context can
+ *  only start on a user gesture, so everything no-ops until the first
+ *  click/keypress.
+ */
+
+const SOUND_FAMILIES: Record<string, number> = {
+  impactMining: 5,
+  impactSoft_medium: 5,
+  impactSoft_heavy: 5,
+  impactWood_medium: 5,
+  footstep_grass: 5,
+  footstep_concrete: 5,
+  footstep_snow: 5,
+  impactPunch_medium: 5,
+  impactGlass_light: 5,
+};
+
+let audioCtx: AudioContext | null = null;
+let masterGain: GainNode | null = null;
+const soundBuffers = new Map<string, AudioBuffer[]>();
+let soundsPlayed = 0;
+
+function initAudio(): void {
+  if (audioCtx) {
+    void audioCtx.resume();
+    return;
+  }
+  audioCtx = new AudioContext();
+  void audioCtx.resume();
+  masterGain = audioCtx.createGain();
+  masterGain.gain.value = 0.6;
+  masterGain.connect(audioCtx.destination);
+  for (const [family, variants] of Object.entries(SOUND_FAMILIES)) {
+    const buffers: AudioBuffer[] = [];
+    soundBuffers.set(family, buffers);
+    for (let i = 0; i < variants; i++) {
+      void fetch(`/assets/sounds/${family}_00${i}.ogg`)
+        .then((response) => response.arrayBuffer())
+        .then((bytes) => audioCtx!.decodeAudioData(bytes))
+        .then((buffer) => {
+          buffers.push(buffer);
+        })
+        .catch(() => {});
+    }
+  }
+}
+document.addEventListener("pointerdown", initAudio);
+document.addEventListener("keydown", initAudio);
+
+function playSound(family: string, volume = 1, pitch = 1): void {
+  if (!audioCtx || !masterGain) {
+    return;
+  }
+  const buffers = soundBuffers.get(family);
+  if (!buffers || buffers.length === 0) {
+    return;
+  }
+  const source = audioCtx.createBufferSource();
+  source.buffer = buffers[Math.floor(Math.random() * buffers.length)];
+  source.playbackRate.value = pitch * (0.92 + Math.random() * 0.16);
+  const gain = audioCtx.createGain();
+  gain.gain.value = volume;
+  source.connect(gain);
+  gain.connect(masterGain);
+  source.start();
+  soundsPlayed += 1;
+}
+
+// volume falls off linearly to silence at 24 blocks from the player
+function playSoundAt(family: string, x: number, y: number, z: number, volume = 1, pitch = 1): void {
+  const dist = Math.hypot(x - predicted.x, y - predicted.y, z - predicted.z);
+  const attenuated = volume * Math.max(0, 1 - dist / 24);
+  if (attenuated > 0.02) {
+    playSound(family, attenuated, pitch);
+  }
+}
+
+// short synthesized whoosh for swings and throws (no CC0 sample fit)
+function playWhoosh(volume = 0.35): void {
+  if (!audioCtx || !masterGain) {
+    return;
+  }
+  const dur = 0.18;
+  const buffer = audioCtx.createBuffer(
+    1,
+    Math.ceil(audioCtx.sampleRate * dur),
+    audioCtx.sampleRate,
+  );
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < data.length; i++) {
+    data[i] = Math.random() * 2 - 1;
+  }
+  const source = audioCtx.createBufferSource();
+  source.buffer = buffer;
+  const filter = audioCtx.createBiquadFilter();
+  filter.type = "bandpass";
+  filter.Q.value = 1.2;
+  filter.frequency.setValueAtTime(400, audioCtx.currentTime);
+  filter.frequency.exponentialRampToValueAtTime(1600, audioCtx.currentTime + dur);
+  const gain = audioCtx.createGain();
+  gain.gain.setValueAtTime(0, audioCtx.currentTime);
+  gain.gain.linearRampToValueAtTime(volume, audioCtx.currentTime + 0.04);
+  gain.gain.linearRampToValueAtTime(0, audioCtx.currentTime + dur);
+  source.connect(filter);
+  filter.connect(gain);
+  gain.connect(masterGain);
+  source.start();
+  soundsPlayed += 1;
+}
+
+// which sample family a block speaks with, per interaction
+function blockSoundFamily(block: number, kind: "dig" | "step"): string {
+  if (block === STONE_ID || block >= COAL_ORE_ID) {
+    return kind === "dig" ? "impactMining" : "footstep_concrete";
+  }
+  if (block === LOG_ID) {
+    return kind === "dig" ? "impactWood_medium" : "footstep_concrete";
+  }
+  if (block === LEAVES_ID) {
+    return "footstep_grass";
+  }
+  if (block === SNOW_ID || block === SAND_ID) {
+    return kind === "dig" ? "impactSoft_medium" : "footstep_snow";
+  }
+  return kind === "dig" ? "impactSoft_medium" : "footstep_grass";
+}
 
 /*
  *      Minecraft-style voxel character rig
@@ -855,6 +995,8 @@ let swingT = 0;
 // server-authoritative slot inventory, mirrored from inventory messages:
 // 9 hotbar slots + 27 storage slots, each empty or one stack
 let invSlots: InvSlot[] = Array.from({ length: INV_SLOTS }, () => null);
+// previous inventory total, for the pickup clink (-1 until the first echo)
+let lastInvTotal = -1;
 let selectedSlot = 0;
 let inventoryOpen = false;
 
@@ -963,6 +1105,7 @@ noa.inputs.down.on("mid-fire", () => {
     return;
   }
   swingT = 1;
+  playWhoosh(0.4);
   const dir = cameraForward();
   void client.streams
     .send({ type: "throw", item: held.item, slot: selectedSlot, dx: dir.x, dy: dir.y, dz: dir.z })
@@ -1378,6 +1521,7 @@ function removeRemotePlayer(id: string): void {
  */
 
 let lastFrameAt = performance.now();
+let lastStepIndex = -1;
 
 noa.on("beforeRender", () => {
   const now = performance.now();
@@ -1404,6 +1548,22 @@ noa.on("beforeRender", () => {
   const selfSpeed = Math.hypot(predicted.vx, predicted.vz);
   const selfMoving = onGround(predicted) && selfSpeed > 0.4;
   animateRig(selfRig, selfSpeed, onGround(predicted), dtSec, swingT > 0);
+
+  // footsteps: the walk cycle plants a foot every half phase-cycle
+  if (selfMoving) {
+    const stepIndex = Math.floor(selfRig.phase / Math.PI);
+    if (stepIndex !== lastStepIndex) {
+      lastStepIndex = stepIndex;
+      const under = noa.getBlock(
+        Math.floor(predicted.x),
+        Math.floor(predicted.y - 0.1),
+        Math.floor(predicted.z),
+      );
+      if (under !== 0 && under !== WATER_ID) {
+        playSound(blockSoundFamily(under, "step"), 0.22);
+      }
+    }
+  }
 
   // swing: third person uses the ported HitAnimation; first person uses
   // minecraft-web-client's hand-swing parameter set (scaled to our model)
@@ -2026,6 +2186,7 @@ function primaryAction(fromHold: boolean): void {
     return;
   }
   swingT = 1;
+  playWhoosh(0.25);
   const target = findAttackTarget();
   if (target) {
     void client.streams.send({ type: "attack", target }).catch(() => {});
@@ -2138,6 +2299,8 @@ function handleStreamEvent(event: { bytes: Uint8Array; json<T = unknown>(): T })
     if (message.type === "edit") {
       applyEdit(message);
     } else if (message.type === "damage") {
+      const block = noa.getBlock(message.x, message.y, message.z);
+      playSoundAt(blockSoundFamily(block, "dig"), message.x, message.y, message.z, 0.8);
       updateBlockDamage(message.x, message.y, message.z, message.hp, message.maxHp);
       showNotice(
         `${itemName(blockToItem(noa.getBlock(message.x, message.y, message.z)))}: ${message.maxHp - message.hp}/${message.maxHp}`,
@@ -2147,14 +2310,20 @@ function handleStreamEvent(event: { bytes: Uint8Array; json<T = unknown>(): T })
       if (remote) {
         remote.swingT = 1;
         remoteSwingsSeen += 1;
+        const dist = Math.hypot(remote.target.x - predicted.x, remote.target.z - predicted.z);
+        if (dist < 16) {
+          playWhoosh(0.12 * Math.max(0, 1 - dist / 16));
+        }
       }
     } else if (message.type === "hurt") {
       if (message.id === myId) {
         flashHurt(0.35 + message.amount * 0.1);
+        playSound("impactPunch_medium", 1);
       } else {
         const remote = remotePlayers.get(message.id);
         if (remote) {
           remote.hurtUntil = performance.now() + 200;
+          playSoundAt("impactPunch_medium", remote.target.x, remote.target.y, remote.target.z, 0.8);
         }
       }
     } else if (message.type === "death") {
@@ -2178,6 +2347,11 @@ function handleStreamEvent(event: { bytes: Uint8Array; json<T = unknown>(): T })
       while (invSlots.length < INV_SLOTS) {
         invSlots.push(null);
       }
+      const invTotal = invSlots.reduce((sum, slot) => sum + (slot ? slot.count : 0), 0);
+      if (lastInvTotal >= 0 && invTotal > lastInvTotal) {
+        playSound("impactGlass_light", 0.45, 1.2);
+      }
+      lastInvTotal = invTotal;
       // the stack in the selected slot may have changed or moved
       syncEquipped();
       updateHud();
@@ -2327,6 +2501,7 @@ declare global {
       hasEdit(x: number, y: number, z: number): boolean;
       editCount(): number;
       digTargeted(): void;
+      soundsPlayed(): number;
     };
   }
 }
@@ -2401,6 +2576,7 @@ window.__voxels = {
   setBlockAt: (block, x, y, z) => sendEdit(block, x, y, z),
   hasEdit: (x, y, z) => lookupEdit(x, y, z) !== undefined,
   editCount: () => [...editBuckets.values()].reduce((sum, bucket) => sum + bucket.size, 0),
+  soundsPlayed: () => soundsPlayed,
   digTargeted: () => {
     if (noa.targetedBlock) {
       const [x, y, z] = noa.targetedBlock.position;
