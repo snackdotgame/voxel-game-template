@@ -629,12 +629,14 @@ function buildToolMesh(name: string, item: number): Mesh | null {
     y: number,
     z: number,
     tiltZ = 0,
+    tiltX = 0,
   ) => {
     const mesh = CreateBox(`${name}-${label}`, { width: w, height: h, depth: d }, scene);
     mesh.material = material;
     mesh.parent = root;
     mesh.position.set(x, y, z);
     mesh.rotation.z = tiltZ;
+    mesh.rotation.x = tiltX;
   };
 
   if (item === ROCK) {
@@ -652,14 +654,17 @@ function buildToolMesh(name: string, item: number): Mesh | null {
     return root;
   }
   part("handle", 0.06, 0.55, 0.06, wood, 0, 0, 0);
+  // tool heads live in the local Y-Z plane — the vertical swing plane once
+  // held — so spikes/blades point fore-aft, not sideways (a pickaxe held
+  // with a horizontal head reads as a hammer)
   if (item === PICKAXE) {
-    part("head", 0.44, 0.07, 0.07, metal, 0, 0.28, 0);
-    part("tip-l", 0.14, 0.06, 0.06, metal, -0.26, 0.22, 0, 0.9);
-    part("tip-r", 0.14, 0.06, 0.06, metal, 0.26, 0.22, 0, -0.9);
+    part("hub", 0.07, 0.09, 0.14, metal, 0, 0.26, 0);
+    part("tip-f", 0.06, 0.07, 0.2, metal, 0, 0.24, 0.15, 0, 0.45);
+    part("tip-b", 0.06, 0.07, 0.2, metal, 0, 0.24, -0.15, 0, -0.45);
   } else if (item === AXE) {
-    part("blade", 0.2, 0.18, 0.06, metal, 0.13, 0.24, 0);
+    part("blade", 0.06, 0.2, 0.14, metal, 0, 0.23, 0.1);
   } else if (item === SHOVEL) {
-    part("scoop", 0.15, 0.2, 0.08, metal, 0, 0.33, 0);
+    part("scoop", 0.13, 0.2, 0.06, metal, 0, 0.33, 0);
   }
   for (const mesh of root.getChildMeshes()) {
     noa.rendering.addMeshToScene(mesh);
@@ -672,8 +677,10 @@ function attachToolToRig(rig: Rig, name: string, item: number): void {
   rig.tool = buildToolMesh(name, item);
   if (rig.tool) {
     rig.tool.parent = rig.rightArm;
-    rig.tool.position.set(0, -0.6, 0.1);
-    rig.tool.rotation.x = -Math.PI * 0.45;
+    // grip near the hand (arm spans y 0..-0.675); positive rotation.x takes
+    // local +y (the tool head) forward, so this is a head-up 54-degree hold
+    rig.tool.position.set(0, -0.62, 0.12);
+    rig.tool.rotation.x = Math.PI * 0.3;
   }
 }
 
@@ -712,8 +719,11 @@ function refreshViewModel(): void {
   const tool = buildToolMesh("view", equippedItem);
   if (tool) {
     tool.parent = root;
-    tool.position.set(0, 0.08, 0.05);
-    tool.rotation.set(-Math.PI * 0.38, -0.6, 0.15);
+    // handle runs diagonally out of the fist toward upper-left, head tipped
+    // away from the camera (positive x takes +y forward, positive z rolls
+    // +y toward -x in our left-handed camera space)
+    tool.position.set(-0.02, -0.06, 0.1);
+    tool.rotation.set(0.5, -0.2, 0.45);
   }
   root.scaling.setAll(0.9);
   root.parent = noa.rendering.camera;
