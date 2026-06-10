@@ -157,6 +157,32 @@ export function bonusDrop(block: number): number | null {
   return null;
 }
 
+/*
+ *      Combat
+ */
+
+export const MAX_HP = 20;
+
+// Damage a melee swing deals with this item in hand.
+const MELEE_DAMAGE: readonly number[] = [2, 4, 5, 3, 2, 1];
+
+export function meleeDamage(item: number): number {
+  if (isBlockItem(item)) {
+    return 2;
+  }
+  return MELEE_DAMAGE[item] ?? 1;
+}
+
+// Damage a projectile of this item deals on a direct hit.
+const PROJECTILE_DAMAGE: readonly number[] = [0, 5, 5, 5, 4, 1];
+
+export function projectileDamage(item: number): number {
+  if (isBlockItem(item)) {
+    return 2;
+  }
+  return PROJECTILE_DAMAGE[item] ?? 1;
+}
+
 export function starterKit(): Map<number, number> {
   return new Map([
     [PICKAXE, 1],

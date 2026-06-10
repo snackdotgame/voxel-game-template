@@ -23,6 +23,7 @@ import {
   AXE,
   HAND,
   ITEMS,
+  MAX_HP,
   PICKAXE,
   ROCK,
   SHOVEL,
@@ -261,6 +262,7 @@ type Rig = {
   phase: number;
   idleT: number;
   tool: Mesh | null;
+  skin: ReturnType<typeof makeSkinMaterial>;
 };
 
 // pixel rects (x0, y0, x1, y1 from top-left) in the classic 64x32 skin layout,
@@ -431,6 +433,7 @@ function buildRig(name: string, hueShiftDegrees: number): Rig {
     phase: 0,
     idleT: 0,
     tool: null,
+    skin: material,
   };
 
   // noa renders through an octree selection; the mesh component only
@@ -844,7 +847,13 @@ function pumpSim(frameMs: number): void {
   }
 }
 
+let lastDeath: { victim: string; attacker: string } | null = null;
+
 function reconcile(snap: PlayerSnapshot) {
+  if (snap.hp !== myHp) {
+    myHp = snap.hp;
+    updateHearts();
+  }
   const ackIndex = pending.findIndex((entry) => entry.input.seq === snap.lastSeq);
   if (ackIndex === -1) {
     if (pending.length > 0 && snap.lastSeq > pending[pending.length - 1].input.seq) {
@@ -897,9 +906,13 @@ type RemotePlayer = {
   target: CharState;
   heading: number;
   item: number;
+  hp: number;
+  hurtUntil: number;
 };
 
 const remotePlayers = new Map<string, RemotePlayer>();
+const HURT_FLASH = new Color3(0.55, 0.05, 0.05);
+const NO_FLASH = Color3.Black();
 // id -> display name, from the welcome roster and join messages
 const playerNames = new Map<string, string>();
 
@@ -908,6 +921,7 @@ function upsertRemotePlayer(snap: PlayerSnapshot): void {
   if (existing) {
     existing.target = snap.state;
     existing.heading = snap.heading;
+    existing.hp = snap.hp;
     if (existing.item !== snap.item) {
       existing.item = snap.item;
       attachToolToRig(existing.rig, `remote-${snap.id}`, snap.item);
@@ -932,6 +946,8 @@ function upsertRemotePlayer(snap: PlayerSnapshot): void {
     target: snap.state,
     heading: snap.heading,
     item: snap.item,
+    hp: snap.hp,
+    hurtUntil: 0,
   });
   updateHud();
 }
@@ -1021,6 +1037,7 @@ noa.on("beforeRender", () => {
   // remote players: ease toward their latest authoritative state
   const t = 1 - Math.exp(-dtSec * 12);
   for (const remote of remotePlayers.values()) {
+    remote.rig.skin.emissiveColor = now < remote.hurtUntil ? HURT_FLASH : NO_FLASH;
     const current = ents.getPosition(remote.entityId);
     ents.setPosition(
       remote.entityId,
@@ -1081,7 +1098,7 @@ const crosshair = uiDiv(
 void crosshair;
 
 const toast = uiDiv(
-  "bottom: 132px; left: 50%; transform: translateX(-50%); padding: 6px 14px;" +
+  "bottom: 168px; left: 50%; transform: translateX(-50%); padding: 6px 14px;" +
     `font: ${UI_FONT}; font-size: 13px; color: #fff; background: rgba(20,20,28,0.8);` +
     "border-radius: 6px; opacity: 0; transition: opacity 0.25s;",
 );
@@ -1233,8 +1250,45 @@ const hotbarEl = uiDiv(
 );
 const hotbarSlots: Slot[] = ITEMS.map((_, item) => makeSlot(hotbarEl, item, String(item + 1)));
 
+const hurtVignette = uiDiv(
+  "inset: 0; background: radial-gradient(ellipse at center, transparent 55%, rgba(200,16,16,0.55) 100%);" +
+    "opacity: 0; transition: opacity 0.15s;",
+);
+let vignetteTimer: ReturnType<typeof setTimeout> | undefined;
+
+function flashHurt(strength: number): void {
+  hurtVignette.style.opacity = String(Math.min(1, strength));
+  clearTimeout(vignetteTimer);
+  vignetteTimer = setTimeout(() => {
+    hurtVignette.style.opacity = "0";
+  }, 250);
+}
+
+const heartsEl = uiDiv(
+  "bottom: 64px; left: 50%; transform: translateX(-50%); display: flex; gap: 2px;" +
+    "font: 15px/1 system-ui, sans-serif; text-shadow: 0 1px 2px #000;",
+);
+const heartSpans: HTMLSpanElement[] = [];
+for (let i = 0; i < MAX_HP / 2; i++) {
+  const span = document.createElement("span");
+  span.textContent = "\u2665";
+  heartsEl.appendChild(span);
+  heartSpans.push(span);
+}
+
+let myHp = MAX_HP;
+
+function updateHearts(): void {
+  for (let i = 0; i < heartSpans.length; i++) {
+    const heartHp = myHp - i * 2;
+    heartSpans[i].style.color =
+      heartHp >= 2 ? "#ff3b48" : heartHp === 1 ? "#ff9d4d" : "rgba(255,255,255,0.22)";
+  }
+}
+updateHearts();
+
 const blockBarEl = uiDiv(
-  "bottom: 70px; left: 50%; transform: translateX(-50%); display: flex; gap: 5px;",
+  "bottom: 92px; left: 50%; transform: translateX(-50%); display: flex; gap: 5px;",
 );
 const blockBarLabel = uiDiv(
   `bottom: 76px; left: 50%; transform: translateX(-50%); font: ${UI_FONT}; font-size: 10px;` +
@@ -1306,7 +1360,7 @@ function updateBlockBar(): void {
       slot.count.textContent = String(invCount(item));
     }
   }
-  blockBarLabel.style.bottom = "120px";
+  blockBarLabel.style.bottom = "142px";
   blockBarLabel.textContent =
     owned.length > 0 && placeItem !== 0 ? `R cycles · placing: ${itemName(placeItem)}` : "";
 }
@@ -1342,8 +1396,44 @@ function sendEdit(block: number, x: number, y: number, z: number): void {
   void client.streams.send({ type: "edit", block, x, y, z }).catch(() => {});
 }
 
+// aim-corridor player targeting: nearest remote within reach whose center
+// sits close to the camera ray
+function findAttackTarget(): string | null {
+  const dir = noa.rendering.camera.getForwardRay().direction;
+  const ox = predicted.x;
+  const oy = predicted.y + 1.5;
+  const oz = predicted.z;
+  let best: string | null = null;
+  let bestDist = 4.2;
+  for (const [id, remote] of remotePlayers) {
+    const cx = remote.target.x - ox;
+    const cy = remote.target.y + 0.9 - oy;
+    const cz = remote.target.z - oz;
+    const dist = Math.hypot(cx, cy, cz);
+    if (dist > 4.2 || dist >= bestDist) {
+      continue;
+    }
+    const along = cx * dir.x + cy * dir.y + cz * dir.z;
+    if (along <= 0) {
+      continue;
+    }
+    const offAxis = Math.hypot(cx - dir.x * along, cy - dir.y * along, cz - dir.z * along);
+    if (offAxis > 0.9) {
+      continue;
+    }
+    best = id;
+    bestDist = dist;
+  }
+  return best;
+}
+
 noa.inputs.down.on("fire", () => {
   swingT = 1;
+  const target = findAttackTarget();
+  if (target) {
+    void client.streams.send({ type: "attack", target }).catch(() => {});
+    return;
+  }
   if (!noa.targetedBlock) {
     return;
   }
@@ -1400,6 +1490,29 @@ async function readStreams(): Promise<void> {
       showNotice(
         `${itemName(blockToItem(noa.getBlock(message.x, message.y, message.z)))}: ${message.maxHp - message.hp}/${message.maxHp}`,
       );
+    } else if (message.type === "hurt") {
+      if (message.id === myId) {
+        flashHurt(0.35 + message.amount * 0.1);
+      } else {
+        const remote = remotePlayers.get(message.id);
+        if (remote) {
+          remote.hurtUntil = performance.now() + 200;
+        }
+      }
+    } else if (message.type === "death") {
+      lastDeath = { victim: message.victim, attacker: message.attacker };
+      const victimName =
+        message.victim === myId ? "You" : (playerNames.get(message.victim) ?? "Player");
+      const attackerName =
+        message.attacker === myId ? "you" : (playerNames.get(message.attacker) ?? "a player");
+      showNotice(
+        message.victim === myId
+          ? `You were slain by ${attackerName}!`
+          : `${victimName} was slain by ${attackerName}`,
+      );
+      if (message.victim === myId) {
+        flashHurt(1);
+      }
     } else if (message.type === "inventory") {
       inventory.clear();
       for (const [key, count] of Object.entries(message.items)) {
@@ -1495,8 +1608,19 @@ declare global {
     __voxels?: {
       noa: Engine;
       remoteCount(): number;
-      remotes(): { id: string; name: string; item: number; x: number; y: number; z: number }[];
+      remotes(): {
+        id: string;
+        name: string;
+        item: number;
+        hp: number;
+        x: number;
+        y: number;
+        z: number;
+      }[];
       equipped(): number;
+      hp(): number;
+      lastDeath(): { victim: string; attacker: string } | null;
+      attack(target: string): void;
       projectileCount(): number;
       dropCount(): number;
       inventory(): Record<string, number>;
@@ -1521,9 +1645,22 @@ window.__voxels = {
   remotes: () =>
     [...remotePlayers.entries()].map(([id, remote]) => {
       const [x, y, z] = ents.getPosition(remote.entityId);
-      return { id, name: playerNames.get(id) ?? "Player", item: remote.item, x, y, z };
+      return {
+        id,
+        name: playerNames.get(id) ?? "Player",
+        item: remote.item,
+        hp: remote.hp,
+        x,
+        y,
+        z,
+      };
     }),
   equipped: () => equippedItem,
+  hp: () => myHp,
+  lastDeath: () => lastDeath,
+  attack: (target) => {
+    void client.streams.send({ type: "attack", target }).catch(() => {});
+  },
   projectileCount: () => projectileViews.size,
   dropCount: () => dropViews.size,
   inventory: () => Object.fromEntries(inventory),

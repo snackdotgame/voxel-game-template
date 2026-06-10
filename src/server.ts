@@ -7,6 +7,7 @@ import {
   encodeSnapshots,
 } from "./shared/netCodec.js";
 import {
+  MAX_HP,
   blockHP,
   blockToItem,
   bonusDrop,
@@ -17,6 +18,8 @@ import {
   isValidItem,
   itemToBlock,
   knockback,
+  meleeDamage,
+  projectileDamage,
   starterKit,
   throwSpeed,
 } from "./shared/items.js";
@@ -24,6 +27,7 @@ import {
   type BlockEdit,
   type PlayerSnapshot,
   type RosterEntry,
+  parseAttackMessage,
   parseEditMessage,
   parseEquipMessage,
   parseHitMessage,
@@ -68,6 +72,13 @@ const PROJECTILE_GRAVITY = -16;
 const PROJECTILE_TTL_MS = 5_000;
 const MAX_PROJECTILES = 256;
 
+const ATTACK_COOLDOWN_MS = 400;
+const ATTACK_RANGE = 4.2;
+const MELEE_KNOCKBACK = 5;
+const RESPAWN_PROTECTION_MS = 2_000;
+// regen 1 hp/s once this long has passed without taking damage
+const REGEN_AFTER_MS = 8_000;
+
 const MAX_DROPS = 512;
 const DROP_TTL_MS = 120_000;
 const DROP_PICKUP_DELAY_MS = 700;
@@ -81,6 +92,10 @@ type Player = {
   heading: number;
   lastSeq: number;
   item: number;
+  hp: number;
+  lastDamageAt: number;
+  lastAttackAt: number;
+  protectedUntil: number;
   stepsThisTick: number;
   // inputs beyond the per-tick step budget wait here instead of dropping,
   // so client catch-up bursts don't force prediction rollbacks
@@ -172,6 +187,7 @@ export async function main() {
     dropStalePlayers(world);
     stepProjectiles(world);
     tickDrops(world);
+    tickRegen(world);
 
     if (world.players.size > 0) {
       const players: PlayerSnapshot[] = [];
@@ -184,6 +200,7 @@ export async function main() {
           lastSeq: player.lastSeq,
           heading: player.heading,
           item: player.item,
+          hp: player.hp,
           state: player.char,
         });
       }
@@ -356,12 +373,92 @@ function handleStream(world: World, event: StreamEvent) {
     handleHit(world, event.connection.id, hit.x, hit.y, hit.z);
     return;
   }
+  const attack = parseAttackMessage(value);
+  if (attack) {
+    handleAttack(world, event.connection.id, attack.target);
+    return;
+  }
   const place = parsePlaceMessage(value);
   if (place) {
     handlePlace(world, event.connection.id, place.item, place.x, place.y, place.z);
     return;
   }
   handleEdit(world, event, value);
+}
+
+/*
+ *      Combat
+ */
+
+let regenCounter = 0;
+
+function tickRegen(world: World) {
+  regenCounter += 1;
+  if (regenCounter % 20 !== 0) {
+    return;
+  }
+  const now = server.elapsedMs();
+  for (const player of world.players.values()) {
+    if (player.hp > 0 && player.hp < MAX_HP && now - player.lastDamageAt > REGEN_AFTER_MS) {
+      player.hp += 1;
+    }
+  }
+}
+
+function handleAttack(world: World, attackerId: string, targetId: string) {
+  const attacker = world.players.get(attackerId);
+  const victim = world.players.get(targetId);
+  if (!attacker || !victim || attackerId === targetId) {
+    return;
+  }
+  const now = server.elapsedMs();
+  if (now - attacker.lastAttackAt < ATTACK_COOLDOWN_MS) {
+    return;
+  }
+  const dx = victim.char.x - attacker.char.x;
+  const dy = victim.char.y - attacker.char.y;
+  const dz = victim.char.z - attacker.char.z;
+  if (Math.hypot(dx, dy, dz) > ATTACK_RANGE) {
+    return;
+  }
+  attacker.lastAttackAt = now;
+  damagePlayer(world, targetId, attackerId, meleeDamage(attacker.item), dx, dz, MELEE_KNOCKBACK);
+}
+
+// Damage + knockback land in the victim's authoritative state, so their own
+// client receives them as a prediction rollback — same as any correction.
+function damagePlayer(
+  world: World,
+  victimId: string,
+  attackerId: string,
+  amount: number,
+  kbx: number,
+  kbz: number,
+  kbScale: number,
+) {
+  const victim = world.players.get(victimId);
+  if (!victim) {
+    return;
+  }
+  const now = server.elapsedMs();
+  if (now < victim.protectedUntil) {
+    return;
+  }
+  victim.hp -= amount;
+  victim.lastDamageAt = now;
+  const h = Math.hypot(kbx, kbz) || 1;
+  victim.char.vx += (kbx / h) * kbScale;
+  victim.char.vz += (kbz / h) * kbScale;
+  victim.char.vy += kbScale * 0.5;
+  victim.char.ry = 0;
+  victim.char.sleep = 10;
+  server.streams.broadcast({ type: "hurt", id: victimId, by: attackerId, amount });
+  if (victim.hp <= 0) {
+    victim.char = spawnState();
+    victim.hp = MAX_HP;
+    victim.protectedUntil = now + RESPAWN_PROTECTION_MS;
+    server.streams.broadcast({ type: "death", victim: victimId, attacker: attackerId });
+  }
 }
 
 /*
@@ -581,15 +678,15 @@ function stepProjectiles(world: World) {
           proj.y <= c.y + 1.9 &&
           Math.abs(proj.z - c.z) <= 0.45
         ) {
-          // knockback: server-side velocity change that reaches the hit
-          // player's own client as a prediction rollback
-          const kb = knockback(proj.item);
-          const hlen = Math.hypot(proj.vx, proj.vz) || 1;
-          c.vx += (proj.vx / hlen) * kb;
-          c.vz += (proj.vz / hlen) * kb;
-          c.vy += kb * 0.5;
-          c.ry = 0;
-          c.sleep = 10;
+          damagePlayer(
+            world,
+            id,
+            proj.owner,
+            projectileDamage(proj.item),
+            proj.vx,
+            proj.vz,
+            knockback(proj.item),
+          );
           if (dropsOnImpact(proj.item)) {
             spawnDrop(world, proj.item, proj.x, proj.y, proj.z);
           }
@@ -656,6 +753,10 @@ function addPlayer(world: World, connection: Connection) {
     heading: 0,
     lastSeq: 0,
     item: 0,
+    hp: MAX_HP,
+    lastDamageAt: -100000,
+    lastAttackAt: -100000,
+    protectedUntil: 0,
     stepsThisTick: 0,
     inputQueue: [],
     syncedChunks: new Set(),

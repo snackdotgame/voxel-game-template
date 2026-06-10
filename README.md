@@ -88,6 +88,17 @@ wind-up-and-chop use animation, and yaw following each player's view heading. Yo
 character is visible in third person; remote players get a deterministic hue shift on the
 clothing so everyone looks different.
 
+### Combat
+
+Players have 20 HP (hearts above the hotbar), server-authoritative like everything else.
+Left-click attacks a player in your aim corridor within reach — per-item melee damage (axe 5,
+pickaxe 4, hand 2...), a 400ms server-enforced cooldown, and knockback. Projectiles deal
+direct-hit damage too (rock 4, thrown tools 5, snowballs sting for 1). Damage and knockback
+land in the victim's authoritative state, so their own screen reacts through the normal
+prediction-rollback path; victims flash red, you get a hurt vignette, and kills hit the
+toast feed. Death respawns you at spawn with full HP and 2s of protection; HP regenerates
+8s after you last took damage.
+
 ### Equipment and views
 
 V toggles first/third person (first person gets a camera-attached arm + held-item view

@@ -12,6 +12,7 @@ export type PlayerSnapshot = {
   heading: number;
   // equipped item id (see ITEMS in items.ts)
   item: number;
+  hp: number;
   state: CharState;
 };
 
@@ -40,6 +41,34 @@ export function parseEquipMessage(value: unknown): EquipMessage | undefined {
   }
   return undefined;
 }
+
+// Client -> server: melee attack on another player.
+export type AttackMessage = {
+  type: "attack";
+  target: string;
+};
+
+export function parseAttackMessage(value: unknown): AttackMessage | undefined {
+  if (isRecord(value) && value.type === "attack" && typeof value.target === "string") {
+    return { type: "attack", target: value.target };
+  }
+  return undefined;
+}
+
+// Server -> clients: a player took damage.
+export type HurtMessage = {
+  type: "hurt";
+  id: string;
+  by: string;
+  amount: number;
+};
+
+// Server -> clients: a player died and respawned.
+export type DeathMessage = {
+  type: "death";
+  victim: string;
+  attacker: string;
+};
 
 // Client -> server: one dig hit on a block (blocks have HP).
 export type HitMessage = {
@@ -167,7 +196,9 @@ export type ServerStreamMessage =
   | JoinMessage
   | LeaveMessage
   | DamageMessage
-  | InventoryMessage;
+  | InventoryMessage
+  | HurtMessage
+  | DeathMessage;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -231,6 +262,21 @@ export function parseServerStreamMessage(value: unknown): ServerStreamMessage | 
       hp: value.hp,
       maxHp: value.maxHp,
     };
+  }
+  if (
+    value.type === "hurt" &&
+    typeof value.id === "string" &&
+    typeof value.by === "string" &&
+    isFiniteNumber(value.amount)
+  ) {
+    return { type: "hurt", id: value.id, by: value.by, amount: value.amount };
+  }
+  if (
+    value.type === "death" &&
+    typeof value.victim === "string" &&
+    typeof value.attacker === "string"
+  ) {
+    return { type: "death", victim: value.victim, attacker: value.attacker };
   }
   if (value.type === "inventory" && isRecord(value.items)) {
     const items: Record<string, number> = {};

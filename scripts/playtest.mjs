@@ -303,6 +303,51 @@ try {
     8000,
   );
 
+  // combat: the rock hit already dealt damage; now chase a player down with
+  // the axe and verify damage, death, and respawn with full hp
+  const hurtVictim = await p1.frame.evaluate(() =>
+    window.__voxels.remotes().find((r) => r.hp < 20),
+  );
+  if (!hurtVictim) throw new Error("rock hit dealt no damage");
+  log(`OK: projectile damage landed (${hurtVictim.name} at ${hurtVictim.hp}/20 hp)`);
+
+  await p1.page.keyboard.press("3"); // axe: 5 melee damage
+  await waitFor(p1.frame, () => window.__voxels.equipped() === 2, null, "player1 equipped the axe");
+  const victimId = hurtVictim.id;
+  let died = false;
+  for (let i = 0; i < 12 && !died; i++) {
+    // close the distance the knockback opens up
+    const chase = await p1.frame.evaluate((id) => {
+      const v = window.__voxels;
+      const victim = v.remotes().find((r) => r.id === id);
+      if (!victim) return null;
+      const pos = v.playerPosition();
+      v.noa.camera.heading = Math.atan2(victim.x - pos[0], victim.z - pos[2]);
+      return Math.hypot(victim.x - pos[0], victim.z - pos[2]);
+    }, victimId);
+    if (chase === null) throw new Error("melee victim disappeared");
+    if (chase > 3) {
+      await p1.page.keyboard.down("w");
+      await p1.page.waitForTimeout(Math.min(1200, chase * 180));
+      await p1.page.keyboard.up("w");
+    }
+    await p1.frame.evaluate((id) => window.__voxels.attack(id), victimId);
+    await p1.page.waitForTimeout(450);
+    died = await p1.frame.evaluate((id) => window.__voxels.lastDeath()?.victim === id, victimId);
+  }
+  if (!died) throw new Error("melee attacks never killed the victim");
+  log("OK: melee attacks killed the victim (death broadcast received)");
+  await waitFor(
+    p1.frame,
+    (id) => {
+      const victim = window.__voxels.remotes().find((r) => r.id === id);
+      return !!victim && victim.hp === 20;
+    },
+    victimId,
+    "victim respawned with full hp",
+    8000,
+  );
+
   // block health: blocks take multiple hits, then drop a floating pickup
   // that lands in the digger's inventory when they stand nearby
   await p1.page.keyboard.press("2"); // pickaxe digs everything
