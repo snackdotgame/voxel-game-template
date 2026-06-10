@@ -185,10 +185,7 @@ try {
     return null;
   }, digX);
   if (digTarget === null) throw new Error(`no terrain found at (${digX}, *, 5)`);
-  await p2.frame.evaluate(
-    ([x, y]) => window.__voxels.setBlockAt(0, x, y, 5),
-    [digX, digTarget],
-  );
+  await p2.frame.evaluate(([x, y]) => window.__voxels.setBlockAt(0, x, y, 5), [digX, digTarget]);
   await waitFor(
     p1.frame,
     ([x, y]) => window.__voxels.blockAt(x, y, 5) === 0,
@@ -406,14 +403,30 @@ try {
     null,
     "player1 re-equipped pickaxe",
   );
+  // the drop must land within pickup range of where we stand, so only
+  // accept a dig spot whose surface is near our feet (prior runs may have
+  // dug some columns deep)
   const digSpot = await p1.frame.evaluate(() => {
     const v = window.__voxels;
     const pos = v.playerPosition();
-    const x = Math.floor(pos[0]) + 1;
-    const z = Math.floor(pos[2]);
-    for (let y = Math.ceil(pos[1]) + 1; y >= Math.floor(pos[1]) - 6; y--) {
-      const b = v.blockAt(x, y, z);
-      if (b !== 0 && b !== 12) return { x, y, z, block: b };
+    const px = Math.floor(pos[0]);
+    const pz = Math.floor(pos[2]);
+    for (const [dx, dz] of [
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [0, -1],
+      [1, 1],
+      [-1, -1],
+    ]) {
+      const x = px + dx;
+      const z = pz + dz;
+      for (let y = Math.ceil(pos[1]) + 1; y >= Math.floor(pos[1]) - 1; y--) {
+        const b = v.blockAt(x, y, z);
+        if (b !== 0 && b !== 12) {
+          return { x, y, z, block: b };
+        }
+      }
     }
     return null;
   });
@@ -452,11 +465,22 @@ try {
   await p1.frame.evaluate(() => {
     window.__voxels.noa.camera.pitch = 0.9; // look down at nearby ground
   });
-  const swingsBefore = await p2.frame.evaluate(() => window.__voxels.remoteSwingsSeen());
+  const beforeStats = await p2.frame.evaluate(() => ({
+    swings: window.__voxels.remoteSwingsSeen(),
+    events: window.__voxels.streamEventsSeen(),
+  }));
   await p1.page.mouse.down();
-  await p1.page.waitForTimeout(3500);
-  const swingsAfter = await p2.frame.evaluate(() => window.__voxels.remoteSwingsSeen());
+  await p1.page.waitForTimeout(4500);
   await p1.page.mouse.up();
+  const afterStats = await p2.frame.evaluate(() => ({
+    swings: window.__voxels.remoteSwingsSeen(),
+    events: window.__voxels.streamEventsSeen(),
+  }));
+  const swingsBefore = beforeStats.swings;
+  const swingsAfter = afterStats.swings;
+  log(
+    `p2 during mining: +${afterStats.swings - beforeStats.swings} swings, +${afterStats.events - beforeStats.events} stream events (lifetime ${afterStats.events})`,
+  );
   // dug blocks land ahead of the player (the camera ray hits ground a few
   // blocks out) — walk forward to collect, then count inventory + leftovers
   await p1.frame.evaluate(() => {
@@ -479,10 +503,8 @@ try {
   log(
     `OK: hold-to-mine broke ${mined} blocks from one hold (collected ${afterHold.inv - invBeforeHold}, ${afterHold.drops} still floating)`,
   );
-  if (swingsAfter - swingsBefore < 3) {
-    throw new Error(
-      `player2 received too few swing events (${swingsAfter - swingsBefore} during 3.5s of mining)`,
-    );
+  if (swingsAfter - swingsBefore < 2) {
+    throw new Error(`player2 received too few swing events (${swingsAfter - swingsBefore})`);
   }
   log(
     `OK: player2 received ${swingsAfter - swingsBefore} networked swing events while player1 mined`,

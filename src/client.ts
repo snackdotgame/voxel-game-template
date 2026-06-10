@@ -1,7 +1,7 @@
 import { Color3 } from "@babylonjs/core/Maths/math.color";
 import { DynamicTexture } from "@babylonjs/core/Materials/Textures/dynamicTexture";
 import { Texture } from "@babylonjs/core/Materials/Textures/texture";
-import { Vector4 } from "@babylonjs/core/Maths/math.vector";
+import { Vector3, Vector4 } from "@babylonjs/core/Maths/math.vector";
 import { CreateBox } from "@babylonjs/core/Meshes/Builders/boxBuilder";
 import { Mesh } from "@babylonjs/core/Meshes/mesh";
 import { TransformNode } from "@babylonjs/core/Meshes/transformNode";
@@ -257,6 +257,7 @@ const SKIN_PX = 0.05625; // world units per skin pixel: 32px of parts -> 1.8 blo
 
 type Rig = {
   root: Mesh;
+  head: Mesh;
   leftArm: TransformNode;
   rightArm: TransformNode;
   leftLeg: TransformNode;
@@ -429,7 +430,8 @@ function buildRig(name: string, hueShiftDegrees: number): Rig {
 
   // proportions: 12px legs + 12px torso + 8px head = 32px -> 1.8 blocks
   box("torso", 8, 12, 4, BODY_FACES, body, 1.0125);
-  box("head", 8, 8, 8, HEAD_FACES, body, 1.575);
+  const head = box("head", 8, 8, 8, HEAD_FACES, body, 1.575);
+  head.setPivotPoint(new Vector3(0, -0.225, 0));
 
   const limb = (part: string, rects: FaceRects, pivotY: number, xOff: number) => {
     const pivot = new TransformNode(`${name}-${part}-pivot`, scene);
@@ -441,6 +443,7 @@ function buildRig(name: string, hueShiftDegrees: number): Rig {
 
   const rig: Rig = {
     root,
+    head,
     body,
     leftArm: limb("left-arm", ARM_FACES, 1.305, -0.3375),
     rightArm: limb("right-arm", ARM_FACES, 1.305, 0.3375),
@@ -460,47 +463,95 @@ function buildRig(name: string, hueShiftDegrees: number): Rig {
   return rig;
 }
 
-// Walk cycle after Minecraft-classic / ClassiCube: cosine limb swing with
-// legs at ~1.4x the arm amplitude in opposite phase, scaled by speed, plus
-// a subtle idle breathing sway on the arms.
-function animateRig(rig: Rig, speed: number, grounded: boolean, dtSec: number) {
-  rig.idleT += dtSec;
-  const amount = Math.min(1, speed / 6);
-  if (amount > 0.05) {
-    rig.phase += dtSec * (4 + speed * 1.3);
-  }
+// Animation math ported from skinview3d (MIT, bs-community/skinview3d
+// src/animation.ts) and minecraft-web-client (MIT, zardoy/minecraft-web-client
+// renderer/viewer/three/entity/animations.js). Sign convention verified:
+// negative rotation.x swings a limb forward in our rig, matching theirs.
+const RUN_SPEED_THRESHOLD = 7;
 
-  let legTarget = 0;
-  let armTarget = 0;
-  let legSplit = -1; // -1: opposite-phase swing, +1: same pose both legs
+function animateRig(rig: Rig, speed: number, grounded: boolean, dtSec: number, swinging = false) {
+  rig.idleT += dtSec;
+  const moving = grounded && speed > 0.4;
+  const running = moving && speed > RUN_SPEED_THRESHOLD;
+  if (moving) {
+    rig.phase += dtSec * (running ? 10 : 8);
+  }
+  const t = rig.phase;
+  const PI = Math.PI;
+
+  let lLegX = 0;
+  let rLegX = 0;
+  let lArmX = 0;
+  let rArmX = 0;
+  let lArmZ = 0;
+  let rArmZ = 0;
+  let headY = 0;
+  let headX = 0;
+  let bodyBob = 0;
+
   if (!grounded) {
     // airborne: legs scissor slightly, arms trail up
-    legTarget = 0.35;
-    armTarget = -0.55;
-    legSplit = 1;
-    rig.body.position.y = 0;
+    lLegX = 0.35;
+    rLegX = -0.35;
+    lArmX = -0.55;
+    rArmX = -0.55;
+  } else if (running) {
+    // RunningAnimation / WalkingGeneralSwing isRunning branch
+    lLegX = Math.cos(t + PI) * 1.3;
+    rLegX = Math.cos(t) * 1.3;
+    lArmX = Math.cos(t) * 1.5;
+    rArmX = Math.cos(t + PI) * 1.5;
+    lArmZ = Math.cos(t) * 0.1 + PI * 0.1;
+    rArmZ = Math.cos(t + PI) * 0.1 - PI * 0.1;
+    bodyBob = Math.abs(Math.cos(t)) * 0.06;
+  } else if (moving) {
+    // WalkingAnimation
+    lLegX = Math.sin(t) * 0.5;
+    rLegX = Math.sin(t + PI) * 0.5;
+    lArmX = Math.sin(t + PI) * 0.5;
+    rArmX = Math.sin(t) * 0.5;
+    lArmZ = Math.cos(t) * 0.03 + PI * 0.02;
+    rArmZ = Math.cos(t + PI) * 0.03 - PI * 0.02;
+    headY = Math.sin(t / 4) * 0.2;
+    headX = Math.sin(t / 5) * 0.1;
+    bodyBob = Math.abs(Math.cos(t)) * 0.035;
   } else {
-    const cycle = Math.cos(rig.phase);
-    legTarget = cycle * 1.3 * amount;
-    armTarget = -cycle * 0.9 * amount;
-    rig.body.position.y = Math.abs(cycle) * 0.045 * amount;
+    // IdleAnimation: subtle arm breathe
+    const it = rig.idleT * 2;
+    lArmZ = Math.cos(it) * 0.03 + PI * 0.02;
+    rArmZ = Math.cos(it + PI) * 0.03 - PI * 0.02;
   }
 
-  // idle sway: arms splay out and breathe a little (always on, scaled down
-  // while moving so it doesn't fight the walk swing)
-  const idle = 1 - amount * 0.7;
-  const swayZ = (Math.cos(rig.idleT * 1.7) * 0.025 + 0.05) * idle;
-  const swayX = Math.sin(rig.idleT * 1.3) * 0.04 * idle;
-
-  const blend = 1 - Math.exp(-dtSec * 16);
-  const ease = (node: TransformNode, x: number, z: number) => {
+  // direct assignment like the references, with a short blend so
+  // walk<->idle transitions don't pop
+  const blend = 1 - Math.exp(-dtSec * 24);
+  const ease = (node: TransformNode | Mesh, x: number, z: number) => {
     node.rotation.x += (x - node.rotation.x) * blend;
     node.rotation.z += (z - node.rotation.z) * blend;
   };
-  ease(rig.leftLeg, legTarget, 0);
-  ease(rig.rightLeg, legTarget * legSplit * -1, 0);
-  ease(rig.leftArm, armTarget + swayX, -swayZ);
-  ease(rig.rightArm, -armTarget + swayX, swayZ);
+  ease(rig.leftLeg, lLegX, 0);
+  ease(rig.rightLeg, rLegX, 0);
+  ease(rig.leftArm, lArmX, lArmZ);
+  if (!swinging) {
+    ease(rig.rightArm, rArmX, rArmZ);
+    rig.body.rotation.y += (0 - rig.body.rotation.y) * blend;
+  }
+  rig.head.rotation.y += (headY - rig.head.rotation.y) * blend;
+  rig.head.rotation.x += (headX - rig.head.rotation.x) * blend;
+  rig.body.position.y = bodyBob;
+}
+
+// HitAnimation from minecraft-web-client, verbatim: the swing arm pose
+// REPLACES the walk pose for the right arm (t runs 0..2pi over one swing,
+// which chains into a continuous cycle while hold-mining).
+function applySwingToRig(rig: Rig, swingT: number, moving: boolean) {
+  const t = (1 - swingT) * Math.PI * 2;
+  rig.rightArm.rotation.x = -0.4537860552 * 2 + 2 * Math.sin(t + Math.PI) * 0.3;
+  if (!moving) {
+    rig.rightArm.rotation.z = -Math.cos(t) * 0.403 + 0.01 * Math.PI + 0.06;
+    rig.body.rotation.y = -Math.cos(t) * 0.06;
+    rig.leftArm.rotation.x += Math.sin(t + Math.PI) * 0.077;
+  }
 }
 
 function hueForId(id: string): number {
@@ -1009,25 +1060,28 @@ noa.on("beforeRender", () => {
     prevPredicted.z + (predicted.z - prevPredicted.z) * alpha,
   );
   selfRig.root.rotation.y = noa.camera.heading;
-  animateRig(selfRig, Math.hypot(predicted.vx, predicted.vz), onGround(predicted), dtSec);
+  const selfSpeed = Math.hypot(predicted.vx, predicted.vz);
+  const selfMoving = onGround(predicted) && selfSpeed > 0.4;
+  animateRig(selfRig, selfSpeed, onGround(predicted), dtSec, swingT > 0);
 
-  // use animation, after Minecraft's swing curves: sin(sqrt(p)*2pi) drives
-  // a forward strike with follow-through past neutral, sin(p*pi) the reach.
-  // Negative arm rotation.x swings the hand forward (calibrated).
+  // swing: third person uses the ported HitAnimation; first person uses
+  // minecraft-web-client's hand-swing parameter set (scaled to our model)
   if (swingT > 0) {
-    swingT = Math.max(0, swingT - dtSec * 4);
-    const p = 1 - swingT;
-    const strike = Math.sin(Math.sqrt(p) * Math.PI * 2);
-    const reach = Math.sin(p * Math.PI);
-    selfRig.rightArm.rotation.x -= strike * 1.2 + reach * 0.5;
-    selfRig.rightArm.rotation.z += reach * 0.3;
+    swingT = Math.max(0, swingT - dtSec * 3.1); // one swing ~= 0.32s, like MC
+    applySwingToRig(selfRig, swingT, selfMoving);
     if (viewModel) {
-      viewModel.position.x = VIEW_MODEL_POS[0] - strike * 0.22;
-      viewModel.position.y = VIEW_MODEL_POS[1] - reach * 0.18;
-      viewModel.position.z = VIEW_MODEL_POS[2] + reach * 0.12;
-      viewModel.rotation.x = -strike * 0.9;
-      viewModel.rotation.y = -0.3 - strike * 0.5;
-      viewModel.rotation.z = -reach * 0.35;
+      const p = 1 - swingT;
+      const sqrtP = Math.sqrt(p);
+      const sinP = Math.sin(p * Math.PI);
+      const sinSqrtP = Math.sin(sqrtP * Math.PI);
+      const sin2SqrtP = Math.sin(sqrtP * Math.PI * 2);
+      const S = 0.5;
+      viewModel.position.x = VIEW_MODEL_POS[0] - 0.8 * sinSqrtP * S;
+      viewModel.position.y = VIEW_MODEL_POS[1] + (0.2 * sin2SqrtP - 0.6 * p) * S;
+      viewModel.position.z = VIEW_MODEL_POS[2] - 0.2 * sinP * S;
+      viewModel.rotation.x = -0.5236 * sinP; // -30deg * sin(p*pi)
+      viewModel.rotation.y = -0.3 - 0.6109 * sinSqrtP; // -35deg * sin(sqrt(p)*pi)
+      viewModel.rotation.z = -0.0873 * sinP; // -5deg
     }
   } else if (viewModel) {
     viewModel.position.fromArray(VIEW_MODEL_POS);
@@ -1073,19 +1127,12 @@ noa.on("beforeRender", () => {
       current[2] + (remote.target.z - current[2]) * t,
     );
     remote.rig.root.rotation.y = remote.heading;
-    animateRig(
-      remote.rig,
-      Math.hypot(remote.target.vx, remote.target.vz),
-      onGround(remote.target),
-      dtSec,
-    );
+    const remoteSpeed = Math.hypot(remote.target.vx, remote.target.vz);
+    const remoteMoving = onGround(remote.target) && remoteSpeed > 0.4;
+    animateRig(remote.rig, remoteSpeed, onGround(remote.target), dtSec, remote.swingT > 0);
     if (remote.swingT > 0) {
-      remote.swingT = Math.max(0, remote.swingT - dtSec * 4);
-      const p = 1 - remote.swingT;
-      const strike = Math.sin(Math.sqrt(p) * Math.PI * 2);
-      const reach = Math.sin(p * Math.PI);
-      remote.rig.rightArm.rotation.x -= strike * 1.2 + reach * 0.5;
-      remote.rig.rightArm.rotation.z += reach * 0.3;
+      remote.swingT = Math.max(0, remote.swingT - dtSec * 3.1);
+      applySwingToRig(remote.rig, remote.swingT, remoteMoving);
     }
   }
 });
@@ -1522,9 +1569,12 @@ noa.inputs.down.on("alt-fire", () => {
 let myId = "";
 let myOutfitHue = 0;
 
+let streamEventsSeen = 0;
+
 async function readStreams(): Promise<void> {
   while (true) {
     const event = await client.streams.recv();
+    streamEventsSeen += 1;
     try {
       handleStreamEvent(event);
     } catch (error) {
@@ -1660,8 +1710,12 @@ function safeJson(event: { json<T = unknown>(): T }): unknown {
 }
 
 async function connect(): Promise<void> {
-  void readStreams().catch(() => {});
-  void readDatagrams().catch(() => {});
+  void readStreams().catch((error: unknown) => {
+    console.error("stream reader died", error);
+  });
+  void readDatagrams().catch((error: unknown) => {
+    console.error("datagram reader died", error);
+  });
   void client.connection.then((connection) => {
     myId = connection.connectionId;
     myName = connection.userName;
@@ -1709,6 +1763,7 @@ declare global {
       attack(target: string): void;
       swing(): number;
       remoteSwingsSeen(): number;
+      streamEventsSeen(): number;
       requestServerDebug(): void;
       serverDebug(): Record<string, unknown> | null;
       projectileCount(): number;
@@ -1753,6 +1808,7 @@ window.__voxels = {
   },
   swing: () => swingT,
   remoteSwingsSeen: () => remoteSwingsSeen,
+  streamEventsSeen: () => streamEventsSeen,
   requestServerDebug: () => {
     void client.streams.send({ type: "debug" }).catch(() => {});
   },
