@@ -20,17 +20,21 @@ import {
   knockback,
   meleeDamage,
   projectileDamage,
-  starterKit,
+  starterSlots,
+  stackLimit,
   throwSpeed,
+  type InvSlot,
 } from "./shared/items.js";
 import {
   type BlockEdit,
+  type PlaceMessage,
   type PlayerSnapshot,
   type RosterEntry,
   parseAttackMessage,
   parseEditMessage,
   parseEquipMessage,
   parseHitMessage,
+  parseInvMoveMessage,
   parsePlaceMessage,
   parseThrowMessage,
 } from "./shared/messages.js";
@@ -145,7 +149,7 @@ type World = {
   players: Map<string, Player>;
   lastSeen: Map<string, number>;
   // inventories are keyed by userId so they survive reconnects and AFK
-  inventories: Map<string, Map<number, number>>;
+  inventories: Map<string, InvSlot[]>;
   // characters of removed players, keyed by userId, for seamless resume
   parked: Map<string, Parked>;
   drops: Map<number, Drop>;
@@ -381,7 +385,11 @@ function handleStream(world: World, event: StreamEvent) {
   const equip = parseEquipMessage(value);
   if (equip) {
     const player = world.players.get(event.connection.id);
-    if (player && isValidItem(equip.item)) {
+    if (
+      player &&
+      isValidItem(equip.item) &&
+      (equip.item === 0 || holdsItem(world, event.connection.id, equip.item))
+    ) {
       player.item = equip.item;
     }
     return;
@@ -389,7 +397,7 @@ function handleStream(world: World, event: StreamEvent) {
   const throwMsg = parseThrowMessage(value);
   if (throwMsg) {
     broadcastSwing(world, event.connection.id);
-    handleThrow(world, event.connection.id, throwMsg.dx, throwMsg.dy, throwMsg.dz);
+    handleThrow(world, event.connection.id, throwMsg.slot, throwMsg.dx, throwMsg.dy, throwMsg.dz);
     return;
   }
   const hit = parseHitMessage(value);
@@ -435,7 +443,12 @@ function handleStream(world: World, event: StreamEvent) {
   const place = parsePlaceMessage(value);
   if (place) {
     broadcastSwing(world, event.connection.id);
-    handlePlace(world, event.connection.id, place.item, place.x, place.y, place.z);
+    handlePlace(world, event.connection.id, place);
+    return;
+  }
+  const move = parseInvMoveMessage(value);
+  if (move) {
+    handleInvMove(world, event.connection.id, move.from, move.to);
     return;
   }
   handleEdit(world, event, value);
@@ -526,41 +539,105 @@ function userIdOf(world: World, connectionId: string): string {
   return world.players.get(connectionId)?.userId ?? connectionId;
 }
 
-function inventoryOf(world: World, connectionId: string): Map<number, number> {
+function inventoryOf(world: World, connectionId: string): InvSlot[] {
   const key = userIdOf(world, connectionId);
   let inv = world.inventories.get(key);
   if (!inv) {
-    inv = starterKit();
+    inv = starterSlots();
     world.inventories.set(key, inv);
   }
   return inv;
 }
 
 function sendInventory(world: World, connectionId: string) {
-  const items: Record<string, number> = {};
-  for (const [item, count] of inventoryOf(world, connectionId)) {
-    if (count > 0) {
-      items[String(item)] = count;
+  const slots = inventoryOf(world, connectionId).map((slot) =>
+    slot ? { i: slot.item, n: slot.count } : null,
+  );
+  server.streams.send(connectionId, { type: "inventory", slots });
+}
+
+// Stacks into existing piles (hotbar first by array order), then the first
+// empty slots. Returns how many didn't fit — the caller leaves those in the
+// world.
+function grantItem(world: World, connectionId: string, item: number, count: number): number {
+  const inv = inventoryOf(world, connectionId);
+  const limit = stackLimit(item);
+  let remaining = count;
+  for (const slot of inv) {
+    if (remaining === 0) {
+      break;
+    }
+    if (slot && slot.item === item && slot.count < limit) {
+      const take = Math.min(limit - slot.count, remaining);
+      slot.count += take;
+      remaining -= take;
     }
   }
-  server.streams.send(connectionId, { type: "inventory", items });
+  for (let i = 0; i < inv.length && remaining > 0; i++) {
+    if (!inv[i]) {
+      const take = Math.min(limit, remaining);
+      inv[i] = { item, count: take };
+      remaining -= take;
+    }
+  }
+  if (remaining < count) {
+    sendInventory(world, connectionId);
+  }
+  return remaining;
 }
 
-function addItem(world: World, connectionId: string, item: number, count: number) {
+// Decrements one item from the given slot; the slot must actually hold the
+// claimed item (the client says which stack it is consuming from).
+function tryConsume(world: World, connectionId: string, slot: number, item: number): boolean {
   const inv = inventoryOf(world, connectionId);
-  inv.set(item, (inv.get(item) ?? 0) + count);
-  sendInventory(world, connectionId);
-}
-
-function tryConsume(world: World, connectionId: string, item: number, count: number): boolean {
-  const inv = inventoryOf(world, connectionId);
-  const have = inv.get(item) ?? 0;
-  if (have < count) {
+  const stack = inv[slot];
+  if (!stack || stack.item !== item || stack.count < 1) {
     return false;
   }
-  inv.set(item, have - count);
+  stack.count -= 1;
+  if (stack.count === 0) {
+    inv[slot] = null;
+  }
   sendInventory(world, connectionId);
   return true;
+}
+
+function holdsItem(world: World, connectionId: string, item: number): boolean {
+  return inventoryOf(world, connectionId).some((slot) => slot !== null && slot.item === item);
+}
+
+// Drag-and-drop between two slots: merge same-item stacks up to the stack
+// limit, otherwise swap the contents.
+function handleInvMove(world: World, connectionId: string, from: number, to: number) {
+  const inv = inventoryOf(world, connectionId);
+  if (
+    from === to ||
+    !Number.isInteger(from) ||
+    !Number.isInteger(to) ||
+    from < 0 ||
+    from >= inv.length ||
+    to < 0 ||
+    to >= inv.length
+  ) {
+    return;
+  }
+  const source = inv[from];
+  if (!source) {
+    return;
+  }
+  const target = inv[to];
+  if (target && target.item === source.item) {
+    const take = Math.min(stackLimit(source.item) - target.count, source.count);
+    target.count += take;
+    source.count -= take;
+    if (source.count === 0) {
+      inv[from] = null;
+    }
+  } else {
+    inv[from] = target;
+    inv[to] = source;
+  }
+  sendInventory(world, connectionId);
 }
 
 /*
@@ -605,7 +682,8 @@ function handleHit(world: World, id: string, x: number, y: number, z: number) {
   }
 }
 
-function handlePlace(world: World, id: string, item: number, x: number, y: number, z: number) {
+function handlePlace(world: World, id: string, place: PlaceMessage) {
+  const { item, slot, x, y, z } = place;
   const player = world.players.get(id);
   if (!player || !isValidItem(item) || !isBlockItem(item)) {
     return;
@@ -614,7 +692,7 @@ function handlePlace(world: World, id: string, item: number, x: number, y: numbe
   if (target !== 0 && target !== WATER_ID) {
     return;
   }
-  if (!tryConsume(world, id, item, 1)) {
+  if (!tryConsume(world, id, slot, item)) {
     return;
   }
   emitEdit(world, { block: itemToBlock(item), x, y, z }, null);
@@ -655,9 +733,10 @@ function tickDrops(world: World) {
         drop.y <= c.y + 2.2 &&
         Math.abs(drop.z - c.z) <= DROP_PICKUP_RADIUS
       ) {
-        addItem(world, id, drop.item, 1);
-        world.drops.delete(drop.id);
-        world.dropsDirty = true;
+        if (grantItem(world, id, drop.item, 1) === 0) {
+          world.drops.delete(drop.id);
+          world.dropsDirty = true;
+        }
         break;
       }
     }
@@ -668,7 +747,14 @@ function tickDrops(world: World) {
  *      Projectiles: server-authoritative ballistics
  */
 
-function handleThrow(world: World, ownerId: string, dx: number, dy: number, dz: number) {
+function handleThrow(
+  world: World,
+  ownerId: string,
+  slot: number,
+  dx: number,
+  dy: number,
+  dz: number,
+) {
   const player = world.players.get(ownerId);
   if (!player || !isThrowable(player.item) || world.projectiles.size >= MAX_PROJECTILES) {
     return;
@@ -677,7 +763,7 @@ function handleThrow(world: World, ownerId: string, dx: number, dy: number, dz: 
   if (len < 1e-6) {
     return;
   }
-  if (!tryConsume(world, ownerId, player.item, 1)) {
+  if (!tryConsume(world, ownerId, slot, player.item)) {
     return;
   }
   const nx = dx / len;

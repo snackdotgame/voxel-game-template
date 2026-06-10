@@ -183,12 +183,33 @@ export function projectileDamage(item: number): number {
   return PROJECTILE_DAMAGE[item] ?? 1;
 }
 
-export function starterKit(): Map<number, number> {
-  return new Map([
-    [PICKAXE, 1],
-    [AXE, 1],
-    [SHOVEL, 1],
-    [ROCK, 6],
-    [SNOWBALL, 6],
-  ]);
+/*
+ *      Slot inventory
+ *
+ *  Minecraft-style storage: a fixed array of slots, each empty or holding a
+ *  stack of one item. Slots 0-8 are the hotbar (number keys); 9-35 are the
+ *  larger storage behind the inventory screen. The server owns the slots
+ *  and echoes the full array after every change.
+ */
+
+export const HOTBAR_SLOTS = 9;
+export const INV_SLOTS = 36;
+
+export type InvSlot = { item: number; count: number } | null;
+
+// tools don't stack; everything else stacks like Minecraft
+export function stackLimit(item: number): number {
+  return item === PICKAXE || item === AXE || item === SHOVEL ? 1 : 64;
+}
+
+// slot 0 stays empty so the 1 key is the bare hand, matching the
+// pre-slot hotbar layout (2 pickaxe, 3 axe, 4 shovel, 5 rock, 6 snowball)
+export function starterSlots(): InvSlot[] {
+  const slots: InvSlot[] = Array.from({ length: INV_SLOTS }, () => null);
+  slots[1] = { item: PICKAXE, count: 1 };
+  slots[2] = { item: AXE, count: 1 };
+  slots[3] = { item: SHOVEL, count: 1 };
+  slots[4] = { item: ROCK, count: 6 };
+  slots[5] = { item: SNOWBALL, count: 6 };
+  return slots;
 }

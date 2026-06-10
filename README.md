@@ -89,10 +89,19 @@ half-damage hits without the right tool; matching tools — axe for wood, shovel
 pickaxe for stone — hit for double, and stone/ore can only be dug with the pickaxe; partial
 damage heals after 10s). A broken block becomes a Minecraft-style item drop: a floating,
 bobbing, slowly spinning miniature that anyone can walk over to collect after a short delay.
-Stone also yields a rock and snow a snowball, keeping throwing ammo renewable. Inventories
-are server-authoritative (starting kit: tools, 6 rocks, 6 snowballs); placing blocks and
-throwing items consume from them, and the HUD shows your bag. Landed projectiles persist as
-drops too, so a thrown pickaxe can be retrieved — or stolen.
+Stone also yields a rock and snow a snowball, keeping throwing ammo renewable. Landed
+projectiles persist as drops too, so a thrown pickaxe can be retrieved — or stolen.
+
+Inventories are Minecraft-style server-authoritative slot storage: 9 hotbar slots selected
+with the number keys (what you hold is whatever sits in the selected slot) over 27 larger
+storage slots behind the inventory screen (E). Picked-up items stack into existing piles
+(tools don't stack, everything else stacks to 64) and overflow into empty slots; a full
+inventory leaves drops on the ground. The inventory screen is a DOM overlay with
+drag-and-drop: drag a stack onto another slot to move it, onto a same-item stack to merge,
+or onto a different item to swap — including into and out of the hotbar. Moves apply
+optimistically and are confirmed by the server's inventory echo; placing (right-click, from
+the held stack) and throwing consume from the slot you're holding. The starting kit is
+tools plus 6 rocks and 6 snowballs on the hotbar.
 
 ### Characters
 
@@ -158,7 +167,8 @@ Then open the Minion host shell at `http://127.0.0.1:3030/`. Each tab gets its o
 identity, so two tabs are a two-player game.
 
 Controls: click to capture the mouse, WASD to move, shift to sprint, space to jump,
-left-click to dig, right-click or E to place dirt, scroll to zoom the camera.
+left-click to dig, right-click to place the held block, E for the inventory screen, scroll
+to zoom the camera.
 
 ## Test
 

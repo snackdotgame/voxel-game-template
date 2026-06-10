@@ -22,7 +22,8 @@ import {
 import {
   AXE,
   HAND,
-  ITEMS,
+  HOTBAR_SLOTS,
+  INV_SLOTS,
   MAX_HP,
   PICKAXE,
   ROCK,
@@ -35,6 +36,8 @@ import {
   itemToBlock,
   isBlockItem,
   requiresPickaxe,
+  stackLimit,
+  type InvSlot,
 } from "./shared/items.js";
 import {
   type CharInput,
@@ -700,11 +703,14 @@ function attachToolToRig(rig: Rig, name: string, item: number): void {
 let equippedItem: number = HAND;
 let firstPerson = false;
 let swingT = 0;
-// server-authoritative inventory, mirrored from inventory stream messages
-const inventory = new Map<number, number>();
+// server-authoritative slot inventory, mirrored from inventory messages:
+// 9 hotbar slots + 27 storage slots, each empty or one stack
+let invSlots: InvSlot[] = Array.from({ length: INV_SLOTS }, () => null);
+let selectedSlot = 0;
+let inventoryOpen = false;
 
-function invCount(item: number): number {
-  return inventory.get(item) ?? 0;
+function heldStack(): InvSlot {
+  return invSlots[selectedSlot] ?? null;
 }
 
 // first-person view model: arm + tool fixed to the camera
@@ -754,18 +760,23 @@ function refreshViewModel(): void {
   viewModel = root;
 }
 
-function setEquipped(item: number): void {
+// what you hold is whatever sits in the selected hotbar slot; re-derived
+// on selection AND on every inventory change (the stack under the cursor
+// can be moved, merged away, or consumed)
+function syncEquipped(): void {
+  const item = heldStack()?.item ?? HAND;
   if (item === equippedItem) {
-    return;
-  }
-  if (item !== HAND && invCount(item) <= 0) {
-    showNotice(`No ${itemName(item)} in your inventory`);
     return;
   }
   equippedItem = item;
   attachToolToRig(selfRig, "self", item);
   refreshViewModel();
   void client.streams.send({ type: "equip", item }).catch(() => {});
+}
+
+function selectSlot(slot: number): void {
+  selectedSlot = slot;
+  syncEquipped();
   updateHud();
 }
 
@@ -777,26 +788,28 @@ function setFirstPerson(on: boolean): void {
   updateHud();
 }
 
-for (let slot = 0; slot < ITEMS.length; slot++) {
+for (let slot = 0; slot < HOTBAR_SLOTS; slot++) {
   noa.inputs.bind(`hotbar-${slot + 1}`, `Digit${slot + 1}`);
-  noa.inputs.down.on(`hotbar-${slot + 1}`, () => setEquipped(slot));
+  noa.inputs.down.on(`hotbar-${slot + 1}`, () => selectSlot(slot));
 }
 noa.inputs.bind("toggle-view", "KeyV");
 noa.inputs.down.on("toggle-view", () => setFirstPerson(!firstPerson));
 
 // throw the equipped item along the camera's view direction (Q / middle mouse)
 noa.inputs.down.on("mid-fire", () => {
-  if (!isThrowable(equippedItem)) {
-    showNotice("Nothing throwable equipped — try the rock (5)");
+  if (inventoryOpen) {
     return;
   }
-  if (invCount(equippedItem) <= 0) {
-    showNotice(`Out of ${itemName(equippedItem)}s`);
+  const held = heldStack();
+  if (!held || !isThrowable(held.item)) {
+    showNotice("Nothing throwable in hand — try the rock (5)");
     return;
   }
   swingT = 1;
   const dir = noa.rendering.camera.getForwardRay().direction;
-  void client.streams.send({ type: "throw", dx: dir.x, dy: dir.y, dz: dir.z }).catch(() => {});
+  void client.streams
+    .send({ type: "throw", slot: selectedSlot, dx: dir.x, dy: dir.y, dz: dir.z })
+    .catch(() => {});
 });
 
 /*
@@ -932,15 +945,18 @@ noa.inputs.bind("sprint", "ShiftLeft");
 
 function sampleInput(): CharInput {
   const state = noa.inputs.state as Record<string, boolean>;
+  // the inventory screen captures the keyboard: keep ticking (and staying
+  // non-AFK) but stop moving, like Minecraft's inventory pause
+  const ui = inventoryOpen;
   return {
     seq: nextSeq++,
     heading: noa.camera.heading,
-    fwd: state.forward === true,
-    back: state.backward === true,
-    left: state.left === true,
-    right: state.right === true,
-    jump: state.jump === true,
-    sprint: state.sprint === true,
+    fwd: !ui && state.forward === true,
+    back: !ui && state.backward === true,
+    left: !ui && state.left === true,
+    right: !ui && state.right === true,
+    jump: !ui && state.jump === true,
+    sprint: !ui && state.sprint === true,
   };
 }
 
@@ -1106,8 +1122,11 @@ function pushRemoteSample(remote: RemotePlayer, snap: PlayerSnapshot): void {
   const last = remote.buffer[remote.buffer.length - 1];
   if (
     last &&
-    Math.hypot(snap.state.x - last.state.x, snap.state.y - last.state.y, snap.state.z - last.state.z) >
-      REMOTE_SNAP_DISTANCE
+    Math.hypot(
+      snap.state.x - last.state.x,
+      snap.state.y - last.state.y,
+      snap.state.z - last.state.z,
+    ) > REMOTE_SNAP_DISTANCE
   ) {
     remote.buffer.length = 0;
   }
@@ -1308,9 +1327,6 @@ noa.on("beforeRender", () => {
 const UI_FONT = "12px/1.4 system-ui, sans-serif";
 
 // the block item that right-click places: follows the last block you hit,
-// auto-selects on first pickup, R cycles through owned blocks
-let placeItem = 0;
-
 function uiDiv(css: string): HTMLDivElement {
   const el = document.createElement("div");
   el.style.cssText = `position: fixed; z-index: 10; pointer-events: none; ${css}`;
@@ -1329,8 +1345,8 @@ const helpPanel = uiDiv(
 );
 helpPanel.textContent =
   "WASD move · shift sprint · space jump/swim\n" +
-  "LMB dig · RMB/E place · Q throw · R cycle block\n" +
-  "V first/third person · scroll zoom";
+  "LMB dig · RMB place held block · Q throw\n" +
+  "E inventory · V first/third person · scroll zoom";
 
 const crosshair = uiDiv(
   "top: 50%; left: 50%; width: 14px; height: 14px; margin: -7px 0 0 -7px;" +
@@ -1462,17 +1478,21 @@ function makeIconElement(item: number): Node {
   return canvas;
 }
 
-type Slot = { root: HTMLDivElement; count: HTMLDivElement };
+type Slot = {
+  root: HTMLDivElement;
+  count: HTMLDivElement;
+  iconNode: Node | null;
+  iconItem: number;
+};
 
 const SLOT_CSS =
   "position: relative; width: 44px; height: 44px; border-radius: 6px;" +
   "background: rgba(10,10,16,0.55); border: 2px solid rgba(255,255,255,0.25);" +
   "display: flex; align-items: center; justify-content: center; transition: border-color 0.1s;";
 
-function makeSlot(container: HTMLElement, item: number, keyLabel: string): Slot {
+function makeSlot(container: HTMLElement, keyLabel: string): Slot {
   const root = document.createElement("div");
   root.style.cssText = SLOT_CSS;
-  root.appendChild(makeIconElement(item));
   if (keyLabel) {
     const key = document.createElement("div");
     key.textContent = keyLabel;
@@ -1483,13 +1503,33 @@ function makeSlot(container: HTMLElement, item: number, keyLabel: string): Slot 
   count.style.cssText = `position: absolute; bottom: 1px; right: 4px; font: ${UI_FONT}; font-size: 11px; font-weight: 700; color: #fff; text-shadow: 0 1px 2px #000;`;
   root.appendChild(count);
   container.appendChild(root);
-  return { root, count };
+  return { root, count, iconNode: null, iconItem: -1 };
+}
+
+// points a slot tile at a stack: swaps the icon when the item changes and
+// shows the count for stacks of 2+ (Minecraft hides singletons)
+function setSlotContent(slot: Slot, stack: InvSlot): void {
+  const item = stack ? stack.item : -1;
+  if (item !== slot.iconItem) {
+    if (slot.iconNode) {
+      slot.root.removeChild(slot.iconNode);
+    }
+    slot.iconNode = item >= 0 ? makeIconElement(item) : null;
+    if (slot.iconNode) {
+      slot.root.insertBefore(slot.iconNode, slot.root.firstChild);
+    }
+    slot.iconItem = item;
+  }
+  slot.count.textContent = stack && stack.count > 1 ? String(stack.count) : "";
 }
 
 const hotbarEl = uiDiv(
   "bottom: 14px; left: 50%; transform: translateX(-50%); display: flex; gap: 6px;",
 );
-const hotbarSlots: Slot[] = ITEMS.map((_, item) => makeSlot(hotbarEl, item, String(item + 1)));
+const hotbarSlots: Slot[] = [];
+for (let i = 0; i < HOTBAR_SLOTS; i++) {
+  hotbarSlots.push(makeSlot(hotbarEl, String(i + 1)));
+}
 
 const hurtVignette = uiDiv(
   "inset: 0; background: radial-gradient(ellipse at center, transparent 55%, rgba(200,16,16,0.55) 100%);" +
@@ -1528,15 +1568,6 @@ function updateHearts(): void {
 }
 updateHearts();
 
-const blockBarEl = uiDiv(
-  "bottom: 92px; left: 50%; transform: translateX(-50%); display: flex; gap: 5px;",
-);
-const blockBarLabel = uiDiv(
-  `bottom: 76px; left: 50%; transform: translateX(-50%); font: ${UI_FONT}; font-size: 10px;` +
-    "color: rgba(255,255,255,0.75); text-shadow: 0 1px 2px #000;",
-);
-const blockSlots = new Map<number, Slot>();
-
 let connectionState = "connecting";
 let myName = "";
 let noticeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1560,75 +1591,178 @@ function updateStatus(): void {
 }
 
 function updateHotbar(): void {
-  for (let item = 0; item < hotbarSlots.length; item++) {
-    const slot = hotbarSlots[item];
-    const owned = item === HAND || invCount(item) > 0;
-    slot.root.style.borderColor = item === equippedItem ? "#fff" : "rgba(255,255,255,0.25)";
-    slot.root.style.opacity = owned ? "1" : "0.35";
-    slot.count.textContent = item === HAND || invCount(item) === 0 ? "" : String(invCount(item));
+  for (let i = 0; i < hotbarSlots.length; i++) {
+    setSlotContent(hotbarSlots[i], invSlots[i] ?? null);
+    hotbarSlots[i].root.style.borderColor = i === selectedSlot ? "#fff" : "rgba(255,255,255,0.25)";
   }
-}
-
-function ownedBlockItems(): number[] {
-  return [...inventory.keys()]
-    .filter((item) => isBlockItem(item) && invCount(item) > 0)
-    .sort((a, b) => a - b);
-}
-
-function updateBlockBar(): void {
-  const owned = ownedBlockItems();
-  // auto-select a sensible placement block when none is chosen (or it ran out)
-  if ((placeItem === 0 || !owned.includes(placeItem)) && owned.length > 0) {
-    placeItem = owned[0];
-  }
-  for (const [item, slot] of blockSlots) {
-    if (!owned.includes(item)) {
-      slot.root.remove();
-      blockSlots.delete(item);
-    }
-  }
-  for (const item of owned) {
-    if (!blockSlots.has(item)) {
-      blockSlots.set(item, makeSlot(blockBarEl, item, ""));
-    }
-  }
-  // keep DOM order stable by item id
-  for (const item of owned) {
-    const slot = blockSlots.get(item);
-    if (slot) {
-      blockBarEl.appendChild(slot.root);
-      slot.root.style.borderColor = item === placeItem ? "#ffd866" : "rgba(255,255,255,0.2)";
-      slot.count.textContent = String(invCount(item));
-    }
-  }
-  blockBarLabel.style.bottom = "142px";
-  blockBarLabel.textContent =
-    owned.length > 0 && placeItem !== 0 ? `R cycles · placing: ${itemName(placeItem)}` : "";
 }
 
 function updateHud(): void {
   updateStatus();
   updateHotbar();
-  updateBlockBar();
+  updateInventoryPanel();
 }
+
+/*
+ *      Inventory screen (E): the larger storage behind the hotbar.
+ *
+ *  A DOM overlay, not canvas UI: 27 storage slots over a mirror of the 9
+ *  hotbar slots, drag-and-drop to move/merge/swap stacks. Moves apply
+ *  optimistically and go to the server as invMove messages; the server's
+ *  inventory echo is authoritative.
+ */
+
+const invBackdrop = document.createElement("div");
+invBackdrop.style.cssText =
+  "position: fixed; inset: 0; z-index: 20; display: none; align-items: center;" +
+  "justify-content: center; background: rgba(0,0,0,0.45); pointer-events: auto;";
+document.body.appendChild(invBackdrop);
+
+const invPanel = document.createElement("div");
+invPanel.style.cssText =
+  "background: rgba(18,20,28,0.94); border: 1px solid rgba(255,255,255,0.15);" +
+  "border-radius: 10px; padding: 14px 16px; box-shadow: 0 12px 40px rgba(0,0,0,0.5);";
+invBackdrop.appendChild(invPanel);
+
+const invTitle = document.createElement("div");
+invTitle.textContent = "Inventory";
+invTitle.style.cssText = `font: ${UI_FONT}; font-size: 13px; color: #fff; margin-bottom: 10px;`;
+invPanel.appendChild(invTitle);
+
+// panel slot index -> inventory slot index: storage rows first (9-35),
+// then the hotbar mirror row (0-8), like Minecraft's layout
+const panelSlots: Slot[] = [];
+{
+  const storageGrid = document.createElement("div");
+  storageGrid.style.cssText =
+    "display: grid; grid-template-columns: repeat(9, 44px); gap: 5px; margin-bottom: 12px;";
+  invPanel.appendChild(storageGrid);
+  const hotbarRow = document.createElement("div");
+  hotbarRow.style.cssText = "display: grid; grid-template-columns: repeat(9, 44px); gap: 5px;";
+  invPanel.appendChild(hotbarRow);
+  for (let i = 0; i < INV_SLOTS; i++) {
+    const inStorage = i >= HOTBAR_SLOTS;
+    const slot = makeSlot(inStorage ? storageGrid : hotbarRow, inStorage ? "" : String(i + 1));
+    slot.root.dataset.invSlot = String(i);
+    slot.root.style.cursor = "grab";
+    panelSlots.push(slot);
+  }
+}
+
+function updateInventoryPanel(): void {
+  if (!inventoryOpen) {
+    return;
+  }
+  for (let i = 0; i < panelSlots.length; i++) {
+    setSlotContent(panelSlots[i], invSlots[i] ?? null);
+    panelSlots[i].root.style.borderColor = i === selectedSlot ? "#fff" : "rgba(255,255,255,0.25)";
+  }
+}
+
+function setInventoryOpen(on: boolean): void {
+  inventoryOpen = on;
+  invBackdrop.style.display = on ? "flex" : "none";
+  if (on) {
+    document.exitPointerLock?.();
+    updateInventoryPanel();
+  } else {
+    endDrag(null);
+  }
+}
+
+// the same merge-or-swap rule the server applies, run optimistically
+function applyLocalMove(from: number, to: number): void {
+  const source = invSlots[from];
+  if (!source) {
+    return;
+  }
+  const target = invSlots[to];
+  if (target && target.item === source.item) {
+    const take = Math.min(stackLimit(source.item) - target.count, source.count);
+    target.count += take;
+    source.count -= take;
+    if (source.count === 0) {
+      invSlots[from] = null;
+    }
+  } else {
+    invSlots[from] = target;
+    invSlots[to] = source;
+  }
+}
+
+function moveItem(from: number, to: number): void {
+  if (
+    from === to ||
+    from < 0 ||
+    to < 0 ||
+    from >= INV_SLOTS ||
+    to >= INV_SLOTS ||
+    !invSlots[from]
+  ) {
+    return;
+  }
+  applyLocalMove(from, to);
+  syncEquipped();
+  updateHud();
+  void client.streams.send({ type: "invMove", from, to }).catch(() => {});
+}
+
+// drag and drop: pick a stack up on pointerdown, float its icon under the
+// cursor, drop it on the slot under the pointer
+let dragFrom = -1;
+let dragGhost: HTMLDivElement | null = null;
+
+function endDrag(ev: PointerEvent | null): void {
+  if (dragFrom === -1) {
+    return;
+  }
+  if (ev) {
+    const under = document.elementFromPoint(ev.clientX, ev.clientY);
+    const slotEl = under?.closest?.("[data-inv-slot]") as HTMLElement | null;
+    if (slotEl?.dataset.invSlot !== undefined) {
+      moveItem(dragFrom, Number(slotEl.dataset.invSlot));
+    }
+  }
+  dragFrom = -1;
+  dragGhost?.remove();
+  dragGhost = null;
+}
+
+invBackdrop.addEventListener("pointerdown", (ev) => {
+  const slotEl = (ev.target as HTMLElement).closest?.("[data-inv-slot]") as HTMLElement | null;
+  const index = slotEl ? Number(slotEl.dataset.invSlot) : -1;
+  if (index < 0 || !invSlots[index]) {
+    return;
+  }
+  ev.preventDefault();
+  dragFrom = index;
+  dragGhost = document.createElement("div");
+  dragGhost.style.cssText =
+    "position: fixed; z-index: 30; pointer-events: none; opacity: 0.85;" +
+    "transform: translate(-50%, -50%);";
+  dragGhost.appendChild(makeIconElement(invSlots[index].item));
+  dragGhost.style.left = `${ev.clientX}px`;
+  dragGhost.style.top = `${ev.clientY}px`;
+  document.body.appendChild(dragGhost);
+});
+
+document.addEventListener("pointermove", (ev) => {
+  if (dragGhost) {
+    dragGhost.style.left = `${ev.clientX}px`;
+    dragGhost.style.top = `${ev.clientY}px`;
+  }
+});
+
+document.addEventListener("pointerup", (ev) => endDrag(ev));
+
 updateHud();
 
 /*
  *      Block interaction
  */
 
-noa.inputs.bind("cycle-block", "KeyR");
-noa.inputs.down.on("cycle-block", () => {
-  const owned = ownedBlockItems();
-  if (owned.length === 0) {
-    showNotice("No blocks in your bag yet — dig some");
-    return;
-  }
-  const index = owned.indexOf(placeItem);
-  placeItem = owned[(index + 1) % owned.length];
-  updateHud();
-  showNotice(`Placing: ${itemName(placeItem)}`);
-});
+noa.inputs.bind("inventory", "KeyE");
+noa.inputs.down.on("inventory", () => setInventoryOpen(!inventoryOpen));
 
 // dev/test backdoor: predicted locally like placement, confirmed by the
 // server echo so all clients converge on the same order
@@ -1690,9 +1824,6 @@ function primaryAction(fromHold: boolean): void {
     return;
   }
   const [x, y, z] = noa.targetedBlock.position;
-  // remember the last block type you worked on for placement
-  placeItem = blockToItem(block);
-  updateHud();
   void client.streams.send({ type: "hit", x, y, z }).catch(() => {});
 }
 
@@ -1701,24 +1832,34 @@ noa.inputs.down.on("fire", () => primaryAction(false));
 // hold to keep mining/attacking: re-trigger at swing cadence while held
 setInterval(() => {
   const state = noa.inputs.state as Record<string, boolean>;
-  if (state.fire === true && swingT <= 0) {
+  if (state.fire === true && swingT <= 0 && !inventoryOpen) {
     primaryAction(true);
   }
 }, 80);
 
+// noa binds alt-fire to both right-click and E by default; E is the
+// inventory screen now, so place is right-click only
+noa.inputs.unbind("alt-fire");
+noa.inputs.bind("alt-fire", "Mouse3");
 noa.inputs.down.on("alt-fire", () => {
+  if (inventoryOpen) {
+    return;
+  }
   swingT = 1;
   if (!noa.targetedBlock) {
     return;
   }
-  if (placeItem === 0 || invCount(placeItem) <= 0) {
-    showNotice("No blocks to place — dig some first (R cycles)");
+  const held = heldStack();
+  if (!held || !isBlockItem(held.item)) {
+    showNotice("Hold a block to place it — dig some, then grab it from a slot");
     return;
   }
   const [x, y, z] = noa.targetedBlock.adjacent;
   // optimistic placement, reconciled by the server's echo (or reverted)
-  predictEdit(itemToBlock(placeItem), x, y, z);
-  void client.streams.send({ type: "place", item: placeItem, x, y, z }).catch(() => {});
+  predictEdit(itemToBlock(held.item), x, y, z);
+  void client.streams
+    .send({ type: "place", item: held.item, slot: selectedSlot, x, y, z })
+    .catch(() => {});
 });
 
 /*
@@ -1808,10 +1949,12 @@ function handleStreamEvent(event: { bytes: Uint8Array; json<T = unknown>(): T })
         flashHurt(1);
       }
     } else if (message.type === "inventory") {
-      inventory.clear();
-      for (const [key, count] of Object.entries(message.items)) {
-        inventory.set(Number(key), count);
+      invSlots = message.slots.map((entry) => (entry ? { item: entry.i, count: entry.n } : null));
+      while (invSlots.length < INV_SLOTS) {
+        invSlots.push(null);
       }
+      // the stack in the selected slot may have changed or moved
+      syncEquipped();
       updateHud();
     } else if (message.type === "welcome") {
       for (const entry of message.players) {
@@ -1942,6 +2085,11 @@ declare global {
       projectileCount(): number;
       dropCount(): number;
       inventory(): Record<string, number>;
+      slots(): ({ item: number; count: number } | null)[];
+      selectedSlot(): number;
+      moveItem(from: number, to: number): void;
+      inventoryOpen(): boolean;
+      setInventoryOpen(on: boolean): void;
       sendHit(x: number, y: number, z: number): void;
       playerPosition(): number[];
       connectionState(): string;
@@ -1993,7 +2141,20 @@ window.__voxels = {
   serverDebug: () => lastServerDebug,
   projectileCount: () => projectileViews.size,
   dropCount: () => dropViews.size,
-  inventory: () => Object.fromEntries(inventory),
+  inventory: () => {
+    const totals: Record<string, number> = {};
+    for (const slot of invSlots) {
+      if (slot) {
+        totals[String(slot.item)] = (totals[String(slot.item)] ?? 0) + slot.count;
+      }
+    }
+    return totals;
+  },
+  slots: () => invSlots.map((slot) => (slot ? { ...slot } : null)),
+  selectedSlot: () => selectedSlot,
+  moveItem: (from, to) => moveItem(from, to),
+  inventoryOpen: () => inventoryOpen,
+  setInventoryOpen: (on) => setInventoryOpen(on),
   sendHit: (x, y, z) => {
     void client.streams.send({ type: "hit", x, y, z }).catch(() => {});
   },

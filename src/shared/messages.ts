@@ -97,10 +97,11 @@ export function parseHitMessage(value: unknown): HitMessage | undefined {
   return undefined;
 }
 
-// Client -> server: place a block item from inventory.
+// Client -> server: place a block item held in an inventory slot.
 export type PlaceMessage = {
   type: "place";
   item: number;
+  slot: number;
   x: number;
   y: number;
   z: number;
@@ -111,6 +112,7 @@ export function parsePlaceMessage(value: unknown): PlaceMessage | undefined {
     isRecord(value) &&
     value.type === "place" &&
     Number.isInteger(value.item) &&
+    Number.isInteger(value.slot) &&
     Number.isInteger(value.x) &&
     Number.isInteger(value.y) &&
     Number.isInteger(value.z)
@@ -118,10 +120,31 @@ export function parsePlaceMessage(value: unknown): PlaceMessage | undefined {
     return {
       type: "place",
       item: value.item as number,
+      slot: value.slot as number,
       x: value.x as number,
       y: value.y as number,
       z: value.z as number,
     };
+  }
+  return undefined;
+}
+
+// Client -> server: move/merge/swap the contents of two inventory slots
+// (drag and drop in the inventory screen).
+export type InvMoveMessage = {
+  type: "invMove";
+  from: number;
+  to: number;
+};
+
+export function parseInvMoveMessage(value: unknown): InvMoveMessage | undefined {
+  if (
+    isRecord(value) &&
+    value.type === "invMove" &&
+    Number.isInteger(value.from) &&
+    Number.isInteger(value.to)
+  ) {
+    return { type: "invMove", from: value.from as number, to: value.to as number };
   }
   return undefined;
 }
@@ -136,15 +159,18 @@ export type DamageMessage = {
   maxHp: number;
 };
 
-// Server -> owner: full inventory state after any change.
+// Server -> owner: full slot array after any change. Each entry is null
+// (empty) or { i: item id, n: count }.
 export type InventoryMessage = {
   type: "inventory";
-  items: Record<string, number>;
+  slots: ({ i: number; n: number } | null)[];
 };
 
-// Client -> server: throw the equipped item along a view direction.
+// Client -> server: throw the item held in an inventory slot along a view
+// direction.
 export type ThrowMessage = {
   type: "throw";
+  slot: number;
   dx: number;
   dy: number;
   dz: number;
@@ -154,11 +180,12 @@ export function parseThrowMessage(value: unknown): ThrowMessage | undefined {
   if (
     isRecord(value) &&
     value.type === "throw" &&
+    Number.isInteger(value.slot) &&
     isFiniteNumber(value.dx) &&
     isFiniteNumber(value.dy) &&
     isFiniteNumber(value.dz)
   ) {
-    return { type: "throw", dx: value.dx, dy: value.dy, dz: value.dz };
+    return { type: "throw", slot: value.slot as number, dx: value.dx, dy: value.dy, dz: value.dz };
   }
   return undefined;
 }
@@ -288,14 +315,14 @@ export function parseServerStreamMessage(value: unknown): ServerStreamMessage | 
   ) {
     return { type: "death", victim: value.victim, attacker: value.attacker };
   }
-  if (value.type === "inventory" && isRecord(value.items)) {
-    const items: Record<string, number> = {};
-    for (const [key, count] of Object.entries(value.items)) {
-      if (isFiniteNumber(count)) {
-        items[key] = count;
+  if (value.type === "inventory" && Array.isArray(value.slots)) {
+    const slots: ({ i: number; n: number } | null)[] = value.slots.map((entry) => {
+      if (isRecord(entry) && Number.isInteger(entry.i) && Number.isInteger(entry.n)) {
+        return { i: entry.i as number, n: entry.n as number };
       }
-    }
-    return { type: "inventory", items };
+      return null;
+    });
+    return { type: "inventory", slots };
   }
   if (value.type === "join" && typeof value.id === "string" && typeof value.name === "string") {
     return { type: "join", id: value.id, name: value.name };

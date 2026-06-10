@@ -232,6 +232,61 @@ try {
     "player2 sees player1 holding the pickaxe",
   );
 
+  // inventory screen: E opens the larger storage; drag-and-drop moves a
+  // stack between slots, the server echo confirms, and E closes it
+  await p1.page.keyboard.press("e");
+  await waitFor(p1.frame, () => window.__voxels.inventoryOpen(), null, "E opened the inventory");
+  const dragRects = await p1.frame.evaluate(() => {
+    const rects = {};
+    for (const el of document.querySelectorAll("[data-inv-slot]")) {
+      const r = el.getBoundingClientRect();
+      rects[el.dataset.invSlot] = { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+    }
+    return rects;
+  });
+  const frameBox = await (await p1.page.$("iframe"))?.boundingBox();
+  const slotPoint = (i) => ({
+    x: dragRects[String(i)].x + (frameBox?.x ?? 0),
+    y: dragRects[String(i)].y + (frameBox?.y ?? 0),
+  });
+  // drag the snowball stack (hotbar slot 5) into storage slot 20 and back
+  const fromPt = slotPoint(5);
+  const toPt = slotPoint(20);
+  await p1.page.mouse.move(fromPt.x, fromPt.y);
+  await p1.page.mouse.down();
+  await p1.page.mouse.move(toPt.x, toPt.y, { steps: 6 });
+  await p1.page.mouse.up();
+  await waitFor(
+    p1.frame,
+    () => {
+      const s = window.__voxels.slots();
+      return !s[5] && s[20]?.item === 5 && s[20]?.count === 6;
+    },
+    null,
+    "drag-and-drop moved the snowball stack into storage",
+  );
+  await p1.page.waitForTimeout(600);
+  const echoed = await p1.frame.evaluate(() => {
+    const s = window.__voxels.slots();
+    return !s[5] && s[20]?.item === 5 && s[20]?.count === 6;
+  });
+  if (!echoed) throw new Error("server inventory echo disagrees with the drag move");
+  log("OK: server echo confirms the inventory move");
+  await p1.frame.evaluate(() => window.__voxels.moveItem(20, 5));
+  await waitFor(
+    p1.frame,
+    () => window.__voxels.slots()[5]?.item === 5,
+    null,
+    "moveItem returned the stack to the hotbar",
+  );
+  await p1.page.keyboard.press("e");
+  await waitFor(
+    p1.frame,
+    () => !window.__voxels.inventoryOpen(),
+    null,
+    "E closed the inventory",
+  );
+
   // first-person toggle
   await p1.page.keyboard.press("v");
   await waitFor(
