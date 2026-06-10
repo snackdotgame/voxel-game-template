@@ -559,7 +559,7 @@ var faceDataPool = (() => {
  *
  *
  *       Mesh Builder - consumes all the raw data in geomData to build
- *          Babylon.js mesh/submeshes, ready to be added to the scene
+ *          three.js meshes, ready to be added to the scene
  *
  *
  *

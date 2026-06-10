@@ -484,7 +484,7 @@ class MaterialOptions {
   /** Index into a (vertical strip) texture atlas, if applicable */
   atlasIndex: number;
   /**
-   * An optional Babylon.js `Material`. If specified, terrain for this voxel
+   * An optional three.js `Material`. If specified, terrain for this voxel
    * will be rendered with the supplied material (this can impact performance).
    */
   renderMaterial: any;
@@ -499,7 +499,7 @@ class MaterialOptions {
     /** Index into a (vertical strip) texture atlas, if applicable */
     this.atlasIndex = -1;
     /**
-     * An optional Babylon.js `Material`. If specified, terrain for this voxel
+     * An optional three.js `Material`. If specified, terrain for this voxel
      * will be rendered with the supplied material (this can impact performance).
      */
     this.renderMaterial = null;
