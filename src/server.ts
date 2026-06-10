@@ -1,7 +1,7 @@
 import { server, type Connection, type DatagramEvent, type StreamEvent } from "minion:server";
 import {
   type ProjectileSnapshot,
-  decodeInput,
+  decodeInputs,
   encodeDrops,
   encodeProjectiles,
   encodeSnapshots,
@@ -764,8 +764,8 @@ function stepProjectiles(world: World) {
 }
 
 function handleInput(world: World, event: DatagramEvent) {
-  const message = decodeInput(event.bytes);
-  if (!message) {
+  const messages = decodeInputs(event.bytes);
+  if (!messages || messages.length === 0) {
     return;
   }
   world.lastSeen.set(event.connection.id, server.elapsedMs());
@@ -778,18 +778,21 @@ function handleInput(world: World, event: DatagramEvent) {
   if (!player) {
     return;
   }
-  // Old or duplicated datagrams are ignored; gaps from lost datagrams are
-  // fine — the client detects the resulting divergence and rolls back.
-  if (message.seq <= player.lastSeq) {
-    return;
-  }
-  if (player.stepsThisTick >= MAX_STEPS_PER_TICK) {
-    if (player.inputQueue.length < MAX_QUEUED_INPUTS) {
-      player.inputQueue.push(message);
+  // Each packet redundantly carries the sender's recent unacked inputs;
+  // anything at or below lastSeq was already applied (or arrived too late
+  // to matter) and is skipped, so duplicates and reordering are free.
+  for (const message of messages) {
+    if (message.seq <= player.lastSeq) {
+      continue;
     }
-    return;
+    if (player.stepsThisTick >= MAX_STEPS_PER_TICK) {
+      if (player.inputQueue.length < MAX_QUEUED_INPUTS) {
+        player.inputQueue.push(message);
+      }
+      continue;
+    }
+    applyInput(world, player, message);
   }
-  applyInput(world, player, message);
 }
 
 function applyInput(world: World, player: Player, message: CharInput) {

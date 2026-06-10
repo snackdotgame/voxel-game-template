@@ -21,10 +21,16 @@ Movement is **server-authoritative with client-side prediction and rollback**, r
 - `src/shared/terrain.ts` — deterministic terrain function plus the synced edit overlay, so
   prediction and authority collide against identical geometry.
 - `src/client.ts` — samples input every sim tick, steps the sim locally right away
-  (prediction), and sends the sequenced input to the server as a **datagram**. Server snapshots
-  ack the last applied input seq; if the authoritative state differs from what the client
-  predicted at that seq (lost/reordered datagrams), the client **rolls back** to the server
-  state and replays its pending inputs. The HUD shows a live rollback counter.
+  (prediction), and sends inputs to the server as **datagrams**. Every packet redundantly
+  carries the tail of the unacked inputs (Quake-style), so a lost or reordered datagram is
+  healed by the next packet ~50ms later instead of skipping a sim step. Server snapshots ack
+  the last applied input seq; if the authoritative state still differs from what the client
+  predicted at that seq (sustained loss, server-side knockback), the client **rolls back** to
+  the server state, replays its pending inputs, and eases the visible correction out over
+  ~150ms rather than snapping. Remote players render ~120ms in the past, interpolating
+  between buffered snapshots (position and shortest-arc heading), so 20Hz gaps and a dropped
+  snapshot are bridged by real data instead of extrapolation. The HUD shows a live rollback
+  counter.
 - `src/server.ts` — steps each player's authoritative sim from received inputs (burst-buffered
   and rate-capped), broadcasts 20 Hz state snapshots over **datagrams**, and owns the edit log.
   Players whose inputs stop freeze in place as AFK and are removed after 30s or on a real
@@ -41,8 +47,9 @@ Movement is **server-authoritative with client-side prediction and rollback**, r
 Datagrams carry everything frequent and loss-tolerant (inputs, snapshots); reliable streams
 carry only what must arrive (block edits, join/leave, chunk state).
 
-All high-frequency traffic is **binary** (`src/shared/netCodec.ts`): inputs are 12-byte
-packets (button bitfield + seq + heading) and snapshots are ~60 bytes per player (positions
+All high-frequency traffic is **binary** (`src/shared/netCodec.ts`): input packets are 4 + 9
+bytes per carried input (seq + heading + button bitfield, last 8 unacked inputs per packet)
+and snapshots are ~60 bytes per player (positions
 as f64 since they restore the prediction sim on ack; velocities/heading as f32; resting and
 jump flags bit-packed), split to fit the datagram size limit. Player names aren't repeated at
 20 Hz — they arrive once over the reliable channel (welcome roster + join messages).
@@ -164,8 +171,8 @@ PLAYWRIGHT_RESOLVE_FROM=/path/to/some/package.json node scripts/playtest.mjs
 Drives three browser sessions through the host shell and asserts connection, predicted
 movement and jumping, cross-client position sync, block-edit propagation, late-join edit
 replay, and disconnect handling. It then degrades the network (150ms latency, 40ms jitter,
-20% datagram loss) via the dev shell's debug menu to prove prediction rollbacks fire and the
-authoritative and predicted states converge. `window.__voxels` exposes the dev hooks the
+20% datagram loss) via the dev shell's debug menu to prove input redundancy absorbs the loss
+without rollbacks and the authoritative and predicted states converge. `window.__voxels` exposes the dev hooks the
 script uses.
 
 A separate synchronization suite, `scripts/sync-test.mjs` (same invocation), drives **five

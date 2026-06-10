@@ -3,13 +3,19 @@
 // layouts with a 2-byte magic so receivers can distinguish them from the
 // JSON stream messages.
 //
-// Input packet 'VI' (12 bytes):
+// Input packet 'VI' (4 + 9 bytes per record):
 //   0  u8   0x56 'V'
 //   1  u8   0x49 'I'
-//   2  u8   version = 1
-//   3  u8   buttons: fwd 1, back 2, left 4, right 8, jump 16, sprint 32
-//   4  u32  input seq
-//   8  f32  heading (radians)
+//   2  u8   version
+//   3  u8   record count
+//   then per input, oldest first:
+//     u32  input seq
+//     f32  heading (radians)
+//     u8   buttons: fwd 1, back 2, left 4, right 8, jump 16, sprint 32
+//   Datagrams are fire-and-forget, so every packet carries the tail of the
+//   sender's unacked inputs (the snapshot lastSeq is the ack that trims
+//   them): a lost packet is healed by the next one instead of forcing a
+//   rollback for the permanently skipped sim step.
 //
 // Snapshot packet 'VS':
 //   0  u8   0x56 'V'
@@ -47,9 +53,10 @@ const MAGIC_I = 0x49;
 const MAGIC_S = 0x53;
 const MAGIC_P = 0x50;
 const MAGIC_D = 0x44;
-export const NET_CODEC_VERSION = 3;
+export const NET_CODEC_VERSION = 4;
 
-const INPUT_BYTES = 12;
+const INPUT_HEADER_BYTES = 4;
+const INPUT_RECORD_BYTES = 9;
 const SNAPSHOT_HEADER_BYTES = 4;
 const RECORD_FIXED_BYTES = 53;
 
@@ -60,47 +67,64 @@ const textDecoder = new TextDecoder();
  *      Inputs
  */
 
-export function encodeInput(input: CharInput): Uint8Array {
-  const bytes = new Uint8Array(INPUT_BYTES);
+export function encodeInputs(inputs: readonly CharInput[]): Uint8Array {
+  const count = Math.min(inputs.length, 255);
+  const bytes = new Uint8Array(INPUT_HEADER_BYTES + count * INPUT_RECORD_BYTES);
   const view = new DataView(bytes.buffer);
   bytes[0] = MAGIC_V;
   bytes[1] = MAGIC_I;
   bytes[2] = NET_CODEC_VERSION;
-  bytes[3] =
-    (input.fwd ? 1 : 0) |
-    (input.back ? 2 : 0) |
-    (input.left ? 4 : 0) |
-    (input.right ? 8 : 0) |
-    (input.jump ? 16 : 0) |
-    (input.sprint ? 32 : 0);
-  view.setUint32(4, input.seq, true);
-  view.setFloat32(8, input.heading, true);
+  bytes[3] = count;
+  let offset = INPUT_HEADER_BYTES;
+  for (let i = inputs.length - count; i < inputs.length; i++) {
+    const input = inputs[i];
+    view.setUint32(offset, input.seq, true);
+    view.setFloat32(offset + 4, input.heading, true);
+    bytes[offset + 8] =
+      (input.fwd ? 1 : 0) |
+      (input.back ? 2 : 0) |
+      (input.left ? 4 : 0) |
+      (input.right ? 8 : 0) |
+      (input.jump ? 16 : 0) |
+      (input.sprint ? 32 : 0);
+    offset += INPUT_RECORD_BYTES;
+  }
   return bytes;
 }
 
-export function decodeInput(bytes: Uint8Array): CharInput | undefined {
-  if (bytes.length !== INPUT_BYTES || bytes[0] !== MAGIC_V || bytes[1] !== MAGIC_I) {
+export function decodeInputs(bytes: Uint8Array): CharInput[] | undefined {
+  if (bytes.length < INPUT_HEADER_BYTES || bytes[0] !== MAGIC_V || bytes[1] !== MAGIC_I) {
     return undefined;
   }
   if (bytes[2] !== NET_CODEC_VERSION) {
     return undefined;
   }
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const buttons = bytes[3];
-  const heading = view.getFloat32(8, true);
-  if (!Number.isFinite(heading)) {
+  const count = bytes[3];
+  if (bytes.length < INPUT_HEADER_BYTES + count * INPUT_RECORD_BYTES) {
     return undefined;
   }
-  return {
-    seq: view.getUint32(4, true),
-    heading,
-    fwd: (buttons & 1) !== 0,
-    back: (buttons & 2) !== 0,
-    left: (buttons & 4) !== 0,
-    right: (buttons & 8) !== 0,
-    jump: (buttons & 16) !== 0,
-    sprint: (buttons & 32) !== 0,
-  };
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const inputs: CharInput[] = [];
+  let offset = INPUT_HEADER_BYTES;
+  for (let i = 0; i < count; i++) {
+    const heading = view.getFloat32(offset + 4, true);
+    if (!Number.isFinite(heading)) {
+      return undefined;
+    }
+    const buttons = bytes[offset + 8];
+    inputs.push({
+      seq: view.getUint32(offset, true),
+      heading,
+      fwd: (buttons & 1) !== 0,
+      back: (buttons & 2) !== 0,
+      left: (buttons & 4) !== 0,
+      right: (buttons & 8) !== 0,
+      jump: (buttons & 16) !== 0,
+      sprint: (buttons & 32) !== 0,
+    });
+    offset += INPUT_RECORD_BYTES;
+  }
+  return inputs;
 }
 
 /*

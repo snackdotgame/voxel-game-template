@@ -552,9 +552,13 @@ try {
   await p2.page.screenshot({ path: `${SHOTS}player2.png` });
   log(`screenshots saved to ${SHOTS}`);
 
-  // prediction rollback: degrade the network (latency + jitter + datagram
-  // loss) via the dev shell debug menu, run around, and check that lost or
-  // reordered inputs produce server corrections the client rolls back from.
+  // input redundancy under loss: degrade the network (latency + jitter +
+  // datagram loss) via the dev shell debug menu and run around. Every input
+  // packet carries the unacked tail, so a lost datagram is healed by the
+  // next one — rollbacks must stay near zero (the rollback machinery itself
+  // is proven by the knockback check above, which corrects the victim's
+  // client through a rollback). Before redundancy this same run produced a
+  // rollback for every lost packet (~14 over this window at 20% loss).
   await p1.page.getByRole("button", { name: "Open Minion debug menu" }).click();
   await p1.page.getByLabel("Latency ms").fill("150");
   await p1.page.getByLabel("Jitter ms").fill("40");
@@ -573,14 +577,11 @@ try {
     await p1.page.keyboard.up(key);
   }
   const rollbacksAfter = await p1.frame.evaluate(() => window.__voxels.rollbacks());
-  if (rollbacksAfter <= rollbacksBefore) {
-    throw new Error(
-      `expected rollbacks under packet loss (before=${rollbacksBefore}, after=${rollbacksAfter})`,
-    );
+  const lossRollbacks = rollbacksAfter - rollbacksBefore;
+  if (lossRollbacks > 4) {
+    throw new Error(`input redundancy failed to absorb packet loss (${lossRollbacks} rollbacks)`);
   }
-  log(
-    `OK: prediction rollbacks fired under packet loss (${rollbacksAfter - rollbacksBefore} rollbacks)`,
-  );
+  log(`OK: input redundancy held under packet loss (${lossRollbacks} rollbacks)`);
 
   // after movement stops, client prediction and the server view converge
   await p1.page.waitForTimeout(2500);
@@ -602,7 +603,10 @@ try {
   await p1.page.getByRole("button", { name: "Close Minion debug menu" }).click();
   log("network simulation reset to none");
 
-  // disconnect: close player3, others should drop to 1 remote
+  // disconnect: close player3, others should drop to 1 remote. Usually the
+  // broker reports the closed connection within seconds; when it doesn't
+  // (load, abrupt teardown), the server's 30s AFK timeout is the fallback —
+  // so the budget must sit comfortably past it.
   await p3.context.close();
   live.pop();
   const t0 = Date.now();
@@ -611,14 +615,14 @@ try {
     () => window.__voxels.remoteCount() === 1,
     null,
     "player1 sees player3 leave",
-    30000,
+    45000,
   );
   await waitFor(
     p2.frame,
     () => window.__voxels.remoteCount() === 1,
     null,
     "player2 sees player3 leave",
-    30000,
+    45000,
   );
   log(`leave detected in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
 

@@ -17,7 +17,7 @@ import {
   decodeDrops,
   decodeProjectiles,
   decodeSnapshots,
-  encodeInput,
+  encodeInputs,
 } from "./shared/netCodec.js";
 import {
   AXE,
@@ -894,6 +894,40 @@ let rollbacks = 0;
 let simAccumMs = 0;
 let lastRollback: Record<string, unknown> | null = null;
 
+// rollback corrections ease out over ~150ms instead of snapping: this
+// offset holds where the body was rendered minus where it should be, is
+// added to the render position, and decays each frame. Big jumps
+// (respawn/teleport) snap — easing across the map would look worse.
+const correction = { x: 0, y: 0, z: 0 };
+const CORRECTION_SNAP_DISTANCE = 2;
+
+function renderAlpha(): number {
+  return Math.max(0, Math.min(1, simAccumMs / SIM_TICK_MS));
+}
+
+function renderPosition(): [number, number, number] {
+  const alpha = renderAlpha();
+  return [
+    prevPredicted.x + (predicted.x - prevPredicted.x) * alpha,
+    prevPredicted.y + (predicted.y - prevPredicted.y) * alpha,
+    prevPredicted.z + (predicted.z - prevPredicted.z) * alpha,
+  ];
+}
+
+function absorbCorrection(before: [number, number, number]): void {
+  const after = renderPosition();
+  const x = correction.x + before[0] - after[0];
+  const y = correction.y + before[1] - after[1];
+  const z = correction.z + before[2] - after[2];
+  if (Math.hypot(x, y, z) > CORRECTION_SNAP_DISTANCE) {
+    correction.x = correction.y = correction.z = 0;
+  } else {
+    correction.x = x;
+    correction.y = y;
+    correction.z = z;
+  }
+}
+
 noa.inputs.bind("sprint", "ShiftLeft");
 
 function sampleInput(): CharInput {
@@ -910,6 +944,10 @@ function sampleInput(): CharInput {
   };
 }
 
+// each packet carries this many trailing unacked inputs, so a step is only
+// lost (forcing a rollback) if this many consecutive datagrams drop
+const INPUT_REDUNDANCY = 8;
+
 function simTick(): void {
   const input = sampleInput();
   prevPredicted = predicted;
@@ -918,7 +956,8 @@ function simTick(): void {
   if (pending.length > 200) {
     pending.splice(0, pending.length - 100);
   }
-  void client.datagrams.send(encodeInput(input)).catch(() => {});
+  const tail = pending.slice(-INPUT_REDUNDANCY).map((entry) => entry.input);
+  void client.datagrams.send(encodeInputs(tail)).catch(() => {});
 }
 
 // Fixed-step accumulator driven from the render loop: if worldgen or GC
@@ -985,9 +1024,11 @@ function reconcile(snap: PlayerSnapshot) {
   if (ackIndex === -1) {
     if (pending.length > 0 && snap.lastSeq > pending[pending.length - 1].input.seq) {
       // server is ahead of everything we remember; adopt its state
+      const before = renderPosition();
       pending = [];
       predicted = cloneState(snap.state);
       prevPredicted = cloneState(snap.state);
+      absorbCorrection(before);
     }
     return;
   }
@@ -1013,6 +1054,7 @@ function reconcile(snap: PlayerSnapshot) {
     sleepServer: snap.state.sleep,
     sleepClient: predictedThen.sleep,
   };
+  const before = renderPosition();
   let state = cloneState(snap.state);
   for (const entry of pending) {
     state = step(state, entry.input);
@@ -1020,6 +1062,7 @@ function reconcile(snap: PlayerSnapshot) {
   }
   predicted = state;
   prevPredicted = cloneState(state);
+  absorbCorrection(before);
   updateHud();
 }
 
@@ -1036,9 +1079,43 @@ type RemotePlayer = {
   hp: number;
   hurtUntil: number;
   swingT: number;
+  // received snapshots, stamped with local receipt time; rendering
+  // interpolates between them slightly in the past
+  buffer: { at: number; state: CharState; heading: number }[];
 };
 
 const remotePlayers = new Map<string, RemotePlayer>();
+
+// remotes render this far behind the newest snapshot: enough to bridge
+// 20Hz snapshot gaps plus one dropped packet without extrapolating
+const INTERP_DELAY_MS = 120;
+// a teleport-sized jump between snapshots (respawn) snaps instead of gliding
+const REMOTE_SNAP_DISTANCE = 8;
+
+function lerpAngle(a: number, b: number, t: number): number {
+  let d = (b - a) % (Math.PI * 2);
+  if (d > Math.PI) {
+    d -= Math.PI * 2;
+  } else if (d < -Math.PI) {
+    d += Math.PI * 2;
+  }
+  return a + d * t;
+}
+
+function pushRemoteSample(remote: RemotePlayer, snap: PlayerSnapshot): void {
+  const last = remote.buffer[remote.buffer.length - 1];
+  if (
+    last &&
+    Math.hypot(snap.state.x - last.state.x, snap.state.y - last.state.y, snap.state.z - last.state.z) >
+      REMOTE_SNAP_DISTANCE
+  ) {
+    remote.buffer.length = 0;
+  }
+  remote.buffer.push({ at: performance.now(), state: snap.state, heading: snap.heading });
+  if (remote.buffer.length > 40) {
+    remote.buffer.splice(0, remote.buffer.length - 20);
+  }
+}
 const HURT_FLASH = new Color3(0.55, 0.05, 0.05);
 const NO_FLASH = Color3.Black();
 // id -> display name, from the welcome roster and join messages
@@ -1053,6 +1130,7 @@ function upsertRemotePlayer(snap: PlayerSnapshot): void {
     existing.target = snap.state;
     existing.heading = snap.heading;
     existing.hp = snap.hp;
+    pushRemoteSample(existing, snap);
     if (existing.item !== snap.item) {
       existing.item = snap.item;
       attachToolToRig(existing.rig, `remote-${snap.id}`, snap.item);
@@ -1071,7 +1149,7 @@ function upsertRemotePlayer(snap: PlayerSnapshot): void {
     false,
     true,
   );
-  remotePlayers.set(snap.id, {
+  const remote: RemotePlayer = {
     entityId,
     rig,
     target: snap.state,
@@ -1080,7 +1158,10 @@ function upsertRemotePlayer(snap: PlayerSnapshot): void {
     hp: snap.hp,
     hurtUntil: 0,
     swingT: 0,
-  });
+    buffer: [],
+  };
+  pushRemoteSample(remote, snap);
+  remotePlayers.set(snap.id, remote);
   updateHud();
 }
 
@@ -1107,13 +1188,18 @@ noa.on("beforeRender", () => {
   lastFrameAt = now;
   pumpSim(dtSec * 1000);
 
-  // local player: interpolate between the last two predicted sim states
-  const alpha = Math.max(0, Math.min(1, simAccumMs / SIM_TICK_MS));
+  // local player: interpolate between the last two predicted sim states,
+  // plus the decaying rollback-correction offset
+  const decay = Math.exp(-dtSec * 14); // ~150ms to fade a correction
+  correction.x *= decay;
+  correction.y *= decay;
+  correction.z *= decay;
+  const rp = renderPosition();
   ents.setPosition(
     noa.playerEntity,
-    prevPredicted.x + (predicted.x - prevPredicted.x) * alpha,
-    prevPredicted.y + (predicted.y - prevPredicted.y) * alpha,
-    prevPredicted.z + (predicted.z - prevPredicted.z) * alpha,
+    rp[0] + correction.x,
+    rp[1] + correction.y,
+    rp[2] + correction.z,
   );
   selfRig.root.rotation.y = noa.camera.heading;
   const selfSpeed = Math.hypot(predicted.vx, predicted.vz);
@@ -1171,21 +1257,38 @@ noa.on("beforeRender", () => {
     view.mesh.rotation.y += dtSec * 1.6;
   }
 
-  // remote players: ease toward their latest authoritative state
-  const t = 1 - Math.exp(-dtSec * 12);
+  // remote players: interpolate between buffered snapshots, rendered
+  // INTERP_DELAY_MS in the past so 20Hz gaps and a dropped packet are
+  // bridged by real data instead of extrapolation
+  const renderTime = now - INTERP_DELAY_MS;
   for (const remote of remotePlayers.values()) {
     remote.rig.skin.emissiveColor = now < remote.hurtUntil ? HURT_FLASH : NO_FLASH;
-    const current = ents.getPosition(remote.entityId);
-    ents.setPosition(
-      remote.entityId,
-      current[0] + (remote.target.x - current[0]) * t,
-      current[1] + (remote.target.y - current[1]) * t,
-      current[2] + (remote.target.z - current[2]) * t,
-    );
-    remote.rig.root.rotation.y = remote.heading;
-    const remoteSpeed = Math.hypot(remote.target.vx, remote.target.vz);
-    const remoteMoving = onGround(remote.target) && remoteSpeed > 0.4;
-    animateRig(remote.rig, remoteSpeed, onGround(remote.target), dtSec, remote.swingT > 0);
+    const buf = remote.buffer;
+    while (buf.length > 2 && buf[1].at <= renderTime) {
+      buf.shift();
+    }
+    let shown = buf.length > 0 ? buf[buf.length - 1] : undefined;
+    if (buf.length >= 2 && buf[0].at <= renderTime) {
+      const [a, b] = buf;
+      const span = b.at - a.at;
+      const f = span > 0 ? Math.min(1, (renderTime - a.at) / span) : 1;
+      ents.setPosition(
+        remote.entityId,
+        a.state.x + (b.state.x - a.state.x) * f,
+        a.state.y + (b.state.y - a.state.y) * f,
+        a.state.z + (b.state.z - a.state.z) * f,
+      );
+      remote.rig.root.rotation.y = lerpAngle(a.heading, b.heading, f);
+      shown = f < 0.5 ? a : b;
+    } else if (shown) {
+      // buffer underrun (or just spawned): hold the newest known state
+      ents.setPosition(remote.entityId, shown.state.x, shown.state.y, shown.state.z);
+      remote.rig.root.rotation.y = shown.heading;
+    }
+    const animState = shown ? shown.state : remote.target;
+    const remoteSpeed = Math.hypot(animState.vx, animState.vz);
+    const remoteMoving = onGround(animState) && remoteSpeed > 0.4;
+    animateRig(remote.rig, remoteSpeed, onGround(animState), dtSec, remote.swingT > 0);
     if (remote.swingT > 0) {
       remote.swingT = Math.max(0, remote.swingT - dtSec * 3.1);
       applySwingToRig(remote.rig, remote.swingT, remoteMoving);
