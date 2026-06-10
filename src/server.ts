@@ -88,6 +88,7 @@ const BLOCK_DAMAGE_RESET_MS = 10_000;
 
 type Player = {
   name: string;
+  userId: string;
   char: CharState;
   heading: number;
   lastSeq: number;
@@ -385,6 +386,34 @@ function handleStream(world: World, event: StreamEvent) {
   if (attack) {
     broadcastSwing(world, event.connection.id);
     handleAttack(world, event.connection.id, attack.target);
+    return;
+  }
+  if (
+    typeof value === "object" &&
+    value !== null &&
+    (value as Record<string, unknown>).type === "debug"
+  ) {
+    const players = [];
+    const now = server.elapsedMs();
+    for (const [id, player] of world.players) {
+      players.push({
+        id,
+        userId: player.userId,
+        name: player.name,
+        x: Math.round(player.char.x * 10) / 10,
+        y: Math.round(player.char.y * 10) / 10,
+        z: Math.round(player.char.z * 10) / 10,
+        lastSeenAgoMs: Math.round(now - (world.lastSeen.get(id) ?? 0)),
+      });
+    }
+    server.streams.send(event.connection.id, {
+      type: "debugState",
+      players,
+      connections: server.connections.length,
+      lastSeenEntries: world.lastSeen.size,
+      drops: world.drops.size,
+      projectiles: world.projectiles.size,
+    });
     return;
   }
   const place = parsePlaceMessage(value);
@@ -757,8 +786,17 @@ function drainInputQueue(world: World, player: Player) {
 }
 
 function addPlayer(world: World, connection: Connection) {
+  // a reconnect (tab reload) is the same user on a new connection: evict
+  // the old body immediately instead of leaving an "echo" until stale-drop
+  for (const [otherId, other] of world.players) {
+    if (other.userId === connection.userId && otherId !== connection.id) {
+      removePlayer(world, otherId);
+    }
+  }
+
   world.players.set(connection.id, {
     name: connection.userName,
+    userId: connection.userId,
     char: spawnState(),
     heading: 0,
     lastSeq: 0,

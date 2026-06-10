@@ -75,6 +75,9 @@ const noa = new Engine({
   chunkAddDistance: 2.5,
   chunkRemoveDistance: 3.5,
   playerStart: [0.5, 16, 0.5],
+  // the targeting ray starts at the camera, which orbits up to 12 blocks
+  // behind in third person — cover reach + zoom
+  blockTestDistance: 18,
   texturePath: "",
 });
 
@@ -867,6 +870,8 @@ function pumpSim(frameMs: number): void {
 }
 
 let lastDeath: { victim: string; attacker: string } | null = null;
+let lastServerDebug: Record<string, unknown> | null = null;
+let remoteSwingsSeen = 0;
 
 function reconcile(snap: PlayerSnapshot) {
   if (snap.hp !== myHp) {
@@ -1520,14 +1525,31 @@ let myOutfitHue = 0;
 async function readStreams(): Promise<void> {
   while (true) {
     const event = await client.streams.recv();
+    try {
+      handleStreamEvent(event);
+    } catch (error) {
+      // a bad message must never kill the reader: every later stream
+      // message (edits, inventory, swings) would be silently lost
+      console.error("stream handler error", error);
+    }
+  }
+}
+
+function handleStreamEvent(event: { bytes: Uint8Array; json<T = unknown>(): T }): void {
+  {
     const chunkState = decodeChunkState(event.bytes);
     if (chunkState) {
       applyChunkState(chunkState);
-      continue;
+      return;
     }
-    const message = parseServerStreamMessage(safeJson(event));
+    const raw = safeJson(event) as Record<string, unknown> | undefined;
+    if (raw && raw.type === "debugState") {
+      lastServerDebug = raw;
+      return;
+    }
+    const message = parseServerStreamMessage(raw);
     if (!message) {
-      continue;
+      return;
     }
     if (message.type === "edit") {
       applyEdit(message);
@@ -1539,6 +1561,7 @@ async function readStreams(): Promise<void> {
       const remote = remotePlayers.get(message.id);
       if (remote) {
         remote.swingT = 1;
+        remoteSwingsSeen += 1;
       }
     } else if (message.type === "hurt") {
       if (message.id === myId) {
@@ -1587,19 +1610,29 @@ async function readStreams(): Promise<void> {
 async function readDatagrams(): Promise<void> {
   while (true) {
     const event = await client.datagrams.recv();
+    try {
+      handleDatagramEvent(event);
+    } catch (error) {
+      console.error("datagram handler error", error);
+    }
+  }
+}
+
+function handleDatagramEvent(event: { bytes: Uint8Array }): void {
+  {
     const projectiles = decodeProjectiles(event.bytes);
     if (projectiles) {
       applyEntityViews(projectileViews, projectiles, "proj", 0.8);
-      continue;
+      return;
     }
     const drops = decodeDrops(event.bytes);
     if (drops) {
       applyEntityViews(dropViews, drops, "drop", 0.7);
-      continue;
+      return;
     }
     const players = decodeSnapshots(event.bytes);
     if (!players || myId === "") {
-      continue;
+      return;
     }
     const seen = new Set<string>();
     for (const player of players) {
@@ -1674,6 +1707,10 @@ declare global {
       hp(): number;
       lastDeath(): { victim: string; attacker: string } | null;
       attack(target: string): void;
+      swing(): number;
+      remoteSwingsSeen(): number;
+      requestServerDebug(): void;
+      serverDebug(): Record<string, unknown> | null;
       projectileCount(): number;
       dropCount(): number;
       inventory(): Record<string, number>;
@@ -1714,6 +1751,12 @@ window.__voxels = {
   attack: (target) => {
     void client.streams.send({ type: "attack", target }).catch(() => {});
   },
+  swing: () => swingT,
+  remoteSwingsSeen: () => remoteSwingsSeen,
+  requestServerDebug: () => {
+    void client.streams.send({ type: "debug" }).catch(() => {});
+  },
+  serverDebug: () => lastServerDebug,
   projectileCount: () => projectileViews.size,
   dropCount: () => dropViews.size,
   inventory: () => Object.fromEntries(inventory),

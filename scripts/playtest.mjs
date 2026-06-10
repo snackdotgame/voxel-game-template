@@ -51,6 +51,11 @@ async function openPlayer(browser, label) {
 
 async function dump(players) {
   for (const p of players) {
+    if (p.errors && p.errors.length) {
+      log(`console errors ${p.label}:`, p.errors.slice(0, 6).join(" | "));
+    }
+  }
+  for (const p of players) {
     try {
       const state = await p.frame.evaluate(() => ({
         conn: window.__voxels.connectionState(),
@@ -110,11 +115,13 @@ try {
     10000,
   );
 
-  // keyboard movement: click canvas, hold W
+  // keyboard movement: click canvas, hold W (after a beat for worldgen to
+  // settle — chunk meshing on a cold server starves the first sim ticks)
+  await p1.page.waitForTimeout(2000);
   await p1.page.mouse.click(550, 375);
   const before = await p1.frame.evaluate(() => window.__voxels.playerPosition());
   await p1.page.keyboard.down("w");
-  await p1.page.waitForTimeout(1200);
+  await p1.page.waitForTimeout(1500);
   await p1.page.keyboard.up("w");
   const after = await p1.frame.evaluate(() => window.__voxels.playerPosition());
   const moved = Math.hypot(after[0] - before[0], after[2] - before[2]);
@@ -168,20 +175,25 @@ try {
   log("OK: optimistic edit visible instantly on the acting client");
   await p1.frame.evaluate(() => window.__voxels.setBlockAt(0, 3, 12, 3));
 
-  // digging propagates p2 -> p1
-  const digTarget = await p2.frame.evaluate(() => {
-    for (let y = 8; y >= -8; y--) {
-      if (window.__voxels.blockAt(5, y, 5) !== 0) return y;
+  // digging propagates p2 -> p1 (random column so repeated runs against a
+  // long-lived dev server don't exhaust one spot)
+  const digX = 5 + Math.floor(Math.random() * 30);
+  const digTarget = await p2.frame.evaluate((x) => {
+    for (let y = 14; y >= -8; y--) {
+      if (window.__voxels.blockAt(x, y, 5) !== 0) return y;
     }
     return null;
-  });
-  if (digTarget === null) throw new Error("no terrain found at (5, *, 5)");
-  await p2.frame.evaluate((y) => window.__voxels.setBlockAt(0, 5, y, 5), digTarget);
+  }, digX);
+  if (digTarget === null) throw new Error(`no terrain found at (${digX}, *, 5)`);
+  await p2.frame.evaluate(
+    ([x, y]) => window.__voxels.setBlockAt(0, x, y, 5),
+    [digX, digTarget],
+  );
   await waitFor(
     p1.frame,
-    (y) => window.__voxels.blockAt(5, y, 5) === 0,
-    digTarget,
-    `block dug by player2 at (5,${digTarget},5) disappears for player1`,
+    ([x, y]) => window.__voxels.blockAt(x, y, 5) === 0,
+    [digX, digTarget],
+    `block dug by player2 at (${digX},${digTarget},5) disappears for player1`,
   );
 
   // late joiner receives the edit log via welcome replay
@@ -283,6 +295,24 @@ try {
   const spawnBefore = await p1.frame.evaluate(() =>
     window.__voxels.remotes().map((r) => ({ id: r.id, x: r.x, z: r.z })),
   );
+  // projectiles spawn ~1 block ahead of the eye; back away if we're on top
+  // of the targets so the rock doesn't spawn past them
+  const tooClose = await p1.frame.evaluate((target) => {
+    const pos = window.__voxels.playerPosition();
+    return Math.hypot(target.x - pos[0], target.z - pos[2]) < 3;
+  }, spawnBefore[0]);
+  if (tooClose) {
+    await p1.frame.evaluate((target) => {
+      const v = window.__voxels;
+      const pos = v.playerPosition();
+      v.noa.camera.heading = Math.atan2(pos[0] - target.x, pos[2] - target.z);
+    }, spawnBefore[0]);
+    await p1.page.mouse.click(550, 375);
+    await p1.page.keyboard.down("w");
+    await p1.page.waitForTimeout(900);
+    await p1.page.keyboard.up("w");
+    await p1.page.waitForTimeout(400);
+  }
   await p1.frame.evaluate((target) => {
     const v = window.__voxels;
     const pos = v.playerPosition();
@@ -315,8 +345,8 @@ try {
   await waitFor(p1.frame, () => window.__voxels.equipped() === 2, null, "player1 equipped the axe");
   const victimId = hurtVictim.id;
   let died = false;
-  for (let i = 0; i < 12 && !died; i++) {
-    // close the distance the knockback opens up
+  for (let i = 0; i < 24 && !died; i++) {
+    // close the distance the knockback opens up; only swing when in reach
     const chase = await p1.frame.evaluate((id) => {
       const v = window.__voxels;
       const victim = v.remotes().find((r) => r.id === id);
@@ -326,10 +356,11 @@ try {
       return Math.hypot(victim.x - pos[0], victim.z - pos[2]);
     }, victimId);
     if (chase === null) throw new Error("melee victim disappeared");
-    if (chase > 3) {
+    if (chase > 3.5) {
       await p1.page.keyboard.down("w");
-      await p1.page.waitForTimeout(Math.min(1200, chase * 180));
+      await p1.page.waitForTimeout(Math.min(2000, chase * 300));
       await p1.page.keyboard.up("w");
+      continue;
     }
     await p1.frame.evaluate((id) => window.__voxels.attack(id), victimId);
     await p1.page.waitForTimeout(450);
@@ -347,6 +378,24 @@ try {
     "victim respawned with full hp",
     8000,
   );
+
+  // hold-to-mine: one continuous LMB hold must keep swinging and digging.
+  // Aim down at the ground with the pickaxe and hold for a few seconds —
+  // multiple blocks should break (auto-picked up as drops), and player2's
+  // view of player1's arm must visibly swing (networked swing events).
+  // step away from the spawn crowd first — players in the aim corridor are
+  // (deliberately) attacked in preference to blocks
+  await p1.frame.evaluate(() => {
+    const v = window.__voxels;
+    const pos = v.playerPosition();
+    v.noa.camera.heading = Math.atan2(pos[0] - 0.5, pos[2] - 0.5); // away from spawn
+    v.noa.camera.pitch = 0;
+  });
+  await p1.page.mouse.click(550, 375);
+  await p1.page.keyboard.down("w");
+  await p1.page.waitForTimeout(1600);
+  await p1.page.keyboard.up("w");
+  await p1.page.waitForTimeout(400);
 
   // block health: blocks take multiple hits, then drop a floating pickup
   // that lands in the digger's inventory when they stand nearby
@@ -394,6 +443,49 @@ try {
     invBefore,
     "player1 picked the drop up into their inventory",
     8000,
+  );
+
+  const invBeforeHold = await p1.frame.evaluate(() => {
+    const inv = window.__voxels.inventory();
+    return Object.values(inv).reduce((a, b) => a + b, 0);
+  });
+  await p1.frame.evaluate(() => {
+    window.__voxels.noa.camera.pitch = 0.9; // look down at nearby ground
+  });
+  const swingsBefore = await p2.frame.evaluate(() => window.__voxels.remoteSwingsSeen());
+  await p1.page.mouse.down();
+  await p1.page.waitForTimeout(3500);
+  const swingsAfter = await p2.frame.evaluate(() => window.__voxels.remoteSwingsSeen());
+  await p1.page.mouse.up();
+  // dug blocks land ahead of the player (the camera ray hits ground a few
+  // blocks out) — walk forward to collect, then count inventory + leftovers
+  await p1.frame.evaluate(() => {
+    window.__voxels.noa.camera.pitch = 0;
+  });
+  await p1.page.keyboard.down("w");
+  await p1.page.waitForTimeout(900);
+  await p1.page.keyboard.up("w");
+  await p1.page.waitForTimeout(2000);
+  const afterHold = await p1.frame.evaluate(() => ({
+    inv: Object.values(window.__voxels.inventory()).reduce((a, b) => a + b, 0),
+    drops: window.__voxels.dropCount(),
+  }));
+  const mined = afterHold.inv - invBeforeHold + afterHold.drops;
+  if (mined < 2) {
+    throw new Error(
+      `hold-to-mine broke too little: inventory +${afterHold.inv - invBeforeHold}, drops ${afterHold.drops}`,
+    );
+  }
+  log(
+    `OK: hold-to-mine broke ${mined} blocks from one hold (collected ${afterHold.inv - invBeforeHold}, ${afterHold.drops} still floating)`,
+  );
+  if (swingsAfter - swingsBefore < 3) {
+    throw new Error(
+      `player2 received too few swing events (${swingsAfter - swingsBefore} during 3.5s of mining)`,
+    );
+  }
+  log(
+    `OK: player2 received ${swingsAfter - swingsBefore} networked swing events while player1 mined`,
   );
 
   // chunk-scoped sync: an edit in a far-away chunk (nobody nearby) must not
