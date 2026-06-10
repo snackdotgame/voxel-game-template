@@ -913,6 +913,18 @@ pumpWorker.onmessage = () => {
   }
 };
 
+// when the page thaws from a freeze or becomes visible again, catch up
+// immediately instead of waiting for the next worker tick
+for (const eventName of ["resume", "visibilitychange", "pageshow"]) {
+  document.addEventListener(eventName, () => {
+    const sinceFrame = performance.now() - lastFrameAt;
+    if (sinceFrame > 150) {
+      lastFrameAt = performance.now();
+      pumpSim(Math.min(sinceFrame, 1000));
+    }
+  });
+}
+
 // dev/test: simulate a fully-frozen tab (no sim, no inputs) until this time
 let inputSuspendedUntil = 0;
 
