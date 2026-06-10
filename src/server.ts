@@ -57,9 +57,11 @@ const MAX_EDITS = 200_000;
 // Allow short input bursts (catch-up after client jank) but bound per-player CPU.
 const MAX_STEPS_PER_TICK = 8;
 const MAX_QUEUED_INPUTS = 32;
-// Players whose inputs stop (backgrounded tabs) freeze in place as AFK and
-// are only removed after this long — or on a real disconnect.
-const AFK_TIMEOUT_MS = 120_000;
+// Players whose inputs stop freeze in place as AFK and are removed after
+// this long (or on a real disconnect). Backgrounded tabs keep sending via
+// the worker pump, so this only catches fully-frozen tabs and dead
+// sessions the broker hasn't reaped yet — parking makes returns seamless.
+const AFK_TIMEOUT_MS = 30_000;
 // Removed players' characters are parked by userId for this long, so
 // AFK-timeouts and tab reloads resume where they left off.
 const PARK_TTL_MS = 300_000;
@@ -807,6 +809,7 @@ function drainInputQueue(world: World, player: Player) {
 }
 
 function addPlayer(world: World, connection: Connection) {
+  console.log(`player materialized: ${connection.id} (${connection.userName})`);
   // a reconnect (tab reload) is the same user on a new connection: evict
   // the old body immediately instead of leaving an "echo" until timeout
   for (const [otherId, other] of world.players) {
@@ -841,6 +844,7 @@ function addPlayer(world: World, connection: Connection) {
     { type: "join", id: connection.id, name: connection.userName },
     { except: [connection.id] },
   );
+  sendInventory(world, connection.id);
 }
 
 function removePlayer(world: World, id: string) {
@@ -868,13 +872,16 @@ function syncConnections(world: World) {
       continue;
     }
 
+    // greet the connection, but do NOT create a player yet: bodies only
+    // materialize on the first input (handleInput), so connections that
+    // never send anything (mid-load reloads, dead sessions) never leave a
+    // phantom floating at spawn
+    world.lastSeen.set(connection.id, server.elapsedMs());
     const roster: RosterEntry[] = [];
     for (const [id, player] of world.players) {
       roster.push({ id, name: player.name });
     }
-    addPlayer(world, connection);
     connection.streams.send({ type: "welcome", you: connection.id, players: roster });
-    sendInventory(world, connection.id);
   }
 
   for (const id of world.lastSeen.keys()) {

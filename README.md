@@ -27,9 +27,16 @@ Movement is **server-authoritative with client-side prediction and rollback**, r
   state and replays its pending inputs. The HUD shows a live rollback counter.
 - `src/server.ts` — steps each player's authoritative sim from received inputs (burst-buffered
   and rate-capped), broadcasts 20 Hz state snapshots over **datagrams**, and owns the edit log.
-  Players whose inputs stop (backgrounded tabs) freeze in place as AFK and are removed only
-  after 120s or a real disconnect; characters and inventories are parked by userId so returns
-  and reconnects resume where they left off.
+  Players whose inputs stop freeze in place as AFK and are removed after 30s or on a real
+  disconnect; characters and inventories are parked by userId so returns and reconnects
+  resume where they left off. Players only materialize on their first input, so connections
+  that never send anything can't leave phantom bodies floating at spawn.
+
+  Known runtime-layer issue (minion platform, not this game): under long heavy multi-client
+  sessions on a long-lived dev server, reliable stream delivery to idle clients can starve or
+  stall while datagrams keep flowing. See the minion toolchain client shim (readStreams has no
+  per-stream fault isolation) and dev broker (per-message uni streams with a 16-concurrent
+  silent-drop cap).
 
 Datagrams carry everything frequent and loss-tolerant (inputs, snapshots); reliable streams
 carry only what must arrive (block edits, join/leave, chunk state).

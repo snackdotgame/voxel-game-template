@@ -397,6 +397,7 @@ function tintRig(rig: Rig, hueShiftDegrees: number): void {
 }
 
 function buildRig(name: string, hueShiftDegrees: number): Rig {
+  console.debug(`[rig] build ${name} hue=${hueShiftDegrees}`);
   const root = new Mesh(`${name}-root`, scene);
   const body = new TransformNode(`${name}-body`, scene);
   body.parent = root;
@@ -1016,6 +1017,9 @@ const playerNames = new Map<string, string>();
 
 function upsertRemotePlayer(snap: PlayerSnapshot): void {
   const existing = remotePlayers.get(snap.id);
+  if (!existing) {
+    console.debug(`[rig] upsert NEW remote ${snap.id} (myId=${myId || "unset"})`);
+  }
   if (existing) {
     existing.target = snap.state;
     existing.heading = snap.heading;
@@ -1056,6 +1060,7 @@ function removeRemotePlayer(id: string): void {
   if (!remote) {
     return;
   }
+  console.debug(`[rig] remove remote ${id}`);
   remotePlayers.delete(id);
   ents.deleteEntity(remote.entityId, true);
   updateHud();
@@ -1592,6 +1597,14 @@ let myId = "";
 let myOutfitHue = 0;
 
 let streamEventsSeen = 0;
+const streamEventLog: string[] = [];
+
+function logStreamEvent(tag: string): void {
+  streamEventLog.push(`${streamEventsSeen}:${tag}`);
+  if (streamEventLog.length > 60) {
+    streamEventLog.shift();
+  }
+}
 
 async function readStreams(): Promise<void> {
   while (true) {
@@ -1611,10 +1624,14 @@ function handleStreamEvent(event: { bytes: Uint8Array; json<T = unknown>(): T })
   {
     const chunkState = decodeChunkState(event.bytes);
     if (chunkState) {
+      logStreamEvent(`chunkState(${chunkState.cx},${chunkState.cz})x${chunkState.edits.length}`);
       applyChunkState(chunkState);
       return;
     }
     const raw = safeJson(event) as Record<string, unknown> | undefined;
+    logStreamEvent(
+      String(raw?.type ?? `binary[${event.bytes[0]},${event.bytes[1]}]len${event.bytes.length}`),
+    );
     if (raw && raw.type === "debugState") {
       lastServerDebug = raw;
       return;
@@ -1787,6 +1804,7 @@ declare global {
       suspendInput(ms: number): void;
       remoteSwingsSeen(): number;
       streamEventsSeen(): number;
+      streamEventLog(): string[];
       requestServerDebug(): void;
       serverDebug(): Record<string, unknown> | null;
       projectileCount(): number;
@@ -1798,6 +1816,7 @@ declare global {
       rollbacks(): number;
       lastRollback(): Record<string, unknown> | null;
       pendingInputs(): number;
+      characterMeshes(): string[];
       blockAt(x: number, y: number, z: number): number;
       setBlockAt(block: number, x: number, y: number, z: number): void;
       hasEdit(x: number, y: number, z: number): boolean;
@@ -1835,6 +1854,7 @@ window.__voxels = {
   },
   remoteSwingsSeen: () => remoteSwingsSeen,
   streamEventsSeen: () => streamEventsSeen,
+  streamEventLog: () => [...streamEventLog],
   requestServerDebug: () => {
     void client.streams.send({ type: "debug" }).catch(() => {});
   },
@@ -1850,6 +1870,11 @@ window.__voxels = {
   rollbacks: () => rollbacks,
   lastRollback: () => lastRollback,
   pendingInputs: () => pending.length,
+  characterMeshes: () =>
+    noa.rendering
+      .getScene()
+      .meshes.filter((m) => m.name.endsWith("-root") && m.isEnabled())
+      .map((m) => m.name),
   blockAt: (x, y, z) => noa.getBlock(x, y, z),
   setBlockAt: (block, x, y, z) => sendEdit(block, x, y, z),
   hasEdit: (x, y, z) => lookupEdit(x, y, z) !== undefined,
