@@ -23,6 +23,7 @@ import {
 import {
   type ProjectileSnapshot,
   decodeDrops,
+  decodeNpcs,
   decodeProjectiles,
   decodeSnapshots,
   encodeInputs,
@@ -1411,6 +1412,97 @@ function applyEntityViews(
 }
 
 /*
+ *      NPCs (chickens): server-driven wanderers, rendered like other remote
+ *      entities — eased toward broadcast positions and turned to face travel.
+ *      They appear/vanish as the server starts/stops broadcasting them with
+ *      chunk loading, handled by the same seen-set despawn as projectiles.
+ */
+
+type ChickenView = {
+  entityId: number;
+  mesh: Group;
+  target: ProjectileSnapshot;
+  faceY: number;
+  waddle: number;
+};
+
+const chickenViews = new Map<number, ChickenView>();
+
+function chickenMaterial(name: string, hex: number): MeshLambertMaterial {
+  const material = noa.rendering.makeStandardMaterial(name);
+  material.color = new Color(hex);
+  return material;
+}
+
+// A small low-poly chicken built from boxes, origin at the feet (so it sits on
+// the entity's base position) and facing +z.
+function buildChickenMesh(name: string): Group {
+  const root = new Group();
+  root.name = name;
+  const white = chickenMaterial(`${name}-body`, 0xf5f5f5);
+  const red = chickenMaterial(`${name}-comb`, 0xd83a3a);
+  const yellow = chickenMaterial(`${name}-beak`, 0xf2a93b);
+
+  const addBox = (
+    w: number,
+    h: number,
+    d: number,
+    x: number,
+    y: number,
+    z: number,
+    material: MeshLambertMaterial,
+  ): Mesh => {
+    const mesh = new Mesh(new BoxGeometry(w, h, d), material);
+    mesh.position.set(x, y, z);
+    root.add(mesh);
+    return mesh;
+  };
+
+  addBox(0.38, 0.34, 0.5, 0, 0.42, 0, white); // body
+  addBox(0.26, 0.28, 0.26, 0, 0.66, 0.26, white); // head
+  addBox(0.1, 0.12, 0.18, 0, 0.8, 0.28, red); // comb
+  addBox(0.1, 0.09, 0.16, 0, 0.62, 0.42, yellow); // beak
+  const tail = addBox(0.18, 0.26, 0.16, 0, 0.5, -0.3, white);
+  tail.rotation.x = -0.5;
+  addBox(0.07, 0.25, 0.07, -0.1, 0.13, 0.05, yellow); // left leg
+  addBox(0.07, 0.25, 0.07, 0.1, 0.13, 0.05, yellow); // right leg
+  return root;
+}
+
+// Shortest-path angle interpolation so a chicken turns the short way around.
+function angleLerp(from: number, to: number, t: number): number {
+  let delta = (to - from) % (Math.PI * 2);
+  if (delta > Math.PI) {
+    delta -= Math.PI * 2;
+  }
+  if (delta < -Math.PI) {
+    delta += Math.PI * 2;
+  }
+  return from + delta * t;
+}
+
+function applyChickenViews(snapshots: ProjectileSnapshot[]): void {
+  const seen = new Set<number>();
+  for (const snap of snapshots) {
+    seen.add(snap.id);
+    const existing = chickenViews.get(snap.id);
+    if (existing) {
+      existing.target = snap;
+      continue;
+    }
+    const mesh = buildChickenMesh(`chicken-${snap.id}`);
+    const entityId = ents.add([snap.x, snap.y, snap.z], 0.5, 0.6, mesh, [0, 0, 0], false, false);
+    chickenViews.set(snap.id, { entityId, mesh, target: snap, faceY: 0, waddle: 0 });
+  }
+  for (const [id, view] of chickenViews) {
+    if (!seen.has(id)) {
+      chickenViews.delete(id);
+      ents.deleteEntity(view.entityId, true);
+    }
+  }
+}
+
+/*
  *      Local player: third-person camera + own rig
  *
  *  noa's own input/movement/physics components come off the player
@@ -1915,6 +2007,24 @@ noa.on("beforeRender", () => {
       current[2] + (view.target.z - current[2]) * pt,
     );
     view.mesh.rotation.y += dtSec * 1.6;
+  }
+
+  // chickens: ease toward broadcast positions, turn to face travel, waddle
+  for (const view of chickenViews.values()) {
+    const current = ents.getPosition(view.entityId);
+    const nx = current[0] + (view.target.x - current[0]) * pt;
+    const ny = current[1] + (view.target.y - current[1]) * pt;
+    const nz = current[2] + (view.target.z - current[2]) * pt;
+    ents.setPosition(view.entityId, nx, ny, nz);
+    const dx = nx - current[0];
+    const dz = nz - current[2];
+    const speed = Math.hypot(dx, dz);
+    if (speed > 0.0006) {
+      view.faceY = angleLerp(view.faceY, Math.atan2(dx, dz), 0.3);
+      view.waddle += dtSec * 12;
+    }
+    view.mesh.rotation.y = view.faceY;
+    view.mesh.rotation.z = speed > 0.0006 ? Math.sin(view.waddle) * 0.12 : 0;
   }
 
   // remote players: interpolate between buffered snapshots, rendered
@@ -2602,6 +2712,11 @@ function handleDatagramEvent(event: { bytes: Uint8Array }): void {
       applyEntityViews(dropViews, drops, "drop", 0.7);
       return;
     }
+    const npcs = decodeNpcs(event.bytes);
+    if (npcs) {
+      applyChickenViews(npcs);
+      return;
+    }
     const players = decodeSnapshots(event.bytes);
     if (!players || myId === "") {
       return;
@@ -2692,6 +2807,8 @@ declare global {
       serverDebug(): Record<string, unknown> | null;
       projectileCount(): number;
       dropCount(): number;
+      chickenCount(): number;
+      chickens(): { id: number; x: number; y: number; z: number; faceY: number }[];
       inventory(): Record<string, number>;
       slots(): ({ item: number; count: number } | null)[];
       selectedSlot(): number;
@@ -2751,6 +2868,12 @@ window.__voxels = {
   serverDebug: () => lastServerDebug,
   projectileCount: () => projectileViews.size,
   dropCount: () => dropViews.size,
+  chickenCount: () => chickenViews.size,
+  chickens: () =>
+    [...chickenViews.entries()].map(([id, view]) => {
+      const [x, y, z] = ents.getPosition(view.entityId);
+      return { id, x, y, z, faceY: view.faceY };
+    }),
   inventory: () => {
     const totals: Record<string, number> = {};
     for (const slot of invSlots) {

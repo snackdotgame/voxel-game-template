@@ -53,6 +53,7 @@ const MAGIC_I = 0x49;
 const MAGIC_S = 0x53;
 const MAGIC_P = 0x50;
 const MAGIC_D = 0x44;
+const MAGIC_N = 0x4e;
 export const NET_CODEC_VERSION = 4;
 
 const INPUT_HEADER_BYTES = 4;
@@ -229,6 +230,18 @@ export function encodeDrops(drops: readonly ProjectileSnapshot[], maxBytes: numb
 
 export function decodeDrops(bytes: Uint8Array): ProjectileSnapshot[] | undefined {
   return decodeEntityPackets(MAGIC_D, bytes);
+}
+
+// NPCs (e.g. wandering chickens) are render-only positional entities, so they
+// reuse the same 15-byte record as projectiles/drops under their own magic;
+// `item` carries the NPC kind. The server only broadcasts NPCs in chunks near
+// a player, and a trailing empty packet clears the rest client-side.
+export function encodeNpcs(npcs: readonly ProjectileSnapshot[], maxBytes: number): Uint8Array[] {
+  return encodeEntityPackets(MAGIC_N, npcs, maxBytes);
+}
+
+export function decodeNpcs(bytes: Uint8Array): ProjectileSnapshot[] | undefined {
+  return decodeEntityPackets(MAGIC_N, bytes);
 }
 
 function encodeEntityPackets(

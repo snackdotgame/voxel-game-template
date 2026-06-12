@@ -3,6 +3,7 @@ import {
   type ProjectileSnapshot,
   decodeInputs,
   encodeDrops,
+  encodeNpcs,
   encodeProjectiles,
   encodeSnapshots,
 } from "./shared/netCodec.js";
@@ -137,6 +138,19 @@ type Drop = {
   noPickupMs: number;
 };
 
+// A wandering NPC. It reuses the shared character stepper (so it gets terrain
+// collision, gravity and auto-step for free) driven by AI-chosen wander
+// inputs. `rng` is a per-chicken xorshift state so wander decisions need no
+// ambient Math.random.
+type Chicken = {
+  id: number;
+  char: CharState;
+  heading: number;
+  wanderMsLeft: number;
+  moving: boolean;
+  rng: number;
+};
+
 type Parked = {
   char: CharState;
   heading: number;
@@ -168,7 +182,19 @@ type World = {
   projectiles: Map<number, Projectile>;
   nextProjectileId: number;
   hadProjectiles: boolean;
+  chickens: Map<number, Chicken>;
+  nextChickenId: number;
+  hadChickens: boolean;
 };
+
+// Chickens only simulate/broadcast when within this many chunks of a player —
+// the "loaded chunk" window. Matches the edit-sync radius so a chicken is live
+// exactly when the terrain it stands on is streamed to someone.
+const CHICKEN_COUNT = 8;
+const CHICKEN_SPAWN_RADIUS = 24;
+const CHICKEN_IDLE_CHANCE = 0.35;
+const CHICKEN_WANDER_MIN_MS = 900;
+const CHICKEN_WANDER_MAX_MS = 3200;
 
 export async function main() {
   const edits = new Map<string, Map<string, BlockEdit>>();
@@ -195,7 +221,11 @@ export async function main() {
     projectiles: new Map(),
     nextProjectileId: 1,
     hadProjectiles: false,
+    chickens: new Map(),
+    nextChickenId: 1,
+    hadChickens: false,
   };
+  spawnChickens(world);
 
   // recv() rejects when the runtime is shutting down; the pumps ending is
   // the signal to unwind the tick loop and return from main().
@@ -261,6 +291,26 @@ export async function main() {
       }
       world.dropsDirty = false;
       world.hadDrops = world.drops.size > 0;
+    }
+
+    // NPCs: only simulate/broadcast chickens whose chunk is "loaded" (within
+    // SYNC_RADIUS of a player). Chickens elsewhere stay frozen and unsent, so
+    // the client despawns them (applyEntityViews drops anything not in the
+    // latest packet); the trailing empty packet clears the last ones.
+    const loadedChunks = computeLoadedChunks(world);
+    const activeChickens = stepChickens(world, loadedChunks);
+    if (activeChickens.length > 0 || world.hadChickens) {
+      const snapshots: ProjectileSnapshot[] = activeChickens.map((chicken) => ({
+        id: chicken.id,
+        item: 0,
+        x: chicken.char.x,
+        y: chicken.char.y,
+        z: chicken.char.z,
+      }));
+      for (const packet of encodeNpcs(snapshots, server.datagrams.maxSize)) {
+        server.datagrams.broadcast(packet);
+      }
+      world.hadChickens = activeChickens.length > 0;
     }
 
     await Promise.race([server.sleep(SIM_TICK_MS), pumps]);
@@ -948,6 +998,116 @@ function removePlayer(world: World, id: string) {
   }
   world.players.delete(id);
   server.streams.broadcast({ type: "leave", id });
+}
+
+/*
+ *      NPCs (wandering chickens)
+ */
+
+function nextRng(state: number): number {
+  let s = state >>> 0;
+  s ^= s << 13;
+  s >>>= 0;
+  s ^= s >> 17;
+  s ^= s << 5;
+  return s >>> 0;
+}
+
+// First empty cell above the terrain column at (x, z): the chicken's feet rest
+// on the highest solid block.
+function groundY(world: World, x: number, z: number): number {
+  const ix = Math.floor(x);
+  const iz = Math.floor(z);
+  for (let y = 96; y > 0; y--) {
+    if (world.isSolid(ix, y - 1, iz)) {
+      return y;
+    }
+  }
+  return 16;
+}
+
+function spawnChickens(world: World) {
+  for (let i = 0; i < CHICKEN_COUNT; i++) {
+    const id = world.nextChickenId++;
+    let rng = (id * 0x9e3779b1) >>> 0 || 1;
+    rng = nextRng(rng);
+    const angle = (rng / 0x100000000) * Math.PI * 2;
+    rng = nextRng(rng);
+    const dist = (rng / 0x100000000) * CHICKEN_SPAWN_RADIUS;
+    const x = Math.cos(angle) * dist + 0.5;
+    const z = Math.sin(angle) * dist + 0.5;
+    const char = spawnState();
+    char.x = x;
+    char.z = z;
+    char.y = groundY(world, x, z);
+    rng = nextRng(rng);
+    world.chickens.set(id, {
+      id,
+      char,
+      heading: (rng / 0x100000000) * Math.PI * 2,
+      wanderMsLeft: 0,
+      moving: false,
+      rng,
+    });
+  }
+}
+
+// The set of chunk columns within SYNC_RADIUS of any player — i.e. the chunks
+// currently streamed to someone. Mirrors syncChunkWindow's per-player box.
+function computeLoadedChunks(world: World): Set<string> {
+  const loaded = new Set<string>();
+  for (const player of world.players.values()) {
+    const cx = chunkCoord(player.char.x);
+    const cz = chunkCoord(player.char.z);
+    for (let dx = -SYNC_RADIUS; dx <= SYNC_RADIUS; dx++) {
+      for (let dz = -SYNC_RADIUS; dz <= SYNC_RADIUS; dz++) {
+        loaded.add(chunkKey(cx + dx, cz + dz));
+      }
+    }
+  }
+  return loaded;
+}
+
+// Step every chicken in a loaded chunk through the shared character sim with a
+// lazy wander: idle or pick a fresh heading when its timer expires. Chickens
+// outside loaded chunks are skipped entirely (frozen, zero CPU). Returns the
+// chickens simulated this tick — the ones to broadcast.
+function stepChickens(world: World, loadedChunks: Set<string>): Chicken[] {
+  const active: Chicken[] = [];
+  for (const chicken of world.chickens.values()) {
+    const key = chunkKey(chunkCoord(chicken.char.x), chunkCoord(chicken.char.z));
+    if (!loadedChunks.has(key)) {
+      continue;
+    }
+    chicken.wanderMsLeft -= SIM_TICK_MS;
+    if (chicken.wanderMsLeft <= 0) {
+      chicken.rng = nextRng(chicken.rng);
+      if (chicken.rng / 0x100000000 < CHICKEN_IDLE_CHANCE) {
+        chicken.moving = false;
+      } else {
+        chicken.moving = true;
+        chicken.rng = nextRng(chicken.rng);
+        chicken.heading = (chicken.rng / 0x100000000) * Math.PI * 2;
+      }
+      chicken.rng = nextRng(chicken.rng);
+      chicken.wanderMsLeft =
+        CHICKEN_WANDER_MIN_MS +
+        (chicken.rng / 0x100000000) * (CHICKEN_WANDER_MAX_MS - CHICKEN_WANDER_MIN_MS);
+    }
+    const input: CharInput = {
+      seq: 0,
+      heading: chicken.heading,
+      fwd: chicken.moving,
+      back: false,
+      left: false,
+      right: false,
+      jump: false,
+      sprint: false,
+    };
+    chicken.char = world.step(chicken.char, input);
+    active.push(chicken);
+  }
+  return active;
 }
 
 function syncConnections(world: World) {
