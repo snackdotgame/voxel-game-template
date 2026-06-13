@@ -1302,10 +1302,13 @@ function refreshViewModel(): void {
       tool.position.set(0, -0.08, -0.16);
       tool.rotation.set(-0.25, -0.4, 0.15);
     } else {
-      // handle runs diagonally out of the fist toward upper-left, head
-      // tipped away from the camera
+      // tools hang with the handle vertical and the sprite face toward the
+      // camera — a clean, readable hold. A small forward pitch gives a bit of
+      // 3D depth; keeping yaw and roll at zero is what avoids twisting the flat
+      // sprite. The root's resting yaw (0.3) supplies the slight side angle, so
+      // this reads the same for plain and aboutFace sprites (no per-tool case).
       tool.position.set(-0.02, -0.06, -0.1);
-      tool.rotation.set(-0.5, 0.2, 0.45);
+      tool.rotation.set(-0.2, 0, 0);
     }
   }
   root.scale.setScalar(0.9);
@@ -1946,24 +1949,24 @@ noa.on("beforeRender", () => {
     }
   }
 
-  // swing: third person uses the ported HitAnimation; first person uses
-  // minecraft-web-client's hand-swing parameter set (scaled to our model)
+  // swing: third person uses the ported HitAnimation; first person is a
+  // fore-aft chop — the tool thrusts forward and the head pitches down, then
+  // returns. No sideways slide or yaw sweep: that reads as a sword slash,
+  // which is wrong for a pick/axe/shovel.
   if (swingT > 0) {
     swingT = Math.max(0, swingT - dtSec * 3.1); // one swing ~= 0.32s, like MC
     applySwingToRig(selfRig, swingT, selfMoving);
     if (viewModel) {
       const p = 1 - swingT;
-      const sqrtP = Math.sqrt(p);
-      const sinP = Math.sin(p * Math.PI);
-      const sinSqrtP = Math.sin(sqrtP * Math.PI);
-      const sin2SqrtP = Math.sin(sqrtP * Math.PI * 2);
-      const S = 0.5;
-      viewModel.position.x = VIEW_MODEL_POS[0] - 0.8 * sinSqrtP * S;
-      viewModel.position.y = VIEW_MODEL_POS[1] + (0.2 * sin2SqrtP - 0.6 * p) * S;
-      viewModel.position.z = VIEW_MODEL_POS[2] + 0.2 * sinP * S;
-      viewModel.rotation.x = 0.5236 * sinP; // 30deg * sin(p*pi)
-      viewModel.rotation.y = 0.3 + 0.6109 * sinSqrtP; // 35deg * sin(sqrt(p)*pi)
-      viewModel.rotation.z = -0.0873 * sinP; // -5deg
+      const sinP = Math.sin(p * Math.PI); // 0 -> 1 -> 0 across the swing
+      viewModel.position.set(
+        VIEW_MODEL_POS[0], // no lateral slide
+        VIEW_MODEL_POS[1] - 0.12 * sinP, // dip down
+        VIEW_MODEL_POS[2] - 0.3 * sinP, // thrust forward (-z is into the scene)
+      );
+      // negative pitch swings the head down and away (the chop); base yaw is
+      // held so there is no left/right sweep
+      viewModel.rotation.set(-0.7 * sinP, 0.3, 0);
     }
   } else if (viewModel) {
     if (selfMoving) {
