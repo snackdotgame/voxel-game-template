@@ -1959,14 +1959,19 @@ noa.on("beforeRender", () => {
     if (viewModel) {
       const p = 1 - swingT;
       const sinP = Math.sin(p * Math.PI); // 0 -> 1 -> 0 across the swing
+      // chop by pitching the forearm about the ELBOW (a point set back toward
+      // the camera from the hand), so the elbow stays put and the hand + tool
+      // arc down/forward — rather than pivoting at the hand (which made the
+      // elbow bob). The position offset cancels the elbow's motion under the
+      // pitch so that point stays fixed. Base yaw held: no left/right sweep.
+      const a = -0.7 * sinP;
+      const pz = 0.35; // elbow pivot distance behind the hand (+z toward camera)
       viewModel.position.set(
-        VIEW_MODEL_POS[0], // no lateral slide
-        VIEW_MODEL_POS[1] - 0.12 * sinP, // dip down
-        VIEW_MODEL_POS[2] - 0.3 * sinP, // thrust forward (-z is into the scene)
+        VIEW_MODEL_POS[0],
+        VIEW_MODEL_POS[1] + pz * Math.sin(a),
+        VIEW_MODEL_POS[2] + pz * (1 - Math.cos(a)),
       );
-      // negative pitch swings the head down and away (the chop); base yaw is
-      // held so there is no left/right sweep
-      viewModel.rotation.set(-0.7 * sinP, 0.3, 0);
+      viewModel.rotation.set(a, 0.3, 0);
     }
   } else if (viewModel) {
     if (selfMoving) {
