@@ -35,9 +35,11 @@ import {
   INV_SLOTS,
   MAX_HP,
   PICKAXE,
+  PLANK,
   ROCK,
   SHOVEL,
   SNOWBALL,
+  STICK,
   blockToItem,
   hitDamage,
   isThrowable,
@@ -48,6 +50,7 @@ import {
   stackLimit,
   type InvSlot,
 } from "./shared/items.js";
+import { CRAFT_GRID_BASE, craftCellOf, isCraftSlot, matchRecipe } from "./shared/recipes.js";
 import {
   type CharInput,
   type CharState,
@@ -61,6 +64,7 @@ import {
 import { type ChunkState, decodeChunkState } from "./shared/chunkCodec.js";
 import {
   COAL_ORE_ID,
+  CRAFTING_TABLE_ID,
   DIAMOND_ORE_ID,
   DIRT_ID,
   GOLD_ORE_ID,
@@ -120,6 +124,7 @@ texMat("coal_ore", "coal_ore.png");
 texMat("iron_ore", "iron_ore.png");
 texMat("gold_ore", "gold_ore.png");
 texMat("diamond_ore", "diamond_ore.png");
+texMat("crafting_table", "crafting_table.png");
 
 noa.registry.registerBlock(GRASS_ID, { material: ["grass_top", "dirt", "grass_side"] });
 noa.registry.registerBlock(DIRT_ID, { material: "dirt" });
@@ -134,6 +139,7 @@ noa.registry.registerBlock(GOLD_ORE_ID, { material: "gold_ore" });
 noa.registry.registerBlock(DIAMOND_ORE_ID, { material: "diamond_ore" });
 noa.registry.registerMaterial("water", { color: [0.25, 0.5, 0.95, 0.65] });
 noa.registry.registerBlock(WATER_ID, { material: "water", fluid: true, opaque: false });
+noa.registry.registerBlock(CRAFTING_TABLE_ID, { material: "crafting_table" });
 
 // Edited-voxel values received from the server, bucketed by chunk column
 // and applied on top of the deterministic base terrain whenever a chunk
@@ -939,6 +945,8 @@ const ITEM_SPRITES: Record<number, ItemSpriteConfig> = {
   [SHOVEL]: { url: "/assets/items/shovel.png", size: 0.85, grip: [3.5, 12.5], diagonal: true },
   [ROCK]: { url: "/assets/items/rock.png", size: 0.34 },
   [SNOWBALL]: { url: "/assets/items/snowball.png", size: 0.3 },
+  [PLANK]: { url: "/assets/items/plank.png", size: 0.42 },
+  [STICK]: { url: "/assets/items/stick.png", size: 0.6, grip: [4, 12], diagonal: true },
 };
 
 function loadImageData(url: string): Promise<ImageData> {
@@ -1178,6 +1186,7 @@ const BLOCK_COLORS: readonly string[] = [
   "#e6c84d", // gold ore
   "#7fe3df", // diamond ore
   "#4d7fd9", // water
+  "#8a5a2b", // crafting table
 ];
 
 function buildToolMesh(name: string, item: number, forViewModel = false): Group | null {
@@ -1218,7 +1227,7 @@ function buildToolMesh(name: string, item: number, forViewModel = false): Group 
 // rocks, snowballs, and blocks are origin-centered lumps cupped in the
 // fist; handle tools have their grip half a handle-length below the origin
 function isLumpItem(item: number): boolean {
-  return item === ROCK || item === SNOWBALL || isBlockItem(item);
+  return item === ROCK || item === SNOWBALL || item === PLANK || isBlockItem(item);
 }
 
 function attachToolToRig(rig: Rig, name: string, item: number): void {
@@ -1258,9 +1267,54 @@ let invSlots: InvSlot[] = Array.from({ length: INV_SLOTS }, () => null);
 let lastInvTotal = -1;
 let selectedSlot = 0;
 let inventoryOpen = false;
+// mirror of the open crafting grid (server-authoritative, echoed alongside the
+// inventory). craftSize is 0 (closed), 2 (inventory grid), or 3 (table); the
+// grid holds craftSize*craftSize cells.
+let craftGrid: InvSlot[] = [];
+let craftSize = 0;
 
 function heldStack(): InvSlot {
   return invSlots[selectedSlot] ?? null;
+}
+
+// resolve a drag slot index: 0..INV_SLOTS-1 is the inventory, CRAFT_GRID_BASE..
+// addresses the open crafting grid's cells
+function slotAt(index: number): InvSlot {
+  if (index >= 0 && index < INV_SLOTS) {
+    return invSlots[index] ?? null;
+  }
+  if (isCraftSlot(index)) {
+    const cell = craftCellOf(index);
+    if (cell >= 0 && cell < craftGrid.length) {
+      return craftGrid[cell] ?? null;
+    }
+  }
+  return null;
+}
+
+function setSlotAt(index: number, value: InvSlot): void {
+  if (index >= 0 && index < INV_SLOTS) {
+    invSlots[index] = value;
+    return;
+  }
+  if (isCraftSlot(index)) {
+    const cell = craftCellOf(index);
+    if (cell >= 0 && cell < craftGrid.length) {
+      craftGrid[cell] = value;
+    }
+  }
+}
+
+function isMoveSlot(index: number): boolean {
+  return (
+    (index >= 0 && index < INV_SLOTS) ||
+    (isCraftSlot(index) && craftCellOf(index) < craftGrid.length)
+  );
+}
+
+// the grid's item ids (0 = empty), for recipe matching / result preview
+function craftCells(): number[] {
+  return craftGrid.map((cell) => (cell ? cell.item : 0));
 }
 
 // first-person view model: arm + tool fixed to the camera. Camera space
@@ -2135,6 +2189,7 @@ const BLOCK_TEXTURE_FILES: readonly string[] = [
   "gold_ore.png",
   "diamond_ore.png",
   "",
+  "crafting_table.png",
 ];
 
 // the HUD icons are the same sprites the 3D items are extruded from
@@ -2145,6 +2200,8 @@ const ITEM_ICON_FILES: Record<number, string> = {
   [SHOVEL]: "/assets/items/shovel.png",
   [ROCK]: "/assets/items/rock.png",
   [SNOWBALL]: "/assets/items/snowball.png",
+  [PLANK]: "/assets/items/plank.png",
+  [STICK]: "/assets/items/stick.png",
 };
 
 function makeIconElement(item: number): Node {
@@ -2310,6 +2367,44 @@ invTitle.textContent = "Inventory";
 invTitle.style.cssText = `font: ${UI_FONT}; font-size: 13px; color: #fff; margin-bottom: 10px;`;
 invPanel.appendChild(invTitle);
 
+// crafting: a square grid (2x2 in the inventory, 3x3 at a table) feeding a
+// result slot. Grid cells use slot indices CRAFT_GRID_BASE+cell so the
+// existing inventory drag system moves items in and out via invMove; clicking
+// the result crafts (shift-click crafts as many as the grid allows).
+const craftSlots2: Slot[] = [];
+const craftSlots3: Slot[] = [];
+const craftSection = document.createElement("div");
+craftSection.style.cssText = "display: flex; align-items: center; gap: 14px; margin-bottom: 14px;";
+invPanel.appendChild(craftSection);
+const grid2El = document.createElement("div");
+grid2El.style.cssText = "display: grid; grid-template-columns: repeat(2, 44px); gap: 5px;";
+const grid3El = document.createElement("div");
+grid3El.style.cssText = "display: grid; grid-template-columns: repeat(3, 44px); gap: 5px;";
+craftSection.appendChild(grid2El);
+craftSection.appendChild(grid3El);
+for (let cell = 0; cell < 4; cell++) {
+  const s = makeSlot(grid2El, "");
+  s.root.dataset.invSlot = String(CRAFT_GRID_BASE + cell);
+  s.root.style.cursor = "grab";
+  craftSlots2.push(s);
+}
+for (let cell = 0; cell < 9; cell++) {
+  const s = makeSlot(grid3El, "");
+  s.root.dataset.invSlot = String(CRAFT_GRID_BASE + cell);
+  s.root.style.cursor = "grab";
+  craftSlots3.push(s);
+}
+const craftArrow = document.createElement("div");
+craftArrow.textContent = "→";
+craftArrow.style.cssText = `font: ${UI_FONT}; font-size: 22px; color: rgba(255,255,255,0.65);`;
+craftSection.appendChild(craftArrow);
+const resultTile = makeSlot(craftSection, "");
+resultTile.root.style.cursor = "pointer";
+resultTile.root.style.borderColor = "rgba(120,220,120,0.55)";
+resultTile.root.addEventListener("click", (ev) => {
+  void client.streams.send({ type: "craftTake", all: ev.shiftKey }).catch(() => {});
+});
+
 // panel slot index -> inventory slot index: storage rows first (9-35),
 // then the hotbar mirror row (0-8), like Minecraft's layout
 const panelSlots: Slot[] = [];
@@ -2338,20 +2433,52 @@ function updateInventoryPanel(): void {
     setSlotContent(panelSlots[i], invSlots[i] ?? null);
     panelSlots[i].root.style.borderColor = i === selectedSlot ? "#fff" : "rgba(255,255,255,0.25)";
   }
+  // crafting grid: show the one matching craftSize, fill its cells, and
+  // preview the result the current pattern would yield
+  const show3 = craftSize === 3;
+  craftSection.style.display = craftSize > 0 ? "flex" : "none";
+  grid2El.style.display = craftSize === 2 ? "grid" : "none";
+  grid3El.style.display = show3 ? "grid" : "none";
+  const tiles = show3 ? craftSlots3 : craftSlots2;
+  for (let cell = 0; cell < tiles.length; cell++) {
+    setSlotContent(tiles[cell], craftGrid[cell] ?? null);
+  }
+  const recipe = craftSize > 0 ? matchRecipe(craftCells(), craftSize) : null;
+  setSlotContent(resultTile, recipe ? { item: recipe.out, count: recipe.count } : null);
+  invTitle.textContent = show3 ? "Crafting Table" : "Inventory";
 }
 
 // after the panel closes, a fire that arrives while the pointer is still
 // unlocked is the user's re-lock click, not an attack
 let fireSuppressedUntil = 0;
 
-function setInventoryOpen(on: boolean): void {
+function setInventoryOpen(
+  on: boolean,
+  size = 2,
+  table: { x: number; y: number; z: number } | null = null,
+): void {
   inventoryOpen = on;
   invBackdrop.style.display = on ? "flex" : "none";
   if (on) {
+    // optimistic grid so cells render before the server's echo; the echo is
+    // authoritative (and validates table proximity for the 3x3)
+    craftSize = size;
+    craftGrid = Array.from({ length: size * size }, () => null);
     document.exitPointerLock?.();
+    if (table) {
+      void client.streams
+        .send({ type: "craftOpen", size, x: table.x, y: table.y, z: table.z })
+        .catch(() => {});
+    } else {
+      void client.streams.send({ type: "craftOpen", size }).catch(() => {});
+    }
     updateInventoryPanel();
   } else {
     endDrag(null);
+    // hand any items left in the grid back to the inventory, server-side
+    void client.streams.send({ type: "craftClose" }).catch(() => {});
+    craftSize = 0;
+    craftGrid = [];
     // the E keypress is a user gesture, so this usually succeeds; when the
     // browser refuses, the grace window below swallows the re-lock click
     noa.container.setPointerLock(true);
@@ -2365,46 +2492,56 @@ function fireSuppressed(): boolean {
   );
 }
 
-// the same merge-or-swap rule the server applies, run optimistically
-function applyLocalMove(from: number, to: number): void {
-  const source = invSlots[from];
+// the same rule the server applies, run optimistically; works across
+// inventory and crafting-grid slots via slotAt/setSlotAt. `one` moves a single
+// item (right-drag) onto an empty cell or matching stack.
+function applyLocalMove(from: number, to: number, one: boolean): void {
+  const source = slotAt(from);
   if (!source) {
     return;
   }
-  const target = invSlots[to];
-  if (target && target.item === source.item) {
+  const target = slotAt(to);
+  if (one) {
+    if (target && (target.item !== source.item || target.count >= stackLimit(source.item))) {
+      return;
+    }
+    if (target) {
+      target.count += 1;
+    } else {
+      setSlotAt(to, { item: source.item, count: 1 });
+    }
+    source.count -= 1;
+    if (source.count === 0) {
+      setSlotAt(from, null);
+    }
+  } else if (target && target.item === source.item) {
     const take = Math.min(stackLimit(source.item) - target.count, source.count);
     target.count += take;
     source.count -= take;
     if (source.count === 0) {
-      invSlots[from] = null;
+      setSlotAt(from, null);
     }
   } else {
-    invSlots[from] = target;
-    invSlots[to] = source;
+    setSlotAt(from, target);
+    setSlotAt(to, source);
   }
 }
 
-function moveItem(from: number, to: number): void {
-  if (
-    from === to ||
-    from < 0 ||
-    to < 0 ||
-    from >= INV_SLOTS ||
-    to >= INV_SLOTS ||
-    !invSlots[from]
-  ) {
+function moveItem(from: number, to: number, one: boolean): void {
+  if (from === to || !isMoveSlot(from) || !isMoveSlot(to) || !slotAt(from)) {
     return;
   }
-  applyLocalMove(from, to);
+  applyLocalMove(from, to, one);
   syncEquipped();
   updateHud();
-  void client.streams.send({ type: "invMove", from, to }).catch(() => {});
+  void client.streams.send({ type: "invMove", from, to, one }).catch(() => {});
 }
 
 // drag and drop: pick a stack up on pointerdown, float its icon under the
-// cursor, drop it on the slot under the pointer
+// cursor, drop it on the slot under the pointer. right-button drag moves a
+// single item (so one stack can be spread across crafting-grid cells).
 let dragFrom = -1;
+let dragOne = false;
 let dragGhost: HTMLDivElement | null = null;
 
 function endDrag(ev: PointerEvent | null): void {
@@ -2415,10 +2552,11 @@ function endDrag(ev: PointerEvent | null): void {
     const under = document.elementFromPoint(ev.clientX, ev.clientY);
     const slotEl = under?.closest?.("[data-inv-slot]") as HTMLElement | null;
     if (slotEl?.dataset.invSlot !== undefined) {
-      moveItem(dragFrom, Number(slotEl.dataset.invSlot));
+      moveItem(dragFrom, Number(slotEl.dataset.invSlot), dragOne);
     }
   }
   dragFrom = -1;
+  dragOne = false;
   dragGhost?.remove();
   dragGhost = null;
 }
@@ -2431,21 +2569,24 @@ invBackdrop.addEventListener("pointerdown", (ev) => {
   if (dragFrom !== -1 || dragGhost) {
     endDrag(null);
   }
-  if (ev.button !== 0) {
+  // left button drags the whole stack; right button drags a single item
+  if (ev.button !== 0 && ev.button !== 2) {
     return;
   }
   const slotEl = (ev.target as HTMLElement).closest?.("[data-inv-slot]") as HTMLElement | null;
   const index = slotEl ? Number(slotEl.dataset.invSlot) : -1;
-  if (index < 0 || !invSlots[index]) {
+  const stack = slotAt(index);
+  if (index < 0 || !stack) {
     return;
   }
   ev.preventDefault();
   dragFrom = index;
+  dragOne = ev.button === 2;
   dragGhost = document.createElement("div");
   dragGhost.style.cssText =
     "position: fixed; z-index: 30; pointer-events: none; opacity: 0.85;" +
     "transform: translate(-50%, -50%);";
-  dragGhost.appendChild(makeIconElement(invSlots[index].item));
+  dragGhost.appendChild(makeIconElement(stack.item));
   dragGhost.style.left = `${ev.clientX}px`;
   dragGhost.style.top = `${ev.clientY}px`;
   document.body.appendChild(dragGhost);
@@ -2555,8 +2696,15 @@ noa.inputs.down.on("alt-fire", () => {
   if (fireSuppressed()) {
     return;
   }
+  const target = noa.targetedBlock;
+  // right-clicking a crafting table opens its 3x3 grid instead of placing
+  if (target && target.blockID === CRAFTING_TABLE_ID) {
+    const [tx, ty, tz] = target.position;
+    setInventoryOpen(true, 3, { x: tx, y: ty, z: tz });
+    return;
+  }
   swingT = 1;
-  if (!noa.targetedBlock) {
+  if (!target) {
     return;
   }
   const held = heldStack();
@@ -2564,7 +2712,7 @@ noa.inputs.down.on("alt-fire", () => {
     showNotice("Hold a block to place it — dig some, then grab it from a slot");
     return;
   }
-  const [x, y, z] = noa.targetedBlock.adjacent;
+  const [x, y, z] = target.adjacent;
   // optimistic placement, reconciled by the server's echo (or reverted)
   predictEdit(itemToBlock(held.item), x, y, z);
   void client.streams
@@ -2679,6 +2827,11 @@ function handleStreamEvent(event: { bytes: Uint8Array; json<T = unknown>(): T })
         playPop(0.5);
       }
       lastInvTotal = invTotal;
+      // mirror the authoritative crafting grid (size 0 when closed)
+      craftSize = message.craft.size;
+      craftGrid = message.craft.grid.map((entry) =>
+        entry ? { item: entry.i, count: entry.n } : null,
+      );
       // the stack in the selected slot may have changed or moved
       syncEquipped();
       updateHud();
@@ -2893,7 +3046,7 @@ window.__voxels = {
   },
   slots: () => invSlots.map((slot) => (slot ? { ...slot } : null)),
   selectedSlot: () => selectedSlot,
-  moveItem: (from, to) => moveItem(from, to),
+  moveItem: (from, to) => moveItem(from, to, false),
   inventoryOpen: () => inventoryOpen,
   setInventoryOpen: (on) => setInventoryOpen(on),
   sendHit: (x, y, z) => {

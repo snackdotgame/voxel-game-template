@@ -1,6 +1,7 @@
 // Equippable items. Ids are stable wire values (u8 in snapshots).
 import {
   COAL_ORE_ID,
+  CRAFTING_TABLE_ID,
   DIAMOND_ORE_ID,
   DIRT_ID,
   GOLD_ORE_ID,
@@ -13,7 +14,16 @@ import {
   STONE_ID,
 } from "./terrain.js";
 
-export const ITEMS = ["Hand", "Pickaxe", "Axe", "Shovel", "Rock", "Snowball"] as const;
+export const ITEMS = [
+  "Hand",
+  "Pickaxe",
+  "Axe",
+  "Shovel",
+  "Rock",
+  "Snowball",
+  "Plank",
+  "Stick",
+] as const;
 
 export const HAND = 0;
 export const PICKAXE = 1;
@@ -21,6 +31,9 @@ export const AXE = 2;
 export const SHOVEL = 3;
 export const ROCK = 4;
 export const SNOWBALL = 5;
+// Crafting materials. Not throwable, not tools; stack to 64 by default.
+export const PLANK = 6;
+export const STICK = 7;
 
 // Block items occupy ids 64+blockId so a u8 covers both kinds.
 export const BLOCK_ITEM_BASE = 64;
@@ -39,6 +52,7 @@ export const BLOCK_NAMES: readonly string[] = [
   "Gold Ore",
   "Diamond Ore",
   "Water",
+  "Crafting Table",
 ];
 
 export function isValidItem(item: number): boolean {
@@ -115,6 +129,8 @@ export function blockHP(block: number): number {
       return 3;
     case LOG_ID:
       return 6;
+    case CRAFTING_TABLE_ID:
+      return 4;
     case STONE_ID:
       return 8;
     case COAL_ORE_ID:
@@ -128,7 +144,9 @@ export function blockHP(block: number): number {
 }
 
 export function requiresPickaxe(block: number): boolean {
-  return block === STONE_ID || block >= COAL_ORE_ID;
+  // stone + the four ores only; bound the range so later block ids (the
+  // wooden crafting table at 13) aren't misclassified as pickaxe-only
+  return block === STONE_ID || (block >= COAL_ORE_ID && block <= DIAMOND_ORE_ID);
 }
 
 // Damage one hit deals: 0 if the block can't be dug with that item,
@@ -141,7 +159,7 @@ export function hitDamage(item: number, block: number): number {
     return item === PICKAXE ? 2 : 0;
   }
   const matching =
-    (item === AXE && (block === LOG_ID || block === LEAVES_ID)) ||
+    (item === AXE && (block === LOG_ID || block === LEAVES_ID || block === CRAFTING_TABLE_ID)) ||
     (item === SHOVEL &&
       (block === DIRT_ID || block === GRASS_ID || block === SAND_ID || block === SNOW_ID));
   return matching ? 2 : 1;

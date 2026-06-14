@@ -13,6 +13,8 @@ export const IRON_ORE_ID = 9;
 export const GOLD_ORE_ID = 10;
 export const DIAMOND_ORE_ID = 11;
 export const WATER_ID = 12;
+// Placed-only (never in baseVoxelID); right-clicking it opens the 3x3 crafting grid.
+export const CRAFTING_TABLE_ID = 13;
 
 // Basins below this height fill with water; shores near it turn to sand.
 export const SEA_LEVEL = 0;

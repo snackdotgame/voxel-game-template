@@ -28,11 +28,16 @@ import {
 } from "./shared/items.js";
 import {
   type BlockEdit,
+  type CraftOpenMessage,
+  type InvWireSlot,
   type PlaceMessage,
   type PlayerSnapshot,
   type ThrowMessage,
   type RosterEntry,
   parseAttackMessage,
+  parseCraftCloseMessage,
+  parseCraftOpenMessage,
+  parseCraftTakeMessage,
   parseEditMessage,
   parseEquipMessage,
   parseHitMessage,
@@ -40,6 +45,7 @@ import {
   parsePlaceMessage,
   parseThrowMessage,
 } from "./shared/messages.js";
+import { craftCellOf, isCraftSlot, matchRecipe } from "./shared/recipes.js";
 import {
   SIM_TICK_MS,
   type CharInput,
@@ -50,6 +56,7 @@ import {
 } from "./shared/sim.js";
 import { encodeChunkState, maxRecordsForPayload } from "./shared/chunkCodec.js";
 import {
+  CRAFTING_TABLE_ID,
   WATER_ID,
   baseVoxelID,
   chunkCoord,
@@ -113,6 +120,16 @@ type Player = {
   inputQueue: CharInput[];
   syncedChunks: Set<string>;
   lastChunk: string;
+  // transient crafting grid while a crafting screen is open. craftSize is 0
+  // (closed), 2 (inventory grid), or 3 (crafting table); craftGrid holds
+  // craftSize*craftSize cells. Contents return to the inventory on close or
+  // disconnect, so they are never parked across reconnects.
+  craftSize: number;
+  craftGrid: InvSlot[];
+  // the crafting-table block this 3x3 session opened against (null for the
+  // 2x2 inventory grid); re-checked on each craft so you can't keep using a
+  // table after walking away or after it's destroyed
+  craftTable: { x: number; y: number; z: number } | null;
 };
 
 type Projectile = {
@@ -499,8 +516,23 @@ function handleStream(world: World, event: StreamEvent) {
     // require a materialized player: resolving the inventory through a
     // playerless connection would mint an orphan keyed by connection id
     if (world.players.has(event.connection.id)) {
-      handleInvMove(world, event.connection.id, move.from, move.to);
+      handleInvMove(world, event.connection.id, move.from, move.to, move.one);
     }
+    return;
+  }
+  const craftOpen = parseCraftOpenMessage(value);
+  if (craftOpen) {
+    handleCraftOpen(world, event.connection.id, craftOpen);
+    return;
+  }
+  const craftClose = parseCraftCloseMessage(value);
+  if (craftClose) {
+    handleCraftClose(world, event.connection.id);
+    return;
+  }
+  const craftTake = parseCraftTakeMessage(value);
+  if (craftTake) {
+    handleCraftTake(world, event.connection.id, craftTake.all);
     return;
   }
   handleEdit(world, event, value);
@@ -601,11 +633,20 @@ function inventoryOf(world: World, connectionId: string): InvSlot[] {
   return inv;
 }
 
+function wireSlots(slots: readonly InvSlot[]): InvWireSlot[] {
+  return slots.map((slot) => (slot ? { i: slot.item, n: slot.count } : null));
+}
+
 function sendInventory(world: World, connectionId: string) {
-  const slots = inventoryOf(world, connectionId).map((slot) =>
-    slot ? { i: slot.item, n: slot.count } : null,
-  );
-  server.streams.send(connectionId, { type: "inventory", slots });
+  const player = world.players.get(connectionId);
+  server.streams.send(connectionId, {
+    type: "inventory",
+    slots: wireSlots(inventoryOf(world, connectionId)),
+    craft: {
+      size: player?.craftSize ?? 0,
+      grid: wireSlots(player?.craftGrid ?? []),
+    },
+  });
 }
 
 // Stacks into existing piles (hotbar first by array order), then the first
@@ -658,38 +699,229 @@ function holdsItem(world: World, connectionId: string, item: number): boolean {
   return inventoryOf(world, connectionId).some((slot) => slot !== null && slot.item === item);
 }
 
-// Drag-and-drop between two slots: merge same-item stacks up to the stack
-// limit, otherwise swap the contents.
-function handleInvMove(world: World, connectionId: string, from: number, to: number) {
+type SlotRef = { get(): InvSlot; set(v: InvSlot): void };
+
+// Resolves an invMove slot index to its backing cell: 0..len-1 is the
+// inventory; CRAFT_GRID_BASE.. addresses the open crafting grid (only cells
+// that exist for the current craftSize). Returns null for out-of-range moves.
+function slotRef(
+  world: World,
+  connectionId: string,
+  player: Player,
+  index: number,
+): SlotRef | null {
+  if (!Number.isInteger(index)) {
+    return null;
+  }
   const inv = inventoryOf(world, connectionId);
-  if (
-    from === to ||
-    !Number.isInteger(from) ||
-    !Number.isInteger(to) ||
-    from < 0 ||
-    from >= inv.length ||
-    to < 0 ||
-    to >= inv.length
-  ) {
+  if (index >= 0 && index < inv.length) {
+    return { get: () => inv[index], set: (v) => void (inv[index] = v) };
+  }
+  if (isCraftSlot(index)) {
+    const cell = craftCellOf(index);
+    if (cell >= 0 && cell < player.craftSize * player.craftSize) {
+      return {
+        get: () => player.craftGrid[cell],
+        set: (v) => void (player.craftGrid[cell] = v),
+      };
+    }
+  }
+  return null;
+}
+
+// Drag-and-drop between two slots (inventory or crafting grid): `one` moves a
+// single item onto an empty cell or matching stack; otherwise merge same-item
+// stacks up to the stack limit, or swap the contents.
+function handleInvMove(world: World, connectionId: string, from: number, to: number, one: boolean) {
+  const player = world.players.get(connectionId);
+  if (!player || from === to) {
     return;
   }
-  const source = inv[from];
+  const src = slotRef(world, connectionId, player, from);
+  const dst = slotRef(world, connectionId, player, to);
+  if (!src || !dst) {
+    // a move the server can't resolve (e.g. into a grid cell the client
+    // thinks is open but the server doesn't): echo so the client reconciles
+    sendInventory(world, connectionId);
+    return;
+  }
+  const source = src.get();
   if (!source) {
     return;
   }
-  const target = inv[to];
-  if (target && target.item === source.item) {
+  const target = dst.get();
+  if (one) {
+    // a single item only goes onto an empty cell or a matching stack with room
+    if (target && (target.item !== source.item || target.count >= stackLimit(source.item))) {
+      return;
+    }
+    if (target) {
+      target.count += 1;
+    } else {
+      dst.set({ item: source.item, count: 1 });
+    }
+    source.count -= 1;
+    if (source.count === 0) {
+      src.set(null);
+    }
+  } else if (target && target.item === source.item) {
     const take = Math.min(stackLimit(source.item) - target.count, source.count);
     target.count += take;
     source.count -= take;
     if (source.count === 0) {
-      inv[from] = null;
+      src.set(null);
     }
   } else {
-    inv[from] = target;
-    inv[to] = source;
+    src.set(target);
+    dst.set(source);
   }
   sendInventory(world, connectionId);
+}
+
+/*
+ *      Crafting
+ *
+ *  A transient grid (2x2 inventory screen / 3x3 crafting table) whose cells
+ *  are addressed by invMove just like inventory slots. The result is matched
+ *  from the grid contents; taking it consumes one item from each filled cell.
+ *  The grid drains back into the inventory on close or disconnect.
+ */
+
+const CRAFT_TABLE_RANGE = 5;
+
+// is the player still standing next to the crafting table at `pos`?
+function atCraftTable(
+  world: World,
+  player: Player,
+  pos: { x: number; y: number; z: number },
+): boolean {
+  if (blockAt(world, pos.x, pos.y, pos.z) !== CRAFTING_TABLE_ID) {
+    return false;
+  }
+  const dx = pos.x + 0.5 - player.char.x;
+  const dy = pos.y + 0.5 - player.char.y;
+  const dz = pos.z + 0.5 - player.char.z;
+  return Math.hypot(dx, dy, dz) <= CRAFT_TABLE_RANGE;
+}
+
+function returnCraftGrid(world: World, connectionId: string, player: Player) {
+  for (const cell of player.craftGrid) {
+    if (!cell) {
+      continue;
+    }
+    // fill the inventory first; anything that doesn't fit drops in the world
+    // (grantItem's contract — never silently destroy the leftover)
+    const overflow = grantItem(world, connectionId, cell.item, cell.count);
+    for (let n = 0; n < overflow; n++) {
+      spawnDrop(world, cell.item, player.char.x + 0.5, player.char.y + 0.4, player.char.z + 0.5);
+    }
+  }
+  player.craftGrid = [];
+  player.craftSize = 0;
+  player.craftTable = null;
+}
+
+function handleCraftOpen(world: World, connectionId: string, msg: CraftOpenMessage) {
+  const player = world.players.get(connectionId);
+  if (!player) {
+    return;
+  }
+  const size = msg.size === 3 ? 3 : 2;
+  let table: { x: number; y: number; z: number } | null = null;
+  if (size === 3) {
+    // a 3x3 grid requires standing next to the crafting table the client
+    // claims to have opened (don't trust client UI gating alone)
+    if (
+      msg.x === undefined ||
+      msg.y === undefined ||
+      msg.z === undefined ||
+      !atCraftTable(world, player, { x: msg.x, y: msg.y, z: msg.z })
+    ) {
+      // echo so the client's optimistically-opened grid snaps back to closed
+      sendInventory(world, connectionId);
+      return;
+    }
+    table = { x: msg.x, y: msg.y, z: msg.z };
+  }
+  // reopening drains any leftover grid back to the inventory first
+  returnCraftGrid(world, connectionId, player);
+  player.craftSize = size;
+  player.craftGrid = Array.from({ length: size * size }, () => null);
+  player.craftTable = table;
+  sendInventory(world, connectionId);
+}
+
+function handleCraftClose(world: World, connectionId: string) {
+  const player = world.players.get(connectionId);
+  if (!player) {
+    return;
+  }
+  returnCraftGrid(world, connectionId, player);
+  sendInventory(world, connectionId);
+}
+
+// Does the inventory have room for `count` more of `item` (existing stacks
+// with headroom plus empty slots)?
+function hasRoomFor(world: World, connectionId: string, item: number, count: number): boolean {
+  const inv = inventoryOf(world, connectionId);
+  const limit = stackLimit(item);
+  let room = 0;
+  for (const slot of inv) {
+    if (!slot) {
+      room += limit;
+    } else if (slot.item === item && slot.count < limit) {
+      room += limit - slot.count;
+    }
+    if (room >= count) {
+      return true;
+    }
+  }
+  return room >= count;
+}
+
+function handleCraftTake(world: World, connectionId: string, all: boolean) {
+  const player = world.players.get(connectionId);
+  if (!player || player.craftSize === 0) {
+    return;
+  }
+  // a 3x3 craft must still be at its table; if it's gone/out of range, drain
+  // the grid and refuse (can't keep crafting tools after leaving the table)
+  if (
+    player.craftSize === 3 &&
+    (!player.craftTable || !atCraftTable(world, player, player.craftTable))
+  ) {
+    returnCraftGrid(world, connectionId, player);
+    sendInventory(world, connectionId);
+    return;
+  }
+  let crafted = 0;
+  // craft once, or repeatedly for shift-take, until the grid no longer
+  // satisfies a recipe or the output no longer fits
+  for (let guard = 0; guard < 1000; guard++) {
+    const cells = player.craftGrid.map((cell) => (cell ? cell.item : 0));
+    const recipe = matchRecipe(cells, player.craftSize);
+    if (!recipe || !hasRoomFor(world, connectionId, recipe.out, recipe.count)) {
+      break;
+    }
+    // consume one from every filled cell (equals the matched recipe's needs)
+    for (let i = 0; i < player.craftGrid.length; i++) {
+      const cell = player.craftGrid[i];
+      if (cell) {
+        cell.count -= 1;
+        if (cell.count <= 0) {
+          player.craftGrid[i] = null;
+        }
+      }
+    }
+    grantItem(world, connectionId, recipe.out, recipe.count);
+    crafted++;
+    if (!all) {
+      break;
+    }
+  }
+  if (crafted > 0) {
+    sendInventory(world, connectionId);
+  }
 }
 
 /*
@@ -977,6 +1209,9 @@ function addPlayer(world: World, connection: Connection) {
     inputQueue: [],
     syncedChunks: new Set(),
     lastChunk: "none",
+    craftSize: 0,
+    craftGrid: [],
+    craftTable: null,
   });
   server.streams.broadcast(
     { type: "join", id: connection.id, name: connection.userName },
@@ -988,6 +1223,9 @@ function addPlayer(world: World, connection: Connection) {
 function removePlayer(world: World, id: string) {
   const player = world.players.get(id);
   if (player) {
+    // don't lose items left in an open crafting grid (parking saves only
+    // char/heading/item/hp, so the grid must drain back into the inventory)
+    returnCraftGrid(world, id, player);
     world.parked.set(player.userId, {
       char: player.char,
       heading: player.heading,

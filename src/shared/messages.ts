@@ -130,11 +130,14 @@ export function parsePlaceMessage(value: unknown): PlaceMessage | undefined {
 }
 
 // Client -> server: move/merge/swap the contents of two inventory slots
-// (drag and drop in the inventory screen).
+// (drag and drop in the inventory screen). `one` moves a single item instead
+// of the whole stack (right-click drag), so the same item can be spread across
+// crafting-grid cells.
 export type InvMoveMessage = {
   type: "invMove";
   from: number;
   to: number;
+  one: boolean;
 };
 
 export function parseInvMoveMessage(value: unknown): InvMoveMessage | undefined {
@@ -144,7 +147,57 @@ export function parseInvMoveMessage(value: unknown): InvMoveMessage | undefined 
     Number.isInteger(value.from) &&
     Number.isInteger(value.to)
   ) {
-    return { type: "invMove", from: value.from as number, to: value.to as number };
+    return {
+      type: "invMove",
+      from: value.from as number,
+      to: value.to as number,
+      one: value.one === true,
+    };
+  }
+  return undefined;
+}
+
+// Client -> server: open the crafting grid. size 2 is the inventory grid
+// (always allowed); size 3 is a crafting table, so x/y/z carry the table
+// block the player opened (validated for proximity server-side).
+export type CraftOpenMessage = {
+  type: "craftOpen";
+  size: number;
+  x?: number;
+  y?: number;
+  z?: number;
+};
+
+export function parseCraftOpenMessage(value: unknown): CraftOpenMessage | undefined {
+  if (!isRecord(value) || value.type !== "craftOpen" || !Number.isInteger(value.size)) {
+    return undefined;
+  }
+  const msg: CraftOpenMessage = { type: "craftOpen", size: value.size as number };
+  if (Number.isInteger(value.x) && Number.isInteger(value.y) && Number.isInteger(value.z)) {
+    msg.x = value.x as number;
+    msg.y = value.y as number;
+    msg.z = value.z as number;
+  }
+  return msg;
+}
+
+// Client -> server: close the crafting grid (returns grid items to inventory).
+export type CraftCloseMessage = { type: "craftClose" };
+
+export function parseCraftCloseMessage(value: unknown): CraftCloseMessage | undefined {
+  if (isRecord(value) && value.type === "craftClose") {
+    return { type: "craftClose" };
+  }
+  return undefined;
+}
+
+// Client -> server: take the crafted result (consumes one of each grid cell).
+// all=true crafts repeatedly until the grid can no longer satisfy the recipe.
+export type CraftTakeMessage = { type: "craftTake"; all: boolean };
+
+export function parseCraftTakeMessage(value: unknown): CraftTakeMessage | undefined {
+  if (isRecord(value) && value.type === "craftTake") {
+    return { type: "craftTake", all: value.all === true };
   }
   return undefined;
 }
@@ -160,10 +213,13 @@ export type DamageMessage = {
 };
 
 // Server -> owner: full slot array after any change. Each entry is null
-// (empty) or { i: item id, n: count }.
+// (empty) or { i: item id, n: count }. `craft` mirrors the open crafting grid
+// (size 0 when closed) so the client can render cells + preview the result.
+export type InvWireSlot = { i: number; n: number } | null;
 export type InventoryMessage = {
   type: "inventory";
-  slots: ({ i: number; n: number } | null)[];
+  slots: InvWireSlot[];
+  craft: { size: number; grid: InvWireSlot[] };
 };
 
 // Client -> server: throw an item from an inventory slot along a view
@@ -249,6 +305,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function parseWireSlots(arr: unknown[]): InvWireSlot[] {
+  return arr.map((entry) => {
+    if (isRecord(entry) && Number.isInteger(entry.i) && Number.isInteger(entry.n)) {
+      return { i: entry.i as number, n: entry.n as number };
+    }
+    return null;
+  });
+}
+
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
@@ -327,13 +392,16 @@ export function parseServerStreamMessage(value: unknown): ServerStreamMessage | 
     return { type: "death", victim: value.victim, attacker: value.attacker };
   }
   if (value.type === "inventory" && Array.isArray(value.slots)) {
-    const slots: ({ i: number; n: number } | null)[] = value.slots.map((entry) => {
-      if (isRecord(entry) && Number.isInteger(entry.i) && Number.isInteger(entry.n)) {
-        return { i: entry.i as number, n: entry.n as number };
-      }
-      return null;
-    });
-    return { type: "inventory", slots };
+    const slots = parseWireSlots(value.slots);
+    let craft = { size: 0, grid: [] as InvWireSlot[] };
+    if (
+      isRecord(value.craft) &&
+      Number.isInteger(value.craft.size) &&
+      Array.isArray(value.craft.grid)
+    ) {
+      craft = { size: value.craft.size as number, grid: parseWireSlots(value.craft.grid) };
+    }
+    return { type: "inventory", slots, craft };
   }
   if (value.type === "join" && typeof value.id === "string" && typeof value.name === "string") {
     return { type: "join", id: value.id, name: value.name };
