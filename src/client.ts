@@ -12,7 +12,7 @@ import {
   NearestFilter,
   type Object3D,
 } from "three";
-import { client } from "minion:client";
+import { client } from "snack:client";
 import { Engine } from "./noa/index.js";
 import { disposeObject3D } from "./noa/lib/rendering.js";
 import {
@@ -928,20 +928,11 @@ type ItemSpriteConfig = {
   /** rotate so the sprite's up-right diagonal becomes vertical (for
    *  tools drawn diagonally but held by a vertical handle) */
   diagonal?: boolean;
-  /** spin the finished mesh 180° about the handle axis, for art whose
-   *  business end would otherwise face the player */
-  aboutFace?: boolean;
 };
 
 const ITEM_SPRITES: Record<number, ItemSpriteConfig> = {
   [PICKAXE]: { url: "/assets/items/pickaxe.png", size: 0.85, grip: [3.5, 12.5], diagonal: true },
-  [AXE]: {
-    url: "/assets/items/axe.png",
-    size: 0.85,
-    grip: [3.5, 12.5],
-    diagonal: true,
-    aboutFace: true,
-  },
+  [AXE]: { url: "/assets/items/axe.png", size: 0.85, grip: [3.5, 12.5], diagonal: true },
   [SHOVEL]: { url: "/assets/items/shovel.png", size: 0.85, grip: [3.5, 12.5], diagonal: true },
   [ROCK]: { url: "/assets/items/rock.png", size: 0.34 },
   [SNOWBALL]: { url: "/assets/items/snowball.png", size: 0.3 },
@@ -1100,9 +1091,6 @@ function extrudePixelArt(img: ImageData, config: ItemSpriteConfig): BufferGeomet
   geometry.setIndex(indices);
   if (config.diagonal) {
     geometry.rotateX(Math.PI / 4);
-  }
-  if (config.aboutFace) {
-    geometry.rotateY(Math.PI);
   }
   geometry.computeBoundingSphere();
   // shared across every mesh using this item; never dispose with a mesh
@@ -1360,7 +1348,7 @@ function refreshViewModel(): void {
       // camera — a clean, readable hold. A small forward pitch gives a bit of
       // 3D depth; keeping yaw and roll at zero is what avoids twisting the flat
       // sprite. The root's resting yaw (0.3) supplies the slight side angle, so
-      // this reads the same for plain and aboutFace sprites (no per-tool case).
+      // this reads the same for every tool (no per-tool case).
       tool.position.set(-0.02, -0.06, -0.1);
       tool.rotation.set(-0.2, 0, 0);
     }
