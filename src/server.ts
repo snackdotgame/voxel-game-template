@@ -1,4 +1,4 @@
-import { server, type Connection, type DatagramEvent, type StreamEvent } from "minion:server";
+import { server, type Connection, type DatagramEvent, type StreamEvent } from "snack:server";
 import {
   type ProjectileSnapshot,
   decodeInputs,
@@ -8,7 +8,11 @@ import {
   encodeSnapshots,
 } from "./shared/netCodec.js";
 import {
+  ARROW,
+  BOW,
+  FEATHER,
   MAX_HP,
+  arrowLaunch,
   blockHP,
   blockToItem,
   bonusDrop,
@@ -30,6 +34,7 @@ import {
   type BlockEdit,
   type CraftOpenMessage,
   type InvWireSlot,
+  type FireArrowMessage,
   type PlaceMessage,
   type PlayerSnapshot,
   type ThrowMessage,
@@ -40,6 +45,7 @@ import {
   parseCraftTakeMessage,
   parseEditMessage,
   parseEquipMessage,
+  parseFireArrowMessage,
   parseHitMessage,
   parseInvMoveMessage,
   parsePlaceMessage,
@@ -70,7 +76,7 @@ const MAX_EDITS = 200_000;
 // Allow short input bursts (catch-up after client jank) but bound per-player CPU.
 const MAX_STEPS_PER_TICK = 8;
 const MAX_QUEUED_INPUTS = 32;
-// Connection liveness is runtime-owned: the Minion runtime's QUIC
+// Connection liveness is runtime-owned: the Snack runtime's QUIC
 // keep-alives and app-level ping/pong force-disconnect a dead client
 // within ~20s, and that flows through the normal disconnect path below
 // (a vanished connection in syncConnections). The game only keeps
@@ -143,6 +149,10 @@ type Projectile = {
   vy: number;
   vz: number;
   ttlMs: number;
+  // arrows carry charge-scaled damage/knockback; thrown items fall back to the
+  // per-item tables when these are undefined
+  damage?: number;
+  knock?: number;
 };
 
 type Drop = {
@@ -466,6 +476,12 @@ function handleStream(world: World, event: StreamEvent) {
   if (throwMsg) {
     broadcastSwing(world, event.connection.id);
     handleThrow(world, event.connection.id, throwMsg);
+    return;
+  }
+  const fireArrow = parseFireArrowMessage(value);
+  if (fireArrow) {
+    broadcastSwing(world, event.connection.id);
+    handleFireArrow(world, event.connection.id, fireArrow);
     return;
   }
   const hit = parseHitMessage(value);
@@ -1065,6 +1081,57 @@ function handleThrow(world: World, ownerId: string, msg: ThrowMessage) {
   });
 }
 
+// first inventory slot holding the given item, or -1
+function findItemSlot(world: World, connectionId: string, item: number): number {
+  const inv = inventoryOf(world, connectionId);
+  for (let i = 0; i < inv.length; i++) {
+    const slot = inv[i];
+    if (slot && slot.item === item && slot.count > 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+// Loose an arrow from a drawn bow. Authoritative: requires the bow to be the
+// held item, finds an arrow to spend, and derives speed/damage/knockback from
+// the draw fraction so the client only supplies aim and how long it pulled.
+function handleFireArrow(world: World, ownerId: string, msg: FireArrowMessage) {
+  const { charge, dx, dy, dz } = msg;
+  const player = world.players.get(ownerId);
+  if (!player || player.item !== BOW || world.projectiles.size >= MAX_PROJECTILES) {
+    return;
+  }
+  const len = Math.hypot(dx, dy, dz);
+  if (len < 1e-6) {
+    return;
+  }
+  const slot = findItemSlot(world, ownerId, ARROW);
+  if (slot < 0 || !tryConsume(world, ownerId, slot, ARROW)) {
+    return;
+  }
+  const { speed, damage, knockback: knock } = arrowLaunch(charge);
+  const nx = dx / len;
+  const ny = dy / len;
+  const nz = dz / len;
+  const id = world.nextProjectileId;
+  world.nextProjectileId = (world.nextProjectileId + 1) % 65536 || 1;
+  world.projectiles.set(id, {
+    id,
+    item: ARROW,
+    owner: ownerId,
+    x: player.char.x + nx * 0.9,
+    y: player.char.y + 1.5 + ny * 0.9,
+    z: player.char.z + nz * 0.9,
+    vx: nx * speed,
+    vy: ny * speed,
+    vz: nz * speed,
+    ttlMs: PROJECTILE_TTL_MS,
+    damage,
+    knock,
+  });
+}
+
 function stepProjectiles(world: World) {
   const dt = SIM_TICK_MS / 1000;
   for (const proj of world.projectiles.values()) {
@@ -1108,16 +1175,37 @@ function stepProjectiles(world: World) {
             world,
             id,
             proj.owner,
-            projectileDamage(proj.item),
+            proj.damage ?? projectileDamage(proj.item),
             proj.vx,
             proj.vz,
-            knockback(proj.item),
+            proj.knock ?? knockback(proj.item),
           );
           if (dropsOnImpact(proj.item)) {
             spawnDrop(world, proj.item, proj.x, proj.y, proj.z);
           }
           alive = false;
           break;
+        }
+      }
+      // chickens are fragile: any projectile that catches one fells it and
+      // leaves a feather (the only feather source, for crafting arrows)
+      if (alive) {
+        for (const [cid, chicken] of world.chickens) {
+          const c = chicken.char;
+          if (
+            Math.abs(proj.x - c.x) <= 0.4 &&
+            proj.y >= c.y - 0.1 &&
+            proj.y <= c.y + 1.0 &&
+            Math.abs(proj.z - c.z) <= 0.4
+          ) {
+            world.chickens.delete(cid);
+            spawnDrop(world, FEATHER, c.x, c.y + 0.3, c.z);
+            if (dropsOnImpact(proj.item)) {
+              spawnDrop(world, proj.item, proj.x, proj.y, proj.z);
+            }
+            alive = false;
+            break;
+          }
         }
       }
     }

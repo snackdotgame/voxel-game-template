@@ -257,6 +257,37 @@ export function parseThrowMessage(value: unknown): ThrowMessage | undefined {
   return undefined;
 }
 
+// Client -> server: loose an arrow from a drawn bow along a view direction.
+// `charge` is the raw draw fraction (0..1); the server applies the power curve
+// and resolves which arrow stack to consume, so the client can't pick speed.
+export type FireArrowMessage = {
+  type: "fireArrow";
+  charge: number;
+  dx: number;
+  dy: number;
+  dz: number;
+};
+
+export function parseFireArrowMessage(value: unknown): FireArrowMessage | undefined {
+  if (
+    isRecord(value) &&
+    value.type === "fireArrow" &&
+    isFiniteNumber(value.charge) &&
+    isFiniteNumber(value.dx) &&
+    isFiniteNumber(value.dy) &&
+    isFiniteNumber(value.dz)
+  ) {
+    return {
+      type: "fireArrow",
+      charge: value.charge,
+      dx: value.dx,
+      dy: value.dy,
+      dz: value.dz,
+    };
+  }
+  return undefined;
+}
+
 // Client -> server, sent as reliable stream messages.
 export type EditMessage = {
   type: "edit";

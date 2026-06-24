@@ -23,6 +23,10 @@ export const ITEMS = [
   "Snowball",
   "Plank",
   "Stick",
+  "Bow",
+  "Arrow",
+  "Feather",
+  "String",
 ] as const;
 
 export const HAND = 0;
@@ -34,6 +38,11 @@ export const SNOWBALL = 5;
 // Crafting materials. Not throwable, not tools; stack to 64 by default.
 export const PLANK = 6;
 export const STICK = 7;
+// Ranged weapon + ammo, and the materials that craft them.
+export const BOW = 8;
+export const ARROW = 9;
+export const FEATHER = 10;
+export const STRING = 11;
 
 // Block items occupy ids 64+blockId so a u8 covers both kinds.
 export const BLOCK_ITEM_BASE = 64;
@@ -166,13 +175,16 @@ export function hitDamage(item: number, block: number): number {
 }
 
 // Extra drops beyond the block itself (ammo loop: stone yields a rock,
-// snow yields a snowball).
+// snow yields a snowball, leaves yield the string a bow is strung with).
 export function bonusDrop(block: number): number | null {
   if (block === STONE_ID) {
     return ROCK;
   }
   if (block === SNOW_ID) {
     return SNOWBALL;
+  }
+  if (block === LEAVES_ID) {
+    return STRING;
   }
   return null;
 }
@@ -204,6 +216,46 @@ export function projectileDamage(item: number): number {
 }
 
 /*
+ *      Bow & arrow
+ *
+ *  A drawn bow looses an arrow whose speed, damage, and knockback all scale
+ *  with how long it was drawn, mirroring Minecraft: a full draw (~1s) flies
+ *  fast and flat and hits hard; a quick release lobs a weak arrow. The client
+ *  reports the raw draw fraction (0..1); the server applies the curve below so
+ *  power is server-authoritative.
+ */
+
+// time, in ms, a bow must be held to reach a full-power draw
+export const BOW_DRAW_MS = 1000;
+// below this draw fraction the bow won't loose (a barely-pulled string)
+export const BOW_MIN_CHARGE = 0.05;
+
+const ARROW_MIN_SPEED = 12;
+const ARROW_MAX_SPEED = 34;
+const ARROW_MAX_DAMAGE = 9;
+const ARROW_MIN_KNOCKBACK = 2;
+const ARROW_MAX_KNOCKBACK = 7;
+
+// Minecraft's draw curve: power ramps up faster than linearly and saturates at
+// a full draw. `charge` is the fraction of a full draw, clamped to 0..1.
+export function bowPower(charge: number): number {
+  const c = Math.max(0, Math.min(1, charge));
+  return (c * c + 2 * c) / 3;
+}
+
+export type ArrowLaunch = { speed: number; damage: number; knockback: number };
+
+// Speed/damage/knockback for an arrow loosed at the given draw fraction.
+export function arrowLaunch(charge: number): ArrowLaunch {
+  const p = bowPower(charge);
+  return {
+    speed: ARROW_MIN_SPEED + p * (ARROW_MAX_SPEED - ARROW_MIN_SPEED),
+    damage: Math.max(1, Math.round(p * ARROW_MAX_DAMAGE)),
+    knockback: ARROW_MIN_KNOCKBACK + p * (ARROW_MAX_KNOCKBACK - ARROW_MIN_KNOCKBACK),
+  };
+}
+
+/*
  *      Slot inventory
  *
  *  Minecraft-style storage: a fixed array of slots, each empty or holding a
@@ -219,7 +271,7 @@ export type InvSlot = { item: number; count: number } | null;
 
 // tools don't stack; everything else stacks like Minecraft
 export function stackLimit(item: number): number {
-  return item === PICKAXE || item === AXE || item === SHOVEL ? 1 : 64;
+  return item === PICKAXE || item === AXE || item === SHOVEL || item === BOW ? 1 : 64;
 }
 
 // slot 0 stays empty so the 1 key is the bare hand, matching the
@@ -231,5 +283,7 @@ export function starterSlots(): InvSlot[] {
   slots[3] = { item: SHOVEL, count: 1 };
   slots[4] = { item: ROCK, count: 6 };
   slots[5] = { item: SNOWBALL, count: 6 };
+  slots[6] = { item: BOW, count: 1 };
+  slots[7] = { item: ARROW, count: 16 };
   return slots;
 }

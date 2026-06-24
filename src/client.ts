@@ -8,9 +8,12 @@ import {
   Mesh,
   MeshBasicMaterial,
   type MeshLambertMaterial,
+  Euler,
   MultiplyBlending,
   NearestFilter,
   type Object3D,
+  Quaternion,
+  Vector3,
 } from "three";
 import { client } from "snack:client";
 import { Engine } from "./noa/index.js";
@@ -29,7 +32,12 @@ import {
   encodeInputs,
 } from "./shared/netCodec.js";
 import {
+  ARROW,
   AXE,
+  BOW,
+  BOW_DRAW_MS,
+  BOW_MIN_CHARGE,
+  FEATHER,
   HAND,
   HOTBAR_SLOTS,
   INV_SLOTS,
@@ -40,6 +48,7 @@ import {
   SHOVEL,
   SNOWBALL,
   STICK,
+  STRING,
   blockToItem,
   hitDamage,
   isThrowable,
@@ -546,6 +555,27 @@ function playWhoosh(volume = 0.35): void {
   logSound("whoosh");
 }
 
+// short synthesized bow "twang": a plucked tone that drops in pitch fast
+function playBowShot(volume = 0.4): void {
+  if (!audioCtx || !masterGain) {
+    return;
+  }
+  const t = audioCtx.currentTime;
+  const osc = audioCtx.createOscillator();
+  osc.type = "triangle";
+  osc.frequency.setValueAtTime(440, t);
+  osc.frequency.exponentialRampToValueAtTime(150, t + 0.12);
+  const gain = audioCtx.createGain();
+  gain.gain.setValueAtTime(0, t);
+  gain.gain.linearRampToValueAtTime(volume, t + 0.008);
+  gain.gain.exponentialRampToValueAtTime(0.001, t + 0.16);
+  osc.connect(gain);
+  gain.connect(masterGain);
+  osc.start(t);
+  osc.stop(t + 0.18);
+  logSound("bow");
+}
+
 // which sample family a block speaks with, per interaction
 function blockSoundFamily(block: number, kind: "dig" | "step"): string {
   if (block === STONE_ID || block >= COAL_ORE_ID) {
@@ -901,6 +931,35 @@ function applySwingToRig(rig: Rig, swingT: number, moving: boolean) {
   }
 }
 
+// Third-person bow pose, ported from Minecraft's HumanoidModel ArmPose
+// BOW_AND_ARROW: both arms reach forward to hold the drawn bow (xRot = -90°),
+// with a yaw split so the bow hand points straight out and the string hand
+// angles in to the nock. `pitch` tilts the aim up/down with the look. Blended
+// in by the draw fraction so it eases as you charge and reverses as you loose;
+// applied after the walk/idle pose, which it overrides for the arms.
+function applyBowDrawToRig(rig: Rig, draw: number, pitch: number): void {
+  const fwd = -Math.PI / 2 + pitch;
+  rig.rightArm.rotation.x += (fwd - rig.rightArm.rotation.x) * draw;
+  rig.rightArm.rotation.y += (-0.1 - rig.rightArm.rotation.y) * draw;
+  rig.rightArm.rotation.z += (0 - rig.rightArm.rotation.z) * draw;
+  rig.leftArm.rotation.x += (fwd - rig.leftArm.rotation.x) * draw;
+  rig.leftArm.rotation.y += (0.5 - rig.leftArm.rotation.y) * draw;
+  rig.leftArm.rotation.z += (0 - rig.leftArm.rotation.z) * draw;
+  // The bow rides the right arm, so the forward draw pose would flop it onto its
+  // side. Cancel the arm's rotation and hold the bow upright, pitched to the
+  // look angle — its body-frame yaw already matches where the player aims, so
+  // the bow points where the arrow goes. (Minecraft keeps the bow oriented via
+  // the item's display transform; this is the equivalent for a hand-parented mesh.)
+  if (rig.tool) {
+    // Hold the bow in the orientation it already has at rest — just keep it
+    // upright by cancelling the draw arm's rotation. No extra spin: the rest
+    // hold is already correct, so flipping here would turn the bow the wrong way.
+    bowAimEuler.set(0, 0, 0);
+    bowAimQuat.setFromEuler(bowAimEuler);
+    rig.tool.quaternion.copy(rig.rightArm.quaternion).invert().multiply(bowAimQuat);
+  }
+}
+
 function hueForId(id: string): number {
   let hash = 0;
   for (let i = 0; i < id.length; i++) {
@@ -928,16 +987,31 @@ type ItemSpriteConfig = {
   /** rotate so the sprite's up-right diagonal becomes vertical (for
    *  tools drawn diagonally but held by a vertical handle) */
   diagonal?: boolean;
+  /** spin the extruded mesh 180° about the (vertical) handle axis, for art
+   *  whose business end would otherwise face the holder */
+  aboutFace?: boolean;
 };
 
 const ITEM_SPRITES: Record<number, ItemSpriteConfig> = {
   [PICKAXE]: { url: "/assets/items/pickaxe.png", size: 0.85, grip: [3.5, 12.5], diagonal: true },
-  [AXE]: { url: "/assets/items/axe.png", size: 0.85, grip: [3.5, 12.5], diagonal: true },
+  [AXE]: {
+    url: "/assets/items/axe.png",
+    size: 0.85,
+    grip: [3.5, 12.5],
+    diagonal: true,
+    aboutFace: true,
+  },
   [SHOVEL]: { url: "/assets/items/shovel.png", size: 0.85, grip: [3.5, 12.5], diagonal: true },
   [ROCK]: { url: "/assets/items/rock.png", size: 0.34 },
   [SNOWBALL]: { url: "/assets/items/snowball.png", size: 0.3 },
   [PLANK]: { url: "/assets/items/plank.png", size: 0.42 },
   [STICK]: { url: "/assets/items/stick.png", size: 0.6, grip: [4, 12], diagonal: true },
+  // held upright by the riser; not diagonal
+  [BOW]: { url: "/assets/items/bow.png", size: 0.95, grip: [3, 8] },
+  // arrow stays upright (head at +y); it's oriented along its velocity in flight
+  [ARROW]: { url: "/assets/items/arrow.png", size: 0.7, grip: [7, 8] },
+  [FEATHER]: { url: "/assets/items/feather.png", size: 0.4 },
+  [STRING]: { url: "/assets/items/string.png", size: 0.36 },
 };
 
 function loadImageData(url: string): Promise<ImageData> {
@@ -1092,6 +1166,9 @@ function extrudePixelArt(img: ImageData, config: ItemSpriteConfig): BufferGeomet
   if (config.diagonal) {
     geometry.rotateX(Math.PI / 4);
   }
+  if (config.aboutFace) {
+    geometry.rotateY(Math.PI);
+  }
   geometry.computeBoundingSphere();
   // shared across every mesh using this item; never dispose with a mesh
   geometry.userData.shared = true;
@@ -1215,7 +1292,14 @@ function buildToolMesh(name: string, item: number, forViewModel = false): Group 
 // rocks, snowballs, and blocks are origin-centered lumps cupped in the
 // fist; handle tools have their grip half a handle-length below the origin
 function isLumpItem(item: number): boolean {
-  return item === ROCK || item === SNOWBALL || item === PLANK || isBlockItem(item);
+  return (
+    item === ROCK ||
+    item === SNOWBALL ||
+    item === PLANK ||
+    item === FEATHER ||
+    item === STRING ||
+    isBlockItem(item)
+  );
 }
 
 function attachToolToRig(rig: Rig, name: string, item: number): void {
@@ -1230,6 +1314,11 @@ function attachToolToRig(rig: Rig, name: string, item: number): void {
   if (isLumpItem(item)) {
     // sits just past the hand (arm spans y 0..-0.675), no handle pitch
     rig.tool.position.set(0, -0.7, 0.16);
+  } else if (item === BOW) {
+    // gripped at the riser and held nearly upright (limbs vertical), so it
+    // reads as a bow aimed forward rather than a head-up tool
+    rig.tool.position.set(0, -0.5, 0.14);
+    rig.tool.rotation.x = Math.PI * 0.06;
   } else {
     // grip near the hand; positive rotation.x takes local +y (the tool
     // head) forward, so this is a head-up 54-degree hold
@@ -1248,6 +1337,27 @@ function cameraForward(): { x: number; y: number; z: number } {
 let equippedItem: number = HAND;
 let firstPerson = false;
 let swingT = 0;
+// bow draw: holding right-click with a bow equipped charges a shot; release
+// looses it. bowDraw is the eased fraction used for the view model + HUD.
+let bowDrawing = false;
+let bowDrawStartMs = 0;
+let bowDraw = 0;
+// third-person free-look: hold Alt to orbit the camera around the character.
+// playerHeading is the body's facing/movement heading; it tracks the camera
+// except while orbiting, when it freezes so the body stays put. On release the
+// camera eases back behind the body.
+let orbiting = false;
+let orbitReturning = false;
+let playerHeading = 0;
+// eased head yaw (relative to the body) while orbiting, so it follows the
+// camera within a neck's range and never snaps; head pitch always tracks the
+// look angle like Minecraft
+let orbitHeadYaw = 0;
+let orbitHeadPitch = 0;
+// the third-person camera usually frames the character tilted slightly down
+// from above; offset the head pitch by that much so this resting angle reads as
+// the character looking straight ahead (≈20°)
+const HEAD_PITCH_BIAS = 0.35;
 // server-authoritative slot inventory, mirrored from inventory messages:
 // 9 hotbar slots + 27 storage slots, each empty or one stack
 let invSlots: InvSlot[] = Array.from({ length: INV_SLOTS }, () => null);
@@ -1263,6 +1373,17 @@ let craftSize = 0;
 
 function heldStack(): InvSlot {
   return invSlots[selectedSlot] ?? null;
+}
+
+// total arrows across the whole inventory (ammo isn't tied to the held slot)
+function arrowCount(): number {
+  let n = 0;
+  for (const slot of invSlots) {
+    if (slot && slot.item === ARROW) {
+      n += slot.count;
+    }
+  }
+  return n;
 }
 
 // resolve a drag slot index: 0..INV_SLOTS-1 is the inventory, CRAFT_GRID_BASE..
@@ -1343,6 +1464,11 @@ function refreshViewModel(): void {
       // cupped on top of the fist (the hand ends up near (0, -0.2, -0.11))
       tool.position.set(0, -0.08, -0.16);
       tool.rotation.set(-0.25, -0.4, 0.15);
+    } else if (equippedItem === BOW) {
+      // the bow's limbs face the holder by default; spin it 180° about vertical
+      // so they point forward (down-range) in the first-person hold
+      tool.position.set(-0.02, -0.06, -0.1);
+      tool.rotation.set(-0.2, Math.PI, 0);
     } else {
       // tools hang with the handle vertical and the sprite face toward the
       // camera — a clean, readable hold. A small forward pitch gives a bit of
@@ -1369,6 +1495,9 @@ function syncEquipped(): void {
     return;
   }
   equippedItem = item;
+  if (item !== BOW) {
+    bowDrawing = false;
+  }
   attachToolToRig(selfRig, "self", item);
   refreshViewModel();
   void client.streams.send({ type: "equip", item }).catch(() => {});
@@ -1394,6 +1523,46 @@ for (let slot = 0; slot < HOTBAR_SLOTS; slot++) {
 }
 noa.inputs.bind("toggle-view", "KeyV");
 noa.inputs.down.on("toggle-view", () => setFirstPerson(!firstPerson));
+
+// hold Alt to orbit the camera around your character (third person only)
+noa.inputs.bind("orbit", "AltLeft", "AltRight");
+noa.inputs.down.on("orbit", () => {
+  if (!firstPerson && !inventoryOpen) {
+    orbiting = true;
+    orbitReturning = false;
+  }
+});
+noa.inputs.up.on("orbit", () => {
+  if (orbiting) {
+    orbiting = false;
+    orbitReturning = true;
+  }
+});
+
+// Reconcile the body's heading with the camera each frame. Normally they move
+// together; while orbiting the body freezes so the camera can swing around it;
+// on release the camera eases back to behind the body. noa applies mouse input
+// to the camera before "beforeRender", so reading camera.heading here is current.
+function updateOrbit(dtSec: number): void {
+  if (firstPerson) {
+    orbiting = false;
+    orbitReturning = false;
+    playerHeading = noa.camera.heading;
+    return;
+  }
+  if (orbiting) {
+    return; // camera orbits via the mouse; body heading stays frozen
+  }
+  if (orbitReturning) {
+    noa.camera.heading = lerpAngle(noa.camera.heading, playerHeading, 1 - Math.exp(-dtSec * 18));
+    if (Math.abs(lerpAngle(noa.camera.heading, playerHeading, 1) - noa.camera.heading) < 0.01) {
+      noa.camera.heading = playerHeading;
+      orbitReturning = false;
+    }
+    return;
+  }
+  playerHeading = noa.camera.heading;
+}
 
 // throw the equipped item along the camera's view direction (Q / middle mouse)
 noa.inputs.down.on("mid-fire", () => {
@@ -1425,6 +1594,16 @@ type ProjectileView = {
 
 const projectileViews = new Map<number, ProjectileView>();
 const dropViews = new Map<number, ProjectileView>();
+// reused each frame to aim flying arrows along their travel direction
+const ARROW_UP = new Vector3(0, 1, 0);
+const arrowDir = new Vector3();
+// reused to keep the drawn bow upright + aimed regardless of the draw arm pose
+const bowAimQuat = new Quaternion();
+const bowAimEuler = new Euler();
+// render-space direction of the last arrow we loosed, used to orient a freshly
+// spawned arrow before it has moved far enough to derive its heading (otherwise
+// it shows the geometry's default +y, i.e. pointing straight up, for a frame)
+const lastArrowDir = new Vector3(0, 0, -1);
 
 function applyEntityViews(
   views: Map<number, ProjectileView>,
@@ -1445,6 +1624,10 @@ function applyEntityViews(
       continue;
     }
     mesh.scale.setScalar(scale);
+    // a new arrow starts aimed along its launch direction, not the default up
+    if (prefix === "proj" && snap.item === ARROW) {
+      mesh.quaternion.setFromUnitVectors(ARROW_UP, lastArrowDir);
+    }
     const entityId = ents.add([snap.x, snap.y, snap.z], 0.2, 0.2, mesh, [0, 0, 0], false, false);
     views.set(snap.id, { entityId, mesh, target: snap });
   }
@@ -1647,7 +1830,7 @@ function sampleInput(): CharInput {
   const ui = inventoryOpen;
   return {
     seq: nextSeq++,
-    heading: noa.camera.heading,
+    heading: playerHeading,
     fwd: !ui && state.forward === true,
     back: !ui && state.backward === true,
     left: !ui && state.left === true,
@@ -1940,6 +2123,7 @@ noa.on("beforeRender", () => {
   const now = performance.now();
   const dtSec = Math.min(0.1, (now - lastFrameAt) / 1000);
   lastFrameAt = now;
+  updateOrbit(dtSec);
   pumpSim(dtSec * 1000);
 
   // local player: interpolate between the last two predicted sim states,
@@ -1957,10 +2141,37 @@ noa.on("beforeRender", () => {
   );
   // rigs face local +z (skinview3d convention); in render space the
   // game heading h maps to a yaw of PI - h (see noa/lib/rendering.ts)
-  selfRig.root.rotation.y = Math.PI - noa.camera.heading;
+  selfRig.root.rotation.y = Math.PI - playerHeading;
   const selfSpeed = Math.hypot(predicted.vx, predicted.vz);
   const selfMoving = onGround(predicted) && selfSpeed > 0.4;
   animateRig(selfRig, selfSpeed, onGround(predicted), dtSec, swingT > 0);
+  // while orbiting (Alt held), the body stays put but the head turns to look
+  // toward the camera. Like Minecraft's head/body split, the turn is capped at
+  // a neck's range (~75°) so it never twists past the shoulder, and it's eased
+  // so passing directly behind sweeps smoothly instead of snapping sides.
+  const headWant = orbiting || orbitReturning;
+  const headDelta = Math.atan2(
+    Math.sin(playerHeading - noa.camera.heading),
+    Math.cos(playerHeading - noa.camera.heading),
+  );
+  const headYawTarget = headWant ? Math.max(-1.3, Math.min(1.3, headDelta)) : 0;
+  // head pitch tracks the look angle (Minecraft maps look pitch straight to
+  // head.xRot), biased so the resting third-person camera (tilted slightly down
+  // at the character) reads as the face looking straight ahead
+  const headPitchTarget = Math.max(-1.3, Math.min(1.3, noa.camera.pitch - HEAD_PITCH_BIAS));
+  const headBlend = 1 - Math.exp(-dtSec * 12);
+  orbitHeadYaw += (headYawTarget - orbitHeadYaw) * headBlend;
+  orbitHeadPitch += (headPitchTarget - orbitHeadPitch) * headBlend;
+  selfRig.head.rotation.y = orbitHeadYaw;
+  selfRig.head.rotation.x = orbitHeadPitch;
+  // drawing/loosing a bow animates the arms in third person too (the first-
+  // person view model has its own draw motion)
+  if (equippedItem === BOW && bowDraw > 0.01) {
+    applyBowDrawToRig(selfRig, bowDraw, noa.camera.pitch);
+  } else if (equippedItem === BOW && selfRig.tool) {
+    // not drawing: restore the resting hold (the draw counter-rotates the bow)
+    selfRig.tool.rotation.set(Math.PI * 0.06, 0, 0);
+  }
 
   // splash on crossing the water surface, scaled by entry speed; leaving
   // the water gets a softer one
@@ -1991,6 +2202,12 @@ noa.on("beforeRender", () => {
     }
   }
 
+  // bow draw: ease the pull fraction toward the held target and drive the
+  // charge meter (the eased value also poses the view model below)
+  const drawTarget = bowDrawing ? Math.min(1, (now - bowDrawStartMs) / BOW_DRAW_MS) : 0;
+  bowDraw += (drawTarget - bowDraw) * (1 - Math.exp(-dtSec * 18));
+  updateChargeBar(bowDrawing ? drawTarget : 0, bowDrawing);
+
   // swing: third person uses the ported HitAnimation; first person is a
   // fore-aft chop — the tool thrusts forward and the head pitches down, then
   // returns. No sideways slide or yaw sweep: that reads as a sword slash,
@@ -2015,6 +2232,16 @@ noa.on("beforeRender", () => {
       );
       viewModel.rotation.set(a, 0.3, 0);
     }
+  } else if (bowDraw > 0.01 && viewModel) {
+    // drawing (or easing back from a release): pull the bow toward the eye
+    // and tilt it up to aim
+    const d = bowDraw;
+    viewModel.position.set(
+      VIEW_MODEL_POS[0] - 0.05 * d,
+      VIEW_MODEL_POS[1] + 0.06 * d,
+      VIEW_MODEL_POS[2] + 0.12 * d,
+    );
+    viewModel.rotation.set(-0.12 * d, 0.3, 0);
   } else if (viewModel) {
     if (selfMoving) {
       vmBobPhase += dtSec * (selfSpeed > RUN_SPEED_THRESHOLD ? 16 : 8);
@@ -2032,17 +2259,28 @@ noa.on("beforeRender", () => {
     viewModel.rotation.set(0, 0.3, vmBob.x * 0.6);
   }
 
-  // projectiles: ease toward broadcast positions, tumbling as they fly
+  // projectiles: ease toward broadcast positions. Arrows nose along their
+  // travel direction (point-first, arcing down); thrown items tumble.
   const pt = 1 - Math.exp(-dtSec * 18);
   for (const view of projectileViews.values()) {
     const current = ents.getPosition(view.entityId);
-    ents.setPosition(
-      view.entityId,
-      current[0] + (view.target.x - current[0]) * pt,
-      current[1] + (view.target.y - current[1]) * pt,
-      current[2] + (view.target.z - current[2]) * pt,
-    );
-    view.mesh.rotation.x += dtSec * 9;
+    const nx = current[0] + (view.target.x - current[0]) * pt;
+    const ny = current[1] + (view.target.y - current[1]) * pt;
+    const nz = current[2] + (view.target.z - current[2]) * pt;
+    ents.setPosition(view.entityId, nx, ny, nz);
+    if (view.target.item === ARROW) {
+      // aim the shaft (+y is the arrowhead) along the direction of travel
+      // (toward the next broadcast position); hold the last aim when nearly
+      // there. Render space negates Z vs world (the rig's PI - heading
+      // convention), so flip the Z delta before orienting the mesh.
+      arrowDir.set(view.target.x - nx, view.target.y - ny, -(view.target.z - nz));
+      if (arrowDir.lengthSq() > 1e-6) {
+        arrowDir.normalize();
+        view.mesh.quaternion.setFromUnitVectors(ARROW_UP, arrowDir);
+      }
+    } else {
+      view.mesh.rotation.x += dtSec * 9;
+    }
   }
 
   // world drops: float in place, bobbing and slowly spinning
@@ -2148,14 +2386,31 @@ const helpPanel = uiDiv(
 );
 helpPanel.textContent =
   "WASD move · shift sprint · space jump/swim\n" +
-  "LMB dig · RMB place held block · Q throw\n" +
-  "E inventory · V first/third person · scroll zoom";
+  "LMB dig / hold to draw bow · RMB place block · Q throw\n" +
+  "E inventory · V first/third person · scroll zoom · hold Alt to orbit";
 
 const crosshair = uiDiv(
   "top: 50%; left: 50%; width: 14px; height: 14px; margin: -7px 0 0 -7px;" +
     "background: radial-gradient(circle, rgba(255,255,255,0.9) 2px, transparent 3px);",
 );
 void crosshair;
+
+// bow charge meter: a thin bar just under the crosshair, shown only while
+// drawing; fills over a full draw and turns gold at full power
+const chargeBar = uiDiv(
+  "bottom: 96px; left: 50%; transform: translateX(-50%); width: 120px; height: 6px;" +
+    "background: rgba(0,0,0,0.5); border-radius: 3px; overflow: hidden;" +
+    "opacity: 0; transition: opacity 0.12s;",
+);
+const chargeFill = document.createElement("div");
+chargeFill.style.cssText = "height: 100%; width: 0%; background: #fff; border-radius: 3px;";
+chargeBar.appendChild(chargeFill);
+
+function updateChargeBar(frac: number, active: boolean): void {
+  chargeBar.style.opacity = active ? "1" : "0";
+  chargeFill.style.width = `${Math.round(frac * 100)}%`;
+  chargeFill.style.background = frac >= 0.999 ? "#ffd24a" : "#ffffff";
+}
 
 const toast = uiDiv(
   "bottom: 168px; left: 50%; transform: translateX(-50%); padding: 6px 14px;" +
@@ -2190,6 +2445,10 @@ const ITEM_ICON_FILES: Record<number, string> = {
   [SNOWBALL]: "/assets/items/snowball.png",
   [PLANK]: "/assets/items/plank.png",
   [STICK]: "/assets/items/stick.png",
+  [BOW]: "/assets/items/bow.png",
+  [ARROW]: "/assets/items/arrow.png",
+  [FEATHER]: "/assets/items/feather.png",
+  [STRING]: "/assets/items/string.png",
 };
 
 function makeIconElement(item: number): Node {
@@ -2666,12 +2925,29 @@ function primaryAction(fromHold: boolean): void {
   void client.streams.send({ type: "hit", x, y, z }).catch(() => {});
 }
 
-noa.inputs.down.on("fire", () => primaryAction(false));
+noa.inputs.down.on("fire", () => {
+  // a bow draws on hold and looses on release (left click) — no melee swing
+  if (equippedItem === BOW) {
+    if (fireSuppressed()) {
+      return;
+    }
+    if (arrowCount() <= 0) {
+      showNotice("Out of arrows — craft more (rock + stick + feather)");
+      return;
+    }
+    bowDrawing = true;
+    bowDrawStartMs = performance.now();
+    playWhoosh(0.12);
+    return;
+  }
+  primaryAction(false);
+});
 
-// hold to keep mining/attacking: re-trigger at swing cadence while held
+// hold to keep mining/attacking: re-trigger at swing cadence while held (but a
+// held bow is drawing, not mining)
 setInterval(() => {
   const state = noa.inputs.state as Record<string, boolean>;
-  if (state.fire === true && swingT <= 0 && !inventoryOpen) {
+  if (state.fire === true && swingT <= 0 && !inventoryOpen && equippedItem !== BOW) {
     primaryAction(true);
   }
 }, 80);
@@ -2705,6 +2981,30 @@ noa.inputs.down.on("alt-fire", () => {
   predictEdit(itemToBlock(held.item), x, y, z);
   void client.streams
     .send({ type: "place", item: held.item, slot: selectedSlot, x, y, z })
+    .catch(() => {});
+});
+
+// release the bow (left click up): loose an arrow whose power is the fraction
+// of a full draw. No swing animation — the draw-and-release pose is enough.
+noa.inputs.up.on("fire", () => {
+  if (!bowDrawing) {
+    return;
+  }
+  bowDrawing = false;
+  if (inventoryOpen || arrowCount() <= 0) {
+    return;
+  }
+  const charge = Math.min(1, (performance.now() - bowDrawStartMs) / BOW_DRAW_MS);
+  if (charge < BOW_MIN_CHARGE) {
+    return;
+  }
+  playBowShot(0.35 + charge * 0.3);
+  const dir = cameraForward();
+  // remember the launch heading (render space: Z flipped) to seed the arrow's
+  // orientation the instant it spawns
+  lastArrowDir.set(dir.x, dir.y, -dir.z).normalize();
+  void client.streams
+    .send({ type: "fireArrow", charge, dx: dir.x, dy: dir.y, dz: dir.z })
     .catch(() => {});
 });
 

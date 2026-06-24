@@ -4,7 +4,20 @@
 // matches when the grid's filled cells form its pattern (shaped) or hold its
 // exact ingredient multiset (shapeless).
 
-import { blockToItem, PLANK, ROCK, SNOWBALL, STICK, AXE, PICKAXE, SHOVEL } from "./items.js";
+import {
+  ARROW,
+  AXE,
+  BOW,
+  blockToItem,
+  FEATHER,
+  PICKAXE,
+  PLANK,
+  ROCK,
+  SHOVEL,
+  SNOWBALL,
+  STICK,
+  STRING,
+} from "./items.js";
 import { CRAFTING_TABLE_ID, LOG_ID, SNOW_ID, STONE_ID } from "./terrain.js";
 
 // invMove slot indices: 0..35 are inventory, CRAFT_GRID_BASE..+8 are the
@@ -90,6 +103,26 @@ export const RECIPES: readonly Recipe[] = [
     pattern: [[PLANK], [STICK], [STICK]],
     out: SHOVEL,
     count: 1,
+  },
+  // Bow — three sticks bent into the limbs, three string for the bowstring
+  // (Minecraft's shape). Needs the 3x3 table.
+  {
+    kind: "shaped",
+    pattern: [
+      [0, STICK, STRING],
+      [STICK, 0, STRING],
+      [0, STICK, STRING],
+    ],
+    out: BOW,
+    count: 1,
+  },
+  // Arrow — a rock arrowhead (our flint), a stick shaft, a feather fletching;
+  // yields four, like Minecraft. Needs the 3x3 table (three tall).
+  {
+    kind: "shaped",
+    pattern: [[ROCK], [STICK], [FEATHER]],
+    out: ARROW,
+    count: 4,
   },
 ];
 
