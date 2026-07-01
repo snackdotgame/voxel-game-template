@@ -15,12 +15,6 @@ Imported skins:
   Author: Belen1
   License: CC 0 (1.0)
 
-- farmer-survivor.png
-  SkinsDB id: 2093
-  Name: Farmer Survivor
-  Author: yotuderconnect
-  License: CC 0 (1.0)
-
 - winter-girl.png
   SkinsDB id: 2346
   Name: Warmeth girl Winter

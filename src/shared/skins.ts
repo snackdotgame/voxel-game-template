@@ -2,13 +2,7 @@
 // pick and every client resolves the same index to the same texture. A skin
 // travels on the wire as an index into this list, so entries must never be
 // reordered or removed — only appended.
-export const SKIN_IDS = [
-  "builder",
-  "casual-matt",
-  "candy-girl",
-  "farmer-survivor",
-  "winter-girl",
-] as const;
+export const SKIN_IDS = ["builder", "casual-matt", "candy-girl", "winter-girl"] as const;
 
 export function isValidSkin(value: unknown): value is number {
   return Number.isInteger(value) && (value as number) >= 0 && (value as number) < SKIN_IDS.length;
