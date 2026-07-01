@@ -18,6 +18,7 @@ import {
 import { client } from "snack:client";
 import { Engine } from "./noa/index.js";
 import { disposeObject3D } from "./noa/lib/rendering.js";
+import { setupMobileControls } from "./mobile.js";
 import {
   type BlockEdit,
   type PlayerSnapshot,
@@ -1315,10 +1316,11 @@ function attachToolToRig(rig: Rig, name: string, item: number): void {
     // sits just past the hand (arm spans y 0..-0.675), no handle pitch
     rig.tool.position.set(0, -0.7, 0.16);
   } else if (item === BOW) {
-    // gripped at the riser and held nearly upright (limbs vertical), so it
-    // reads as a bow aimed forward rather than a head-up tool
-    rig.tool.position.set(0, -0.5, 0.14);
-    rig.tool.rotation.x = Math.PI * 0.06;
+    // Minecraft's walking bow carry: held angled diagonally across the hand,
+    // not bolt-upright (vanilla bow thirdperson_righthand ≈ [-80, 260, -40]).
+    // Tilt the bow forward and roll it so it lies on a diagonal.
+    rig.tool.position.set(0, -0.5, 0.12);
+    rig.tool.rotation.set(Math.PI * 0.3, 0, -Math.PI * 0.28);
   } else {
     // grip near the hand; positive rotation.x takes local +y (the tool
     // head) forward, so this is a head-up 54-degree hold
@@ -3006,6 +3008,18 @@ noa.inputs.up.on("fire", () => {
   void client.streams
     .send({ type: "fireArrow", charge, dx: dir.x, dy: dir.y, dz: dir.z })
     .catch(() => {});
+});
+
+// Optional on-screen touch controls (no-op on desktop). Installed last so all
+// the input handlers, HUD elements, and toggles it wires into already exist.
+setupMobileControls({
+  noa,
+  hotbarEl,
+  hotbarSlots,
+  helpPanel,
+  selectSlot,
+  toggleView: () => setFirstPerson(!firstPerson),
+  openInventory: () => setInventoryOpen(!inventoryOpen),
 });
 
 /*

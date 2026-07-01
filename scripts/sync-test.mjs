@@ -10,10 +10,10 @@ const resolveFrom =
 const require = createRequire(resolveFrom);
 const { chromium } = require("playwright");
 
-const SHELL_URL = process.env.MINION_SHELL_URL ?? "http://127.0.0.1:3030/";
+const SHELL_URL = process.env.SNACK_SHELL_URL ?? "http://127.0.0.1:3030/";
 // the vite client port inside the host shell iframe; set alongside
-// MINION_SHELL_URL when testing an isolated dev stack on other ports
-const CLIENT_PORT = process.env.MINION_CLIENT_PORT ?? "3031";
+// SNACK_SHELL_URL when testing an isolated dev stack on other ports
+const CLIENT_PORT = process.env.SNACK_CLIENT_PORT ?? "3031";
 const N = 5;
 
 let failures = 0;
@@ -302,12 +302,12 @@ try {
 
   // --- phase 7: convergence under degraded network ---
   log("phase 7: degraded network");
-  await players[0].page.getByRole("button", { name: "Open Minion debug menu" }).click();
+  await players[0].page.getByRole("button", { name: "Open Snack debug menu" }).click();
   await players[0].page.getByLabel("Latency ms").fill("120");
   await players[0].page.getByLabel("Jitter ms").fill("30");
   await players[0].page.getByLabel("Datagram loss %").fill("10");
   await players[0].page.getByRole("button", { name: "Apply" }).click();
-  await players[0].page.getByRole("button", { name: "Close Minion debug menu" }).click();
+  await players[0].page.getByRole("button", { name: "Close Snack debug menu" }).click();
   await Promise.all(
     players.slice(0, 2).map(async (p, i) => {
       await p.frame.evaluate(
@@ -322,9 +322,9 @@ try {
       await p.page.keyboard.up("w");
     }),
   );
-  await players[0].page.getByRole("button", { name: "Open Minion debug menu" }).click();
+  await players[0].page.getByRole("button", { name: "Open Snack debug menu" }).click();
   await players[0].page.getByRole("button", { name: "None" }).click();
-  await players[0].page.getByRole("button", { name: "Close Minion debug menu" }).click();
+  await players[0].page.getByRole("button", { name: "Close Snack debug menu" }).click();
   await players[0].page.waitForTimeout(3000); // converge
   await crossCheckPositions("after movement under 120ms/30ms/10% loss", 0.9);
 

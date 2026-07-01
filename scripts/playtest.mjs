@@ -1,6 +1,6 @@
-// Multiplayer smoke test driven through the Minion dev host shell.
+// Multiplayer smoke test driven through the Snack dev host shell.
 //
-// Prereqs: `npm run dev` (vite on :3031, minion dev on :3030) and a Playwright
+// Prereqs: `npm run dev` (vite on :3031, snack dev on :3030) and a Playwright
 // install to borrow. Point PLAYWRIGHT_RESOLVE_FROM at any package.json whose
 // node_modules contains playwright, then run: node scripts/playtest.mjs
 import { createRequire } from "node:module";
@@ -11,10 +11,10 @@ const resolveFrom =
 const require = createRequire(resolveFrom);
 const { chromium } = require("playwright");
 
-const SHELL_URL = process.env.MINION_SHELL_URL ?? "http://127.0.0.1:3030/";
+const SHELL_URL = process.env.SNACK_SHELL_URL ?? "http://127.0.0.1:3030/";
 // the vite client port inside the host shell iframe; set alongside
-// MINION_SHELL_URL when testing an isolated dev stack on other ports
-const CLIENT_PORT = process.env.MINION_CLIENT_PORT ?? "3031";
+// SNACK_SHELL_URL when testing an isolated dev stack on other ports
+const CLIENT_PORT = process.env.SNACK_CLIENT_PORT ?? "3031";
 const SHOTS = new URL("../.playtest-shots/", import.meta.url).pathname;
 mkdirSync(SHOTS, { recursive: true });
 
@@ -48,7 +48,7 @@ async function openPlayer(browser, label) {
     null,
     { timeout: 30000 },
   );
-  log(`${label}: connected to minion server`);
+  log(`${label}: connected to snack server`);
   return { context, page, frame, errors, label };
 }
 
@@ -612,12 +612,12 @@ try {
   // is proven by the knockback check above, which corrects the victim's
   // client through a rollback). Before redundancy this same run produced a
   // rollback for every lost packet (~14 over this window at 20% loss).
-  await p1.page.getByRole("button", { name: "Open Minion debug menu" }).click();
+  await p1.page.getByRole("button", { name: "Open Snack debug menu" }).click();
   await p1.page.getByLabel("Latency ms").fill("150");
   await p1.page.getByLabel("Jitter ms").fill("40");
   await p1.page.getByLabel("Datagram loss %").fill("20");
   await p1.page.getByRole("button", { name: "Apply" }).click();
-  await p1.page.getByRole("button", { name: "Close Minion debug menu" }).click();
+  await p1.page.getByRole("button", { name: "Close Snack debug menu" }).click();
   log("network simulation on: 150ms latency, 40ms jitter, 20% datagram loss");
 
   const rollbacksBefore = await p1.frame.evaluate(() => window.__voxels.rollbacks());
@@ -651,9 +651,9 @@ try {
   );
 
   // restore a clean network before the disconnect test
-  await p1.page.getByRole("button", { name: "Open Minion debug menu" }).click();
+  await p1.page.getByRole("button", { name: "Open Snack debug menu" }).click();
   await p1.page.getByRole("button", { name: "None" }).click();
-  await p1.page.getByRole("button", { name: "Close Minion debug menu" }).click();
+  await p1.page.getByRole("button", { name: "Close Snack debug menu" }).click();
   log("network simulation reset to none");
 
   // disconnect: close player3, others should drop to 1 remote. Usually the

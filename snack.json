@@ -1,0 +1,25 @@
+{
+  "$schema": "./node_modules/@snack-game/cli/snack.schema.json",
+  "version": 1,
+  "assets": {
+    "directory": "assets"
+  },
+  "server": {
+    "entry": "src/server.ts"
+  },
+  "client": {
+    "entry": "src/client.ts"
+  },
+  "game": {
+    "maxPlayers": {
+      "lowerLimit": 1,
+      "upperLimit": 16,
+      "default": 16
+    },
+    "name": "Noa Voxels",
+    "visibility": "private",
+    "slug": "noa-voxels",
+    "titleImage": "snack.svg",
+    "id": "bab1be3c-4113-4942-a2cd-9e62f690850a"
+  }
+}

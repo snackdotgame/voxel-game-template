@@ -1,7 +1,7 @@
 # Noa Voxels
 
 A multiplayer voxel sandbox built on [noa-engine](https://github.com/fenomas/noa) and the
-[Minion](https://minion.game) platform. Run around a procedurally generated voxel world in third
+[Snack](https://snack.game) platform. Run around a procedurally generated voxel world in third
 person with other players, dig and place blocks, and watch everyone's Minecraft-style characters
 animate as they move. Block edits are shared live and replayed to anyone who joins later.
 
@@ -34,16 +34,16 @@ Movement is **server-authoritative with client-side prediction and rollback**, r
   counter.
 - `src/server.ts` — steps each player's authoritative sim from received inputs (burst-buffered
   and rate-capped), broadcasts 20 Hz state snapshots over **datagrams**, and owns the edit log.
-  Connection liveness is owned by the Minion runtime (QUIC keep-alives plus app-level
+  Connection liveness is owned by the Snack runtime (QUIC keep-alives plus app-level
   ping/pong force-disconnect a dead client within ~20s), so a player is removed exactly when
   its connection disappears; the game adds no liveness tracking of its own. What it does keep
   is lifecycle UX: characters and inventories are parked by userId so returns and reconnects
   resume where they left off, and players only materialize on their first input, so
   connections that never send anything can't leave phantom bodies floating at spawn.
 
-  Known runtime-layer issue (minion platform, not this game): under long heavy multi-client
+  Known runtime-layer issue (snack platform, not this game): under long heavy multi-client
   sessions on a long-lived dev server, reliable stream delivery to idle clients can starve or
-  stall while datagrams keep flowing. See the minion toolchain client shim (readStreams has no
+  stall while datagrams keep flowing. See the snack toolchain client shim (readStreams has no
   per-stream fault isolation) and dev broker (per-message uni streams with a 16-concurrent
   silent-drop cap).
 
@@ -172,11 +172,19 @@ as browsers require.
 Block textures and the character skin are from
 [Soothing 32](https://content.luanti.org/packages/Zughy/soothing32/) by Zughy and
 contributors, licensed CC BY-SA 4.0 — see `assets/textures/LICENSE-soothing32.txt`. Ore and
-grass/snow side tiles are composited from the pack's base + overlay textures. The tool and
-throwable sprites in `assets/items` are the pack's steel tool / lump / snowball art — see
-`assets/items/LICENSE-items.txt`. Sound effects
-are from [Kenney's Impact Sounds](https://kenney.nl/assets/impact-sounds), CC0 — see
-`assets/sounds/LICENSE-kenney-impact-sounds.txt`.
+grass/snow side tiles are composited from the pack's base + overlay textures. Some tool,
+material, and throwable sprites in `assets/items` are also adapted from Soothing 32; the
+remaining item sprites are original project art — see `assets/items/LICENSE-items.txt`.
+
+Sampled sound effects are credited in the asset license files:
+
+- Footsteps and impacts are from [Kenney](https://kenney.nl)'s
+  [Impact Sounds](https://kenney.nl/assets/impact-sounds), licensed CC0 — see
+  `assets/sounds/LICENSE-kenney-impact-sounds.txt`.
+- Large water splashes are by Michel Baradari / Apollo Music via
+  [OpenGameArt](https://opengameart.org/content/water-splashes), licensed CC BY 3.0,
+  and the small water reentry splash is by jcpmcdonald via OpenGameArt, licensed CC0 —
+  see `assets/sounds/LICENSE-water-splash.txt`.
 
 ## Develop
 
@@ -185,7 +193,7 @@ npm install
 npm run dev
 ```
 
-Then open the Minion host shell at `http://127.0.0.1:3030/`. Each tab gets its own guest
+Then open the Snack host shell at `http://127.0.0.1:3030/`. Each tab gets its own guest
 identity, so two tabs are a two-player game.
 
 Controls: click to capture the mouse, WASD to move, shift to sprint, space to jump,
