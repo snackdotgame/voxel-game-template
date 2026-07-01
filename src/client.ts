@@ -24,6 +24,7 @@ import {
   type PlayerSnapshot,
   parseServerStreamMessage,
 } from "./shared/messages.js";
+import { SKIN_IDS, skinForId } from "./shared/skins.js";
 import {
   type ProjectileSnapshot,
   decodeDrops,
@@ -688,26 +689,17 @@ type CharacterSkin = {
   url: string;
 };
 
-const CHARACTER_SKINS: readonly CharacterSkin[] = [
-  { name: "builder", url: `${TEX}/character.png` },
-  { name: "casual-matt", url: `${TEX}/characters/casual-matt.png` },
-  { name: "candy-girl", url: `${TEX}/characters/candy-girl.png` },
-  { name: "farmer-survivor", url: `${TEX}/characters/farmer-survivor.png` },
-  { name: "winter-girl", url: `${TEX}/characters/winter-girl.png` },
-];
+// Indexed by the wire skin index (see shared/skins.ts); "builder" is the
+// original character.png, the rest live under textures/characters/.
+const CHARACTER_SKINS: readonly CharacterSkin[] = SKIN_IDS.map((name) => ({
+  name,
+  url: name === "builder" ? `${TEX}/character.png` : `${TEX}/characters/${name}.png`,
+}));
 
 const skinImages = new Map<string, Promise<HTMLImageElement>>();
 
-function hashId(id: string): number {
-  let hash = 0;
-  for (let i = 0; i < id.length; i++) {
-    hash = (hash * 31 + id.charCodeAt(i)) >>> 0;
-  }
-  return hash;
-}
-
-function skinForId(id: string): CharacterSkin {
-  return CHARACTER_SKINS[hashId(id) % CHARACTER_SKINS.length];
+function skinByIndex(index: number): CharacterSkin {
+  return CHARACTER_SKINS[index] ?? CHARACTER_SKINS[0];
 }
 
 function loadSkinImage(skin: CharacterSkin): Promise<HTMLImageElement> {
@@ -1729,7 +1721,8 @@ for (const comp of [
   }
 }
 
-const selfRig = buildRig("self", CHARACTER_SKINS[0]);
+// starts in last session's skin; re-dressed if the join screen picks another
+const selfRig = buildRig("self", skinByIndex(storedSkinIndex()));
 ents.addComponent(noa.playerEntity, ents.names.mesh, {
   mesh: selfRig.root,
   offset: [0, 0, 0],
@@ -1876,9 +1869,15 @@ window.addEventListener("pageshow", pumpAfterThaw);
 let inputSuspendedUntil = 0;
 
 function pumpSim(frameMs: number): void {
-  // don't simulate (or burn input seqs) until the server can hear us;
-  // both sides then start the spawn fall from the same first input
-  if (connectionState !== "connected" || performance.now() < inputSuspendedUntil) {
+  // don't simulate (or burn input seqs) until the server can hear us AND a
+  // character has been picked: the body materializes server-side on the
+  // first input, so holding inputs keeps it unspawned (and invisible to
+  // others) until it can appear wearing the chosen skin
+  if (
+    connectionState !== "connected" ||
+    !characterChosen ||
+    performance.now() < inputSuspendedUntil
+  ) {
     simAccumMs = 0;
     return;
   }
@@ -2036,6 +2035,20 @@ const NO_FLASH = new Color(0, 0, 0);
 // id -> display name, from the welcome roster and join messages
 const playerNames = new Map<string, string>();
 
+// id -> picked skin index, from the welcome roster, join, and skin messages;
+// ids with no recorded pick fall back to the deterministic hash
+const playerSkins = new Map<string, number>();
+
+function setPlayerSkin(id: string, skin: number): void {
+  playerSkins.set(id, skin);
+  // datagram snapshots can outrun the stream roster, so the rig may already
+  // exist wearing the fallback skin — re-dress it
+  const remote = remotePlayers.get(id);
+  if (remote) {
+    dressRig(remote.rig, skinByIndex(skin));
+  }
+}
+
 function upsertRemotePlayer(snap: PlayerSnapshot): void {
   const existing = remotePlayers.get(snap.id);
   if (!existing) {
@@ -2053,7 +2066,10 @@ function upsertRemotePlayer(snap: PlayerSnapshot): void {
     return;
   }
 
-  const rig = buildRig(`remote-${snap.id}`, skinForId(snap.id));
+  const rig = buildRig(
+    `remote-${snap.id}`,
+    skinByIndex(playerSkins.get(snap.id) ?? skinForId(snap.id)),
+  );
   attachToolToRig(rig, `remote-${snap.id}`, snap.item);
   const entityId = ents.add(
     [snap.state.x, snap.state.y, snap.state.z],
@@ -2836,7 +2852,11 @@ updateHud();
  */
 
 noa.inputs.bind("inventory", "KeyE");
-noa.inputs.down.on("inventory", () => setInventoryOpen(!inventoryOpen));
+noa.inputs.down.on("inventory", () => {
+  if (characterChosen) {
+    setInventoryOpen(!inventoryOpen);
+  }
+});
 
 // dev/test backdoor: predicted locally like placement, confirmed by the
 // server echo so all clients converge on the same order
@@ -3001,6 +3021,159 @@ setupMobileControls({
 });
 
 /*
+ *      Character select
+ *
+ *  A blocking overlay shown on load: pick a skin before the sim starts
+ *  sending inputs. Bodies materialize server-side on the first input (see
+ *  pumpSim/addPlayer), so until the pick confirms this player is invisible
+ *  to everyone — and then spawns already wearing the chosen skin. The pick
+ *  is remembered per-device and preselected next time.
+ */
+
+const SKIN_LABELS: Record<string, string> = {
+  builder: "Builder",
+  "casual-matt": "Matt",
+  "candy-girl": "Candy",
+  "farmer-survivor": "Farmer",
+  "winter-girl": "Winter",
+};
+
+const SKIN_STORAGE_KEY = "voxels.skin";
+
+let characterChosen = false;
+let chosenSkin: number | null = null;
+let skinChoiceSent = false;
+
+// the pick can confirm before or after the transport is ready; whichever
+// happens second delivers it (connect() calls this again on "connected")
+function sendSkinChoice(): void {
+  if (skinChoiceSent || chosenSkin === null || connectionState !== "connected") {
+    return;
+  }
+  skinChoiceSent = true;
+  void client.streams.send({ type: "skin", skin: chosenSkin }).catch(() => {});
+}
+
+function storedSkinIndex(): number {
+  try {
+    const name = localStorage.getItem(SKIN_STORAGE_KEY);
+    const index = CHARACTER_SKINS.findIndex((skin) => skin.name === name);
+    return index >= 0 ? index : 0;
+  } catch {
+    return 0;
+  }
+}
+
+// Flat "paper doll" preview assembled from the front-face regions of the
+// 64x32 skin (head, torso, arms, legs) onto a 16x32 canvas, CSS-scaled up
+// with image-rendering: pixelated.
+function drawSkinPreview(canvas: HTMLCanvasElement, skin: CharacterSkin): void {
+  void loadSkinImage(skin)
+    .then((img) => {
+      const ctx = canvas.getContext("2d")!;
+      ctx.imageSmoothingEnabled = false;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 8, 8, 8, 8, 4, 0, 8, 8); // head
+      ctx.drawImage(img, 20, 20, 8, 12, 4, 8, 8, 12); // torso
+      ctx.drawImage(img, 44, 20, 4, 12, 0, 8, 4, 12); // right arm
+      ctx.drawImage(img, 4, 20, 4, 12, 4, 20, 4, 12); // right leg
+      // left arm/leg mirror the right ones, like the classic-format rig
+      ctx.scale(-1, 1);
+      ctx.drawImage(img, 44, 20, 4, 12, -16, 8, 4, 12); // left arm
+      ctx.drawImage(img, 4, 20, 4, 12, -12, 20, 4, 12); // left leg
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+    })
+    .catch(() => {});
+}
+
+const pickerBackdrop = document.createElement("div");
+pickerBackdrop.style.cssText =
+  "position: fixed; inset: 0; z-index: 30; display: flex; align-items: center;" +
+  "justify-content: center; background: rgba(0,0,0,0.55); pointer-events: auto;";
+document.body.appendChild(pickerBackdrop);
+
+const pickerPanel = document.createElement("div");
+pickerPanel.style.cssText =
+  "background: rgba(18,20,28,0.94); border: 1px solid rgba(255,255,255,0.15);" +
+  "border-radius: 10px; padding: 16px 18px; box-shadow: 0 12px 40px rgba(0,0,0,0.5);" +
+  "max-width: min(92vw, 560px); text-align: center;";
+pickerBackdrop.appendChild(pickerPanel);
+
+const pickerTitle = document.createElement("div");
+pickerTitle.textContent = "Choose your character";
+pickerTitle.style.cssText = `font: ${UI_FONT}; font-size: 15px; font-weight: 700; color: #fff; margin-bottom: 12px;`;
+pickerPanel.appendChild(pickerTitle);
+
+const pickerRow = document.createElement("div");
+pickerRow.style.cssText =
+  "display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-bottom: 14px;";
+pickerPanel.appendChild(pickerRow);
+
+let selectedSkin = storedSkinIndex();
+const pickerCards: HTMLButtonElement[] = [];
+
+function refreshPickerCards(): void {
+  for (let i = 0; i < pickerCards.length; i++) {
+    const picked = i === selectedSkin;
+    pickerCards[i].style.borderColor = picked ? "#fff" : "rgba(255,255,255,0.25)";
+    pickerCards[i].style.background = picked ? "rgba(60,70,95,0.6)" : "rgba(10,10,16,0.55)";
+  }
+}
+
+for (let i = 0; i < CHARACTER_SKINS.length; i++) {
+  const skin = CHARACTER_SKINS[i];
+  const card = document.createElement("button");
+  card.type = "button";
+  card.style.cssText =
+    "display: flex; flex-direction: column; align-items: center; gap: 6px;" +
+    "padding: 10px 8px 6px; border: 2px solid rgba(255,255,255,0.25); border-radius: 8px;" +
+    "background: rgba(10,10,16,0.55); cursor: pointer; transition: border-color 0.1s;";
+  const preview = document.createElement("canvas");
+  preview.width = 16;
+  preview.height = 32;
+  preview.style.cssText = "width: 64px; height: 128px; image-rendering: pixelated;";
+  drawSkinPreview(preview, skin);
+  card.appendChild(preview);
+  const label = document.createElement("div");
+  label.textContent = SKIN_LABELS[skin.name] ?? skin.name;
+  label.style.cssText = `font: ${UI_FONT}; font-size: 11px; color: rgba(255,255,255,0.85);`;
+  card.appendChild(label);
+  card.addEventListener("click", () => {
+    selectedSkin = i;
+    refreshPickerCards();
+  });
+  pickerRow.appendChild(card);
+  pickerCards.push(card);
+}
+refreshPickerCards();
+
+const playButton = document.createElement("button");
+playButton.type = "button";
+playButton.textContent = "Play";
+playButton.style.cssText =
+  `width: 100%; padding: 9px 0; font: ${UI_FONT}; font-size: 14px; font-weight: 700;` +
+  "color: #08130a; background: rgba(120,220,120,0.9); border: none; border-radius: 6px;" +
+  "cursor: pointer;";
+playButton.addEventListener("click", () => {
+  chosenSkin = selectedSkin;
+  characterChosen = true;
+  try {
+    localStorage.setItem(SKIN_STORAGE_KEY, CHARACTER_SKINS[selectedSkin].name);
+  } catch {
+    // storage can be unavailable in some embeds; the pick still applies
+  }
+  dressRig(selfRig, skinByIndex(selectedSkin));
+  sendSkinChoice();
+  pickerBackdrop.style.display = "none";
+  // the click is a user gesture: enter the game pointer-locked like the
+  // inventory close path; the grace window swallows the re-lock click if
+  // the browser refuses
+  noa.container.setPointerLock(true);
+  fireSuppressedUntil = performance.now() + 1500;
+});
+pickerPanel.appendChild(playButton);
+
+/*
  *      Networking
  */
 
@@ -3117,13 +3290,18 @@ function handleStreamEvent(event: { bytes: Uint8Array; json<T = unknown>(): T })
     } else if (message.type === "welcome") {
       for (const entry of message.players) {
         playerNames.set(entry.id, entry.name);
+        setPlayerSkin(entry.id, entry.skin);
       }
       updateHud();
     } else if (message.type === "join") {
       playerNames.set(message.id, message.name);
+      setPlayerSkin(message.id, message.skin);
       updateHud();
+    } else if (message.type === "skin") {
+      setPlayerSkin(message.id, message.skin);
     } else if (message.type === "leave") {
       playerNames.delete(message.id);
+      playerSkins.delete(message.id);
       removeRemotePlayer(message.id);
     }
   }
@@ -3196,8 +3374,6 @@ async function connect(): Promise<void> {
   void client.connection.then((connection) => {
     myId = connection.connectionId;
     myName = connection.userName;
-    // Wear the same skin everyone else deterministically sees for this id.
-    dressRig(selfRig, skinForId(myId));
     updateHud();
   });
   try {
@@ -3206,6 +3382,8 @@ async function connect(): Promise<void> {
     // while the transport settles (each early loss forces a rollback)
     await new Promise((resolve) => setTimeout(resolve, 300));
     connectionState = "connected";
+    // a pick confirmed while still connecting waits here
+    sendSkinChoice();
   } catch {
     connectionState = "disconnected";
   }

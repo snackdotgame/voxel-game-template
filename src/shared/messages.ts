@@ -1,4 +1,5 @@
 import type { CharState } from "./sim.js";
+import { isValidSkin, skinForId } from "./skins.js";
 
 export const READY_MESSAGE = "ready";
 
@@ -41,6 +42,29 @@ export function parseEquipMessage(value: unknown): EquipMessage | undefined {
   }
   return undefined;
 }
+
+// Client -> server: the character skin picked in the join screen (an index
+// into SKIN_IDS). Usually sent before the first input, i.e. before the
+// player's body materializes server-side.
+export type SkinMessage = {
+  type: "skin";
+  skin: number;
+};
+
+export function parseSkinMessage(value: unknown): SkinMessage | undefined {
+  if (isRecord(value) && value.type === "skin" && isValidSkin(value.skin)) {
+    return { type: "skin", skin: value.skin };
+  }
+  return undefined;
+}
+
+// Server -> clients: a player picked (or changed) their skin after their
+// join was already broadcast.
+export type SkinChangeMessage = {
+  type: "skin";
+  id: string;
+  skin: number;
+};
 
 // Client -> server: melee attack on another player.
 export type AttackMessage = {
@@ -301,6 +325,7 @@ export type EditMessage = {
 export type RosterEntry = {
   id: string;
   name: string;
+  skin: number;
 };
 
 export type WelcomeMessage = {
@@ -314,6 +339,7 @@ export type JoinMessage = {
   type: "join";
   id: string;
   name: string;
+  skin: number;
 };
 
 export type LeaveMessage = {
@@ -330,7 +356,8 @@ export type ServerStreamMessage =
   | InventoryMessage
   | HurtMessage
   | DeathMessage
-  | SwingMessage;
+  | SwingMessage
+  | SkinChangeMessage;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -378,7 +405,11 @@ export function parseServerStreamMessage(value: unknown): ServerStreamMessage | 
     if (Array.isArray(value.players)) {
       for (const entry of value.players) {
         if (isRecord(entry) && typeof entry.id === "string" && typeof entry.name === "string") {
-          players.push({ id: entry.id, name: entry.name });
+          players.push({
+            id: entry.id,
+            name: entry.name,
+            skin: isValidSkin(entry.skin) ? entry.skin : skinForId(entry.id),
+          });
         }
       }
     }
@@ -435,7 +466,15 @@ export function parseServerStreamMessage(value: unknown): ServerStreamMessage | 
     return { type: "inventory", slots, craft };
   }
   if (value.type === "join" && typeof value.id === "string" && typeof value.name === "string") {
-    return { type: "join", id: value.id, name: value.name };
+    return {
+      type: "join",
+      id: value.id,
+      name: value.name,
+      skin: isValidSkin(value.skin) ? value.skin : skinForId(value.id),
+    };
+  }
+  if (value.type === "skin" && typeof value.id === "string" && isValidSkin(value.skin)) {
+    return { type: "skin", id: value.id, skin: value.skin };
   }
   if (value.type === "leave" && typeof value.id === "string") {
     return { type: "leave", id: value.id };

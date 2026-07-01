@@ -49,8 +49,10 @@ import {
   parseHitMessage,
   parseInvMoveMessage,
   parsePlaceMessage,
+  parseSkinMessage,
   parseThrowMessage,
 } from "./shared/messages.js";
+import { skinForId } from "./shared/skins.js";
 import { craftCellOf, isCraftSlot, matchRecipe } from "./shared/recipes.js";
 import {
   SIM_TICK_MS,
@@ -112,6 +114,8 @@ const BLOCK_DAMAGE_RESET_MS = 10_000;
 type Player = {
   name: string;
   userId: string;
+  // character skin index (see shared/skins.ts), picked in the join screen
+  skin: number;
   char: CharState;
   heading: number;
   lastSeq: number;
@@ -183,6 +187,7 @@ type Parked = {
   heading: number;
   item: number;
   hp: number;
+  skin: number;
   at: number;
 };
 
@@ -190,6 +195,9 @@ type World = {
   players: Map<string, Player>;
   // connections that have been sent their welcome/roster
   greeted: Set<string>;
+  // skin picks that arrived before the player's body materialized (the join
+  // screen confirms before the first input), consumed by addPlayer
+  pendingSkins: Map<string, number>;
   // inventories are keyed by userId so they survive reconnects
   inventories: Map<string, InvSlot[]>;
   // characters of removed players, keyed by userId, for seamless resume
@@ -232,6 +240,7 @@ export async function main() {
   const world: World = {
     players: new Map(),
     greeted: new Set(),
+    pendingSkins: new Map(),
     inventories: new Map(),
     parked: new Map(),
     drops: new Map(),
@@ -469,6 +478,22 @@ function handleStream(world: World, event: StreamEvent) {
       (equip.item === 0 || holdsItem(world, event.connection.id, equip.item))
     ) {
       player.item = equip.item;
+    }
+    return;
+  }
+  const skinMsg = parseSkinMessage(value);
+  if (skinMsg) {
+    const player = world.players.get(event.connection.id);
+    if (!player) {
+      // normal case: the join screen confirms before the first input, so
+      // the body doesn't exist yet; addPlayer consumes the pending pick
+      world.pendingSkins.set(event.connection.id, skinMsg.skin);
+    } else if (player.skin !== skinMsg.skin) {
+      player.skin = skinMsg.skin;
+      server.streams.broadcast(
+        { type: "skin", id: event.connection.id, skin: skinMsg.skin },
+        { except: [event.connection.id] },
+      );
     }
     return;
   }
@@ -1282,9 +1307,16 @@ function addPlayer(world: World, connection: Connection) {
   const fresh = parked && server.elapsedMs() - parked.at < PARK_TTL_MS ? parked : undefined;
   world.parked.delete(connection.userId);
 
+  // a pick made in this connection's join screen wins over a parked skin
+  // (the player may have re-picked on reload)
+  const pendingSkin = world.pendingSkins.get(connection.id);
+  world.pendingSkins.delete(connection.id);
+  const skin = pendingSkin ?? fresh?.skin ?? skinForId(connection.id);
+
   world.players.set(connection.id, {
     name: connection.userName,
     userId: connection.userId,
+    skin,
     char: fresh ? fresh.char : spawnState(),
     heading: fresh ? fresh.heading : 0,
     lastSeq: 0,
@@ -1302,7 +1334,7 @@ function addPlayer(world: World, connection: Connection) {
     craftTable: null,
   });
   server.streams.broadcast(
-    { type: "join", id: connection.id, name: connection.userName },
+    { type: "join", id: connection.id, name: connection.userName, skin },
     { except: [connection.id] },
   );
   sendInventory(world, connection.id);
@@ -1319,6 +1351,7 @@ function removePlayer(world: World, id: string) {
       heading: player.heading,
       item: player.item,
       hp: player.hp,
+      skin: player.skin,
       at: server.elapsedMs(),
     });
   }
@@ -1452,7 +1485,7 @@ function syncConnections(world: World) {
     world.greeted.add(connection.id);
     const roster: RosterEntry[] = [];
     for (const [id, player] of world.players) {
-      roster.push({ id, name: player.name });
+      roster.push({ id, name: player.name, skin: player.skin });
     }
     connection.streams.send({ type: "welcome", you: connection.id, players: roster });
   }
@@ -1467,6 +1500,11 @@ function syncConnections(world: World) {
   for (const id of world.greeted) {
     if (!connected.has(id)) {
       world.greeted.delete(id);
+    }
+  }
+  for (const id of world.pendingSkins.keys()) {
+    if (!connected.has(id)) {
+      world.pendingSkins.delete(id);
     }
   }
 }
