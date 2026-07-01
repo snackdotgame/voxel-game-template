@@ -33,7 +33,7 @@
     "voxel-physics-engine": "^0.13.0"
   },
   "devDependencies": {
-    "@snack-game/cli": "^0.1.9",
+    "@snack-game/cli": "^0.1.10",
     "@typescript/native-preview": "7.0.0-dev.20260513.1",
     "esbuild": "0.27.3",
     "oxfmt": "0.47.0",
