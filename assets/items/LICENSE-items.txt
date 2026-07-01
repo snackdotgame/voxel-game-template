@@ -5,5 +5,6 @@ CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0/) -
 originals: default_tool_steelpick, default_tool_steelaxe,
 default_tool_steelshovel, default_clay_lump, default_snowball.
 
-hand.png, arrow.png, bow.png, feather.png, plank.png, stick.png, and
-string.png are original art made for this project.
+hand.png, arrow.png, bow.png, feather.png, plank.png, stick.png,
+string.png, helmet.png, chestplate.png, leggings.png, and boots.png are
+original art made for this project.

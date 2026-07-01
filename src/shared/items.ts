@@ -27,6 +27,10 @@ export const ITEMS = [
   "Arrow",
   "Feather",
   "String",
+  "Helmet",
+  "Chestplate",
+  "Leggings",
+  "Boots",
 ] as const;
 
 export const HAND = 0;
@@ -43,6 +47,13 @@ export const BOW = 8;
 export const ARROW = 9;
 export const FEATHER = 10;
 export const STRING = 11;
+// Wearable armor, one item per body slot (see the Armor section below).
+// Ids stay contiguous HELMET..BOOTS in head-to-toe order — armorPiece()
+// relies on it.
+export const HELMET = 12;
+export const CHESTPLATE = 13;
+export const LEGGINGS = 14;
+export const BOOTS = 15;
 
 // Block items occupy ids 64+blockId so a u8 covers both kinds.
 export const BLOCK_ITEM_BASE = 64;
@@ -269,15 +280,17 @@ export const INV_SLOTS = 36;
 
 export type InvSlot = { item: number; count: number } | null;
 
-// tools don't stack; everything else stacks like Minecraft
+// tools and armor don't stack; everything else stacks like Minecraft
 export function stackLimit(item: number): number {
-  return item === PICKAXE || item === AXE || item === SHOVEL || item === BOW ? 1 : 64;
+  return item === PICKAXE || item === AXE || item === SHOVEL || item === BOW || isArmorItem(item)
+    ? 1
+    : 64;
 }
 
 // slot 0 stays empty so the 1 key is the bare hand, matching the
 // pre-slot hotbar layout (2 pickaxe, 3 axe, 4 shovel, 5 rock, 6 snowball)
 export function starterSlots(): InvSlot[] {
-  const slots: InvSlot[] = Array.from({ length: INV_SLOTS }, () => null);
+  const slots: InvSlot[] = Array.from({ length: INV_SLOTS + ARMOR_SLOTS }, () => null);
   slots[1] = { item: PICKAXE, count: 1 };
   slots[2] = { item: AXE, count: 1 };
   slots[3] = { item: SHOVEL, count: 1 };
@@ -286,4 +299,68 @@ export function starterSlots(): InvSlot[] {
   slots[6] = { item: BOW, count: 1 };
   slots[7] = { item: ARROW, count: 16 };
   return slots;
+}
+
+/*
+ *      Armor
+ *
+ *  Four wear slots appended to the inventory array (indexes ARMOR_BASE..
+ *  +3, head to toe), so equipping rides the ordinary invMove drag-and-drop
+ *  and armor persists with the inventory across reconnects. Each equipped
+ *  piece absorbs a fraction of incoming damage; a full set blocks 60%.
+ */
+
+export const ARMOR_SLOTS = 4;
+export const ARMOR_BASE = INV_SLOTS;
+
+// wear-slot index (0 head .. 3 feet) for an armor item, -1 for anything else
+export function armorPiece(item: number): number {
+  return item >= HELMET && item <= BOOTS ? item - HELMET : -1;
+}
+
+export function isArmorItem(item: number): boolean {
+  return armorPiece(item) >= 0;
+}
+
+export function isArmorIndex(index: number): boolean {
+  return index >= ARMOR_BASE && index < ARMOR_BASE + ARMOR_SLOTS;
+}
+
+// fraction of incoming damage each piece absorbs (helmet, chest, legs, boots)
+const PIECE_REDUCTION = [0.15, 0.25, 0.12, 0.08] as const;
+
+export function armorReduction(inv: readonly InvSlot[]): number {
+  let total = 0;
+  for (let k = 0; k < ARMOR_SLOTS; k++) {
+    const slot = inv[ARMOR_BASE + k];
+    if (slot && armorPiece(slot.item) === k) {
+      total += PIECE_REDUCTION[k];
+    }
+  }
+  return total;
+}
+
+// The four wear slots packed into one int (8 bits per piece, 0 = empty) for
+// the join/roster/armor stream messages, so every client can draw everyone's
+// armor without seeing their inventory.
+export function packArmor(inv: readonly InvSlot[]): number {
+  let packed = 0;
+  for (let k = 0; k < ARMOR_SLOTS; k++) {
+    const slot = inv[ARMOR_BASE + k];
+    if (slot && armorPiece(slot.item) === k) {
+      packed |= slot.item << (k * 8);
+    }
+  }
+  return packed;
+}
+
+export function unpackArmor(packed: number): number[] {
+  return [packed & 0xff, (packed >> 8) & 0xff, (packed >> 16) & 0xff, (packed >> 24) & 0xff];
+}
+
+export function isValidArmorPack(value: unknown): value is number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    return false;
+  }
+  return unpackArmor(value).every((item, k) => item === 0 || armorPiece(item) === k);
 }

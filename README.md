@@ -169,15 +169,14 @@ as browsers require.
 
 ### Asset credits
 
-Block textures and the character skin are from
+Block textures are from
 [Soothing 32](https://content.luanti.org/packages/Zughy/soothing32/) by Zughy and
 contributors, licensed CC BY-SA 4.0 — see `assets/textures/LICENSE-soothing32.txt`. Ore and
 grass/snow side tiles are composited from the pack's base + overlay textures. Some tool,
 material, and throwable sprites in `assets/items` are also adapted from Soothing 32; the
 remaining item sprites are original project art — see `assets/items/LICENSE-items.txt`.
-Additional player skins in `assets/textures/characters` are CC0 skins from the
-[SkinsDB](https://skinsdb.terraqueststudios.net/) database — see
-`assets/textures/characters/LICENSE-skins.txt`.
+Character textures are painted procedurally at runtime from each player's
+character-creator choices, so there are no skin image assets.
 
 Sampled sound effects are credited in the asset license files:
 

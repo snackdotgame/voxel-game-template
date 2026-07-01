@@ -24,7 +24,20 @@ import {
   type PlayerSnapshot,
   parseServerStreamMessage,
 } from "./shared/messages.js";
-import { SKIN_IDS, skinForId } from "./shared/skins.js";
+import {
+  HAIR_BALD,
+  HAIR_BUZZ,
+  HAIR_COLORS,
+  HAIR_LONG,
+  HAIR_PONYTAIL,
+  HAIR_STYLES,
+  SKIN_TONES,
+  appearanceForId,
+  isValidAppearance,
+  packAppearance,
+  unpackAppearance,
+  type Appearance,
+} from "./shared/appearance.js";
 import {
   type ProjectileSnapshot,
   decodeDrops,
@@ -34,15 +47,21 @@ import {
   encodeInputs,
 } from "./shared/netCodec.js";
 import {
+  ARMOR_BASE,
+  ARMOR_SLOTS,
   ARROW,
   AXE,
+  BOOTS,
   BOW,
   BOW_DRAW_MS,
   BOW_MIN_CHARGE,
+  CHESTPLATE,
   FEATHER,
   HAND,
+  HELMET,
   HOTBAR_SLOTS,
   INV_SLOTS,
+  LEGGINGS,
   MAX_HP,
   PICKAXE,
   PLANK,
@@ -51,14 +70,18 @@ import {
   SNOWBALL,
   STICK,
   STRING,
+  armorPiece,
   blockToItem,
   hitDamage,
+  isArmorIndex,
   isThrowable,
   itemName,
   itemToBlock,
   isBlockItem,
+  packArmor,
   requiresPickaxe,
   stackLimit,
+  unpackArmor,
   type InvSlot,
 } from "./shared/items.js";
 import { CRAFT_GRID_BASE, craftCellOf, isCraftSlot, matchRecipe } from "./shared/recipes.js";
@@ -624,6 +647,10 @@ type Rig = {
   idleT: number;
   tool: Group | null;
   skin: MeshLambertMaterial;
+  // what the skin texture currently shows (kept for repaints and to detect
+  // body changes, which need a geometry rebuild)
+  look: number;
+  armor: number;
 };
 
 // Box UV origins (u, v, w, h, d in pixels from top-left) in the classic
@@ -684,78 +711,179 @@ function setBoxUVs(
   box.attributes.uv.needsUpdate = true;
 }
 
-type CharacterSkin = {
-  name: string;
-  url: string;
-};
+/*
+ *      Procedural character painting
+ *
+ *  No skin PNGs: the classic 64x32 texture is painted at runtime from a
+ *  packed appearance (body, skin tone, hair style/color — see
+ *  shared/appearance.ts) plus the player's equipped armor. Regions below
+ *  follow the classic-format unwrap that setBoxUVs applies.
+ */
 
-// Indexed by the wire skin index (see shared/skins.ts); "builder" is the
-// original character.png, the rest live under textures/characters/.
-const CHARACTER_SKINS: readonly CharacterSkin[] = SKIN_IDS.map((name) => ({
-  name,
-  url: name === "builder" ? `${TEX}/character.png` : `${TEX}/characters/${name}.png`,
-}));
+// one shared outfit; armor draws over it
+const SHIRT = "#7d94a5";
+const PANTS = "#46505e";
+const SHOES = "#3b2f25";
+const IRON = "#ccd3d9";
+const IRON_DARK = "#8b939c";
+const EYES = "#47617f";
 
-const skinImages = new Map<string, Promise<HTMLImageElement>>();
-
-function skinByIndex(index: number): CharacterSkin {
-  return CHARACTER_SKINS[index] ?? CHARACTER_SKINS[0];
+function shade(hex: string, f: number): string {
+  const n = parseInt(hex.slice(1), 16);
+  const ch = (v: number) => Math.max(0, Math.min(255, Math.round(v * f)));
+  return `rgb(${ch(n >> 16)}, ${ch((n >> 8) & 0xff)}, ${ch(n & 0xff)})`;
 }
 
-function loadSkinImage(skin: CharacterSkin): Promise<HTMLImageElement> {
-  let load = skinImages.get(skin.url);
-  if (!load) {
-    load = new Promise<HTMLImageElement>((resolve, reject) => {
-      const img = new Image();
-      img.onload = () => resolve(img);
-      img.onerror = () => reject(new Error(`failed to load character skin: ${skin.url}`));
-      img.src = skin.url;
-    });
-    skinImages.set(skin.url, load);
+function paintCharacter(ctx: CanvasRenderingContext2D, look: number, armor: number): void {
+  const a = unpackAppearance(look);
+  const tone = SKIN_TONES[a.tone] ?? SKIN_TONES[0];
+  const hair = HAIR_COLORS[a.hairColor] ?? HAIR_COLORS[0];
+  const fill = (color: string, x: number, y: number, w: number, h: number) => {
+    ctx.fillStyle = color;
+    ctx.fillRect(x, y, w, h);
+  };
+  ctx.clearRect(0, 0, 64, 32);
+
+  // bare skin everywhere first: head block region, then legs/torso/arms
+  fill(tone, 0, 0, 32, 16);
+  fill(tone, 0, 16, 56, 16);
+
+  // face, on the head's front (8,8)-(16,16): brows, eyes (white outer,
+  // iris inner), a nose shadow, and a mouth line
+  fill(shade(hair, 0.9), 9, 10, 2, 1);
+  fill(shade(hair, 0.9), 13, 10, 2, 1);
+  fill("#ffffff", 9, 12, 1, 1);
+  fill(EYES, 10, 12, 1, 1);
+  fill(EYES, 13, 12, 1, 1);
+  fill("#ffffff", 14, 12, 1, 1);
+  fill(shade(tone, 0.88), 11, 13, 2, 1);
+  fill(shade(tone, 0.76), 11, 14, 2, 1);
+
+  // shirt: all torso faces + shoulder tops of the arms as short sleeves
+  fill(SHIRT, 16, 20, 24, 12);
+  fill(SHIRT, 20, 16, 16, 4);
+  fill(shade(SHIRT, 0.85), 16, 31, 24, 1);
+  fill(SHIRT, 40, 20, 16, 5);
+  fill(SHIRT, 44, 16, 4, 4);
+
+  // pants + shoes on the legs (soles use the leg bottom face)
+  fill(PANTS, 0, 20, 16, 9);
+  fill(PANTS, 4, 16, 4, 4);
+  fill(SHOES, 0, 29, 16, 3);
+  fill(SHOES, 8, 16, 4, 4);
+
+  // hair: crown for every style, then per-style sides/back/length
+  if (a.hair !== HAIR_BALD) {
+    fill(hair, 8, 0, 8, 8);
   }
-  return load;
+  if (a.hair === HAIR_BUZZ) {
+    fill(hair, 0, 8, 32, 1);
+  } else if (a.hair !== HAIR_BALD) {
+    fill(hair, 0, 8, 32, 2);
+    fill(hair, 24, 10, 8, 2);
+  }
+  if (a.hair === HAIR_LONG) {
+    // full back of the head, deep sides, and over the shoulders
+    fill(hair, 0, 10, 8, 4);
+    fill(hair, 16, 10, 8, 4);
+    fill(hair, 24, 8, 8, 8);
+    fill(hair, 32, 20, 8, 4);
+    fill(shade(hair, 0.8), 32, 23, 8, 1);
+  } else if (a.hair === HAIR_PONYTAIL) {
+    // a tied tail down the center of the head and upper back
+    fill(hair, 27, 10, 2, 6);
+    fill(hair, 35, 20, 2, 5);
+    fill(shade(hair, 0.8), 35, 24, 2, 1);
+  }
+
+  // armor overlays, head to toe
+  const pieces = unpackArmor(armor);
+  if (pieces[0]) {
+    // helmet: crown + a brow band all around, deeper over sides and back
+    fill(IRON, 8, 0, 8, 8);
+    fill(IRON, 0, 8, 32, 2);
+    fill(IRON_DARK, 8, 9, 8, 1);
+    fill(IRON, 0, 10, 8, 2);
+    fill(IRON, 16, 10, 8, 2);
+    fill(IRON, 24, 10, 8, 2);
+    fill(IRON_DARK, 0, 11, 8, 1);
+    fill(IRON_DARK, 16, 11, 8, 1);
+    fill(IRON_DARK, 24, 11, 8, 1);
+  }
+  if (pieces[1]) {
+    // chestplate: full torso + pauldrons over the sleeves
+    fill(IRON, 16, 20, 24, 12);
+    fill(IRON, 20, 16, 16, 4);
+    fill(IRON_DARK, 16, 28, 24, 1);
+    fill(IRON_DARK, 23, 20, 2, 1);
+    fill(IRON, 40, 20, 16, 4);
+    fill(IRON, 44, 16, 4, 4);
+    fill(IRON_DARK, 40, 23, 16, 1);
+  }
+  if (pieces[2]) {
+    // leggings: upper legs, under the boot line
+    fill(IRON, 0, 20, 16, 7);
+    fill(IRON, 4, 16, 4, 4);
+    fill(IRON_DARK, 0, 26, 16, 1);
+  }
+  if (pieces[3]) {
+    // boots: lower legs + soles
+    fill(IRON_DARK, 0, 28, 16, 1);
+    fill(IRON, 0, 29, 16, 3);
+    fill(IRON_DARK, 8, 16, 4, 4);
+  }
 }
 
-function drawSkin(texture: CanvasTexture, skin: CharacterSkin): void {
-  void loadSkinImage(skin).then((img) => {
-    const canvas = texture.image as HTMLCanvasElement;
-    const ctx = canvas.getContext("2d")!;
-    ctx.clearRect(0, 0, 64, 32);
-    ctx.drawImage(img, 0, 0, 64, 32, 0, 0, 64, 32);
-    texture.needsUpdate = true;
-  });
+// The last confirmed look, remembered per-device. Declared here, above the
+// self rig's module-scope build, because storedLook() runs during module
+// evaluation (a later declaration would be a temporal-dead-zone crash).
+const LOOK_STORAGE_KEY = "voxels.look";
+const DEFAULT_LOOK = packAppearance({ body: 0, tone: 1, hair: 2, hairColor: 1 });
+
+function storedLook(): number {
+  try {
+    const raw = localStorage.getItem(LOOK_STORAGE_KEY);
+    const parsed = raw === null ? NaN : Number(raw);
+    return isValidAppearance(parsed) ? parsed : DEFAULT_LOOK;
+  } catch {
+    return DEFAULT_LOOK;
+  }
 }
 
-function makeSkinMaterial(name: string, skin: CharacterSkin): MeshLambertMaterial {
+function makeSkinMaterial(name: string): MeshLambertMaterial {
   const canvas = document.createElement("canvas");
   canvas.width = 64;
   canvas.height = 32;
   const texture = new CanvasTexture(canvas);
   texture.magFilter = NearestFilter;
   texture.minFilter = NearestFilter;
-  drawSkin(texture, skin);
   const material = noa.rendering.makeStandardMaterial(name);
   material.map = texture;
   return material;
 }
 
-// Swap a rig's existing skin texture (used once our own id is known, so the
-// character we see on ourselves matches what everyone else sees).
-function dressRig(rig: Rig, skin: CharacterSkin): void {
+// Repaint a rig's skin texture for a new appearance and/or armor set.
+function dressRig(rig: Rig, look: number, armor: number): void {
+  rig.look = look;
+  rig.armor = armor;
   const texture = rig.skin.map;
   if (texture instanceof CanvasTexture) {
-    drawSkin(texture, skin);
+    paintCharacter((texture.image as HTMLCanvasElement).getContext("2d")!, look, armor);
+    texture.needsUpdate = true;
   }
 }
 
-function buildRig(name: string, skin: CharacterSkin): Rig {
-  console.debug(`[rig] build ${name} skin=${skin.name}`);
+function buildRig(name: string, look: number, armor = 0): Rig {
+  console.debug(`[rig] build ${name} look=${look} armor=${armor}`);
   const root = new Group();
   root.name = `${name}-root`;
   const body = new Group();
   body.name = `${name}-body`;
   root.add(body);
-  const material = makeSkinMaterial(name, skin);
+  const material = makeSkinMaterial(name);
+  // the slim body hangs 3px arms where the broad one hangs 4px
+  const armW = unpackAppearance(look).body === 1 ? 3 : 4;
+  const armX = ((8 + armW) / 2) * SKIN_PX;
 
   const box = (
     part: string,
@@ -786,6 +914,7 @@ function buildRig(name: string, skin: CharacterSkin): Rig {
 
   const limb = (
     part: string,
+    pxW: number,
     uv: [number, number, number, number, number],
     pivotY: number,
     xOff: number,
@@ -794,25 +923,29 @@ function buildRig(name: string, skin: CharacterSkin): Rig {
     pivot.name = `${name}-${part}-pivot`;
     body.add(pivot);
     pivot.position.set(xOff, pivotY, 0);
-    box(part, 4, 12, 4, uv, pivot, -0.3375);
+    box(part, pxW, 12, 4, uv, pivot, -0.3375);
     return pivot;
   };
 
+  const armUV: [number, number, number, number, number] = [ARM_UV[0], ARM_UV[1], armW, 12, 4];
   // limb sides follow skinview3d: the character faces local +z and its
   // right arm hangs at negative x (the mirror of the old Babylon rig)
   const rig: Rig = {
     root,
     head,
     body,
-    leftArm: limb("left-arm", ARM_UV, 1.305, 0.3375),
-    rightArm: limb("right-arm", ARM_UV, 1.305, -0.3375),
-    leftLeg: limb("left-leg", LEG_UV, 0.675, 0.1125),
-    rightLeg: limb("right-leg", LEG_UV, 0.675, -0.1125),
+    leftArm: limb("left-arm", armW, armUV, 1.305, armX),
+    rightArm: limb("right-arm", armW, armUV, 1.305, -armX),
+    leftLeg: limb("left-leg", 4, LEG_UV, 0.675, 0.1125),
+    rightLeg: limb("right-leg", 4, LEG_UV, 0.675, -0.1125),
     phase: 0,
     idleT: 0,
     tool: null,
     skin: material,
+    look,
+    armor,
   };
+  dressRig(rig, look, armor);
   return rig;
 }
 
@@ -983,6 +1116,10 @@ const ITEM_SPRITES: Record<number, ItemSpriteConfig> = {
   [ARROW]: { url: "/assets/items/arrow.png", size: 0.7, grip: [7, 8] },
   [FEATHER]: { url: "/assets/items/feather.png", size: 0.4 },
   [STRING]: { url: "/assets/items/string.png", size: 0.36 },
+  [HELMET]: { url: "/assets/items/helmet.png", size: 0.45 },
+  [CHESTPLATE]: { url: "/assets/items/chestplate.png", size: 0.5 },
+  [LEGGINGS]: { url: "/assets/items/leggings.png", size: 0.5 },
+  [BOOTS]: { url: "/assets/items/boots.png", size: 0.45 },
 };
 
 function loadImageData(url: string): Promise<ImageData> {
@@ -1361,7 +1498,8 @@ function arrowCount(): number {
 // resolve a drag slot index: 0..INV_SLOTS-1 is the inventory, CRAFT_GRID_BASE..
 // addresses the open crafting grid's cells
 function slotAt(index: number): InvSlot {
-  if (index >= 0 && index < INV_SLOTS) {
+  // the main slots plus the four wear slots appended after them
+  if (index >= 0 && index < INV_SLOTS + ARMOR_SLOTS) {
     return invSlots[index] ?? null;
   }
   if (isCraftSlot(index)) {
@@ -1374,7 +1512,7 @@ function slotAt(index: number): InvSlot {
 }
 
 function setSlotAt(index: number, value: InvSlot): void {
-  if (index >= 0 && index < INV_SLOTS) {
+  if (index >= 0 && index < INV_SLOTS + ARMOR_SLOTS) {
     invSlots[index] = value;
     return;
   }
@@ -1388,7 +1526,7 @@ function setSlotAt(index: number, value: InvSlot): void {
 
 function isMoveSlot(index: number): boolean {
   return (
-    (index >= 0 && index < INV_SLOTS) ||
+    (index >= 0 && index < INV_SLOTS + ARMOR_SLOTS) ||
     (isCraftSlot(index) && craftCellOf(index) < craftGrid.length)
   );
 }
@@ -1721,8 +1859,9 @@ for (const comp of [
   }
 }
 
-// starts in last session's skin; re-dressed if the join screen picks another
-const selfRig = buildRig("self", skinByIndex(storedSkinIndex()));
+// starts as last session's character; the creator screen re-dresses it (or
+// rebuilds it, when the body type changed — see applySelfLook)
+let selfRig = buildRig("self", storedLook());
 ents.addComponent(noa.playerEntity, ents.names.mesh, {
   mesh: selfRig.root,
   offset: [0, 0, 0],
@@ -2035,17 +2174,32 @@ const NO_FLASH = new Color(0, 0, 0);
 // id -> display name, from the welcome roster and join messages
 const playerNames = new Map<string, string>();
 
-// id -> picked skin index, from the welcome roster, join, and skin messages;
-// ids with no recorded pick fall back to the deterministic hash
-const playerSkins = new Map<string, number>();
+// id -> packed appearance / packed armor, from the welcome roster, join,
+// skin, and armor messages; ids with no recorded appearance fall back to
+// the deterministic hash
+const playerLooks = new Map<string, number>();
+const playerArmor = new Map<string, number>();
 
-function setPlayerSkin(id: string, skin: number): void {
-  playerSkins.set(id, skin);
+function setPlayerLook(id: string, look: number): void {
+  playerLooks.set(id, look);
   // datagram snapshots can outrun the stream roster, so the rig may already
-  // exist wearing the fallback skin — re-dress it
+  // exist wearing the fallback appearance
   const remote = remotePlayers.get(id);
   if (remote) {
-    dressRig(remote.rig, skinByIndex(skin));
+    if (unpackAppearance(remote.rig.look).body !== unpackAppearance(look).body) {
+      // arm geometry differs between bodies; the next snapshot rebuilds it
+      removeRemotePlayer(id);
+    } else {
+      dressRig(remote.rig, look, playerArmor.get(id) ?? 0);
+    }
+  }
+}
+
+function setPlayerArmor(id: string, armor: number): void {
+  playerArmor.set(id, armor);
+  const remote = remotePlayers.get(id);
+  if (remote) {
+    dressRig(remote.rig, remote.rig.look, armor);
   }
 }
 
@@ -2068,7 +2222,8 @@ function upsertRemotePlayer(snap: PlayerSnapshot): void {
 
   const rig = buildRig(
     `remote-${snap.id}`,
-    skinByIndex(playerSkins.get(snap.id) ?? skinForId(snap.id)),
+    playerLooks.get(snap.id) ?? appearanceForId(snap.id),
+    playerArmor.get(snap.id) ?? 0,
   );
   attachToolToRig(rig, `remote-${snap.id}`, snap.item);
   const entityId = ents.add(
@@ -2445,6 +2600,10 @@ const ITEM_ICON_FILES: Record<number, string> = {
   [ARROW]: "/assets/items/arrow.png",
   [FEATHER]: "/assets/items/feather.png",
   [STRING]: "/assets/items/string.png",
+  [HELMET]: "/assets/items/helmet.png",
+  [CHESTPLATE]: "/assets/items/chestplate.png",
+  [LEGGINGS]: "/assets/items/leggings.png",
+  [BOOTS]: "/assets/items/boots.png",
 };
 
 function makeIconElement(item: number): Node {
@@ -2648,6 +2807,29 @@ resultTile.root.addEventListener("click", (ev) => {
   void client.streams.send({ type: "craftTake", all: ev.shiftKey }).catch(() => {});
 });
 
+// wear slots: drag a piece in to put it on (slot indexes ARMOR_BASE+piece,
+// so the ordinary invMove drag machinery equips it); a faint glyph shows
+// which piece each slot takes while it's empty
+const armorTiles: Slot[] = [];
+const armorGhosts: HTMLImageElement[] = [];
+{
+  const armorSection = document.createElement("div");
+  armorSection.style.cssText = "display: flex; gap: 5px; margin-bottom: 12px;";
+  invPanel.appendChild(armorSection);
+  for (let piece = 0; piece < ARMOR_SLOTS; piece++) {
+    const slot = makeSlot(armorSection, "");
+    slot.root.dataset.invSlot = String(ARMOR_BASE + piece);
+    slot.root.style.cursor = "grab";
+    const ghost = document.createElement("img");
+    ghost.src = ITEM_ICON_FILES[HELMET + piece] ?? "";
+    ghost.style.cssText =
+      "position: absolute; width: 28px; height: 28px; image-rendering: pixelated; opacity: 0.25;";
+    slot.root.insertBefore(ghost, slot.root.firstChild);
+    armorTiles.push(slot);
+    armorGhosts.push(ghost);
+  }
+}
+
 // panel slot index -> inventory slot index: storage rows first (9-35),
 // then the hotbar mirror row (0-8), like Minecraft's layout
 const panelSlots: Slot[] = [];
@@ -2675,6 +2857,11 @@ function updateInventoryPanel(): void {
   for (let i = 0; i < panelSlots.length; i++) {
     setSlotContent(panelSlots[i], invSlots[i] ?? null);
     panelSlots[i].root.style.borderColor = i === selectedSlot ? "#fff" : "rgba(255,255,255,0.25)";
+  }
+  for (let piece = 0; piece < ARMOR_SLOTS; piece++) {
+    const worn = invSlots[ARMOR_BASE + piece] ?? null;
+    setSlotContent(armorTiles[piece], worn);
+    armorGhosts[piece].style.display = worn ? "none" : "block";
   }
   // crafting grid: show the one matching craftSize, fill its cells, and
   // preview the result the current pattern would yield
@@ -2741,6 +2928,11 @@ function fireSuppressed(): boolean {
 function applyLocalMove(from: number, to: number, one: boolean): void {
   const source = slotAt(from);
   if (!source) {
+    return;
+  }
+  // wear slots only accept their matching armor piece (the server enforces
+  // the same rule)
+  if (isArmorIndex(to) && armorPiece(source.item) !== to - ARMOR_BASE) {
     return;
   }
   const target = slotAt(to);
@@ -3021,119 +3213,220 @@ setupMobileControls({
 });
 
 /*
- *      Character select
+ *      Character creator
  *
- *  A blocking overlay shown on load: pick a skin before the sim starts
- *  sending inputs. Bodies materialize server-side on the first input (see
- *  pumpSim/addPlayer), so until the pick confirms this player is invisible
- *  to everyone — and then spawns already wearing the chosen skin. The pick
- *  is remembered per-device and preselected next time.
+ *  A blocking overlay shown on load: build a character (body, skin tone,
+ *  hair) before the sim starts sending inputs. Bodies materialize
+ *  server-side on the first input (see pumpSim/addPlayer), so until the
+ *  creator confirms this player is invisible to everyone — and then spawns
+ *  already looking like their pick. The pick is remembered per-device.
  */
 
-const SKIN_STORAGE_KEY = "voxels.skin";
-
 let characterChosen = false;
-let chosenSkin: number | null = null;
+let chosenLook: number | null = null;
 let skinChoiceSent = false;
+// our own packed wear slots, mirrored out of the inventory echoes
+let myArmor = 0;
 
 // the pick can confirm before or after the transport is ready; whichever
 // happens second delivers it (connect() calls this again on "connected")
 function sendSkinChoice(): void {
-  if (skinChoiceSent || chosenSkin === null || connectionState !== "connected") {
+  if (skinChoiceSent || chosenLook === null || connectionState !== "connected") {
     return;
   }
   skinChoiceSent = true;
-  void client.streams.send({ type: "skin", skin: chosenSkin }).catch(() => {});
+  void client.streams.send({ type: "skin", skin: chosenLook }).catch(() => {});
 }
 
-function storedSkinIndex(): number {
-  try {
-    const name = localStorage.getItem(SKIN_STORAGE_KEY);
-    const index = CHARACTER_SKINS.findIndex((skin) => skin.name === name);
-    return index >= 0 ? index : 0;
-  } catch {
-    return 0;
+// Dress (or, when the body type changed, rebuild) our own rig.
+function applySelfLook(look: number): void {
+  if (unpackAppearance(selfRig.look).body !== unpackAppearance(look).body) {
+    // arm geometry differs between bodies: swap in a rebuilt rig (the mesh
+    // component disposes the old object tree on removal)
+    ents.removeComponent(noa.playerEntity, ents.names.mesh);
+    selfRig = buildRig("self", look, myArmor);
+    ents.addComponent(noa.playerEntity, ents.names.mesh, {
+      mesh: selfRig.root,
+      offset: [0, 0, 0],
+    });
+    attachToolToRig(selfRig, "self", equippedItem);
+    refreshViewModel();
+  } else {
+    dressRig(selfRig, look, myArmor);
   }
 }
 
-// Flat "paper doll" preview assembled from the front-face regions of the
-// 64x32 skin (head, torso, arms, legs) onto a 16x32 canvas, CSS-scaled up
-// with image-rendering: pixelated.
-function drawSkinPreview(canvas: HTMLCanvasElement, skin: CharacterSkin): void {
-  void loadSkinImage(skin)
-    .then((img) => {
-      const ctx = canvas.getContext("2d")!;
-      ctx.imageSmoothingEnabled = false;
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.drawImage(img, 8, 8, 8, 8, 4, 0, 8, 8); // head
-      ctx.drawImage(img, 20, 20, 8, 12, 4, 8, 8, 12); // torso
-      ctx.drawImage(img, 44, 20, 4, 12, 0, 8, 4, 12); // right arm
-      ctx.drawImage(img, 4, 20, 4, 12, 4, 20, 4, 12); // right leg
-      // left arm/leg mirror the right ones, like the classic-format rig
-      ctx.scale(-1, 1);
-      ctx.drawImage(img, 44, 20, 4, 12, -16, 8, 4, 12); // left arm
-      ctx.drawImage(img, 4, 20, 4, 12, -12, 20, 4, 12); // left leg
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-    })
-    .catch(() => {});
+// Flat "paper doll" views assembled from the painted 64x32 skin onto a
+// 16x32 canvas, CSS-scaled up with image-rendering: pixelated. The back
+// view is what makes the hair styles legible (length, ponytail).
+const dollScratch = document.createElement("canvas");
+dollScratch.width = 64;
+dollScratch.height = 32;
+
+function drawDoll(canvas: HTMLCanvasElement, look: number, back = false): void {
+  paintCharacter(dollScratch.getContext("2d")!, look, 0);
+  const w = unpackAppearance(look).body === 1 ? 3 : 4;
+  const headX = back ? 24 : 8;
+  const torsoX = back ? 32 : 20;
+  const armX = back ? 48 + w : 44;
+  const legX = back ? 12 : 4;
+  const ctx = canvas.getContext("2d")!;
+  ctx.imageSmoothingEnabled = false;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(dollScratch, headX, 8, 8, 8, 4, 0, 8, 8); // head
+  ctx.drawImage(dollScratch, torsoX, 20, 8, 12, 4, 8, 8, 12); // torso
+  ctx.drawImage(dollScratch, armX, 20, w, 12, 4 - w, 8, w, 12); // right arm
+  ctx.drawImage(dollScratch, legX, 20, 4, 12, 4, 20, 4, 12); // right leg
+  // left arm/leg mirror the right ones, like the rig
+  ctx.scale(-1, 1);
+  ctx.drawImage(dollScratch, armX, 20, w, 12, -(12 + w), 8, w, 12); // left arm
+  ctx.drawImage(dollScratch, legX, 20, 4, 12, -12, 20, 4, 12); // left leg
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
 }
 
-const pickerBackdrop = document.createElement("div");
-pickerBackdrop.style.cssText =
+const creatorBackdrop = document.createElement("div");
+creatorBackdrop.style.cssText =
   "position: fixed; inset: 0; z-index: 30; display: flex; align-items: center;" +
   "justify-content: center; background: rgba(0,0,0,0.55); pointer-events: auto;";
-document.body.appendChild(pickerBackdrop);
+document.body.appendChild(creatorBackdrop);
 
-const pickerPanel = document.createElement("div");
-pickerPanel.style.cssText =
+const creatorPanel = document.createElement("div");
+creatorPanel.style.cssText =
   "background: rgba(18,20,28,0.94); border: 1px solid rgba(255,255,255,0.15);" +
   "border-radius: 10px; padding: 16px 18px; box-shadow: 0 12px 40px rgba(0,0,0,0.5);" +
   "max-width: min(92vw, 560px); text-align: center;";
-pickerBackdrop.appendChild(pickerPanel);
+creatorBackdrop.appendChild(creatorPanel);
 
-const pickerTitle = document.createElement("div");
-pickerTitle.textContent = "Choose your character";
-pickerTitle.style.cssText = `font: ${UI_FONT}; font-size: 15px; font-weight: 700; color: #fff; margin-bottom: 12px;`;
-pickerPanel.appendChild(pickerTitle);
+const creatorTitle = document.createElement("div");
+creatorTitle.textContent = "Create your character";
+creatorTitle.style.cssText = `font: ${UI_FONT}; font-size: 15px; font-weight: 700; color: #fff; margin-bottom: 12px;`;
+creatorPanel.appendChild(creatorTitle);
 
-const pickerRow = document.createElement("div");
-pickerRow.style.cssText =
-  "display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-bottom: 14px;";
-pickerPanel.appendChild(pickerRow);
+const creatorRow = document.createElement("div");
+creatorRow.style.cssText =
+  "display: flex; flex-wrap: wrap; gap: 14px; justify-content: center;" +
+  "align-items: stretch; margin-bottom: 14px;";
+creatorPanel.appendChild(creatorRow);
 
-let selectedSkin = storedSkinIndex();
-const pickerCards: HTMLButtonElement[] = [];
+// live preview: the character from the front and from behind
+const previewWrap = document.createElement("div");
+previewWrap.style.cssText =
+  "display: flex; gap: 10px; align-items: center; justify-content: center;" +
+  "padding: 10px 12px; background: rgba(10,10,16,0.55); border-radius: 8px;";
+creatorRow.appendChild(previewWrap);
+const previewFront = document.createElement("canvas");
+const previewBack = document.createElement("canvas");
+for (const canvas of [previewFront, previewBack]) {
+  canvas.width = 16;
+  canvas.height = 32;
+  canvas.style.cssText = "width: 80px; height: 160px; image-rendering: pixelated;";
+  previewWrap.appendChild(canvas);
+}
 
-function refreshPickerCards(): void {
-  for (let i = 0; i < pickerCards.length; i++) {
-    const picked = i === selectedSkin;
-    pickerCards[i].style.borderColor = picked ? "#fff" : "rgba(255,255,255,0.25)";
-    pickerCards[i].style.background = picked ? "rgba(60,70,95,0.6)" : "rgba(10,10,16,0.55)";
+const optionsCol = document.createElement("div");
+optionsCol.style.cssText =
+  "display: flex; flex-direction: column; gap: 8px; justify-content: center; text-align: left;";
+creatorRow.appendChild(optionsCol);
+
+const selected = unpackAppearance(storedLook());
+
+function currentLook(): number {
+  return packAppearance(selected);
+}
+
+// every option button, keyed by the field it sets, so one pass can update
+// the selection highlights
+const optionButtons: { field: keyof Appearance; value: number; el: HTMLButtonElement }[] = [];
+// hair-style minis repaint with the current tone/color
+const hairMinis: { style: number; canvas: HTMLCanvasElement }[] = [];
+
+function refreshCreator(): void {
+  drawDoll(previewFront, currentLook());
+  drawDoll(previewBack, currentLook(), true);
+  for (const mini of hairMinis) {
+    drawDoll(mini.canvas, packAppearance({ ...selected, hair: mini.style }), true);
+  }
+  for (const opt of optionButtons) {
+    const picked = selected[opt.field] === opt.value;
+    opt.el.style.borderColor = picked ? "#fff" : "rgba(255,255,255,0.25)";
+    // tone/color swatches keep their palette color; selection shows on the
+    // border alone
+    if (opt.field === "tone") {
+      opt.el.style.background = SKIN_TONES[opt.value];
+    } else if (opt.field === "hairColor") {
+      opt.el.style.background = HAIR_COLORS[opt.value];
+    } else {
+      opt.el.style.background = picked ? "rgba(60,70,95,0.6)" : "rgba(10,10,16,0.55)";
+    }
   }
 }
 
-for (let i = 0; i < CHARACTER_SKINS.length; i++) {
-  const skin = CHARACTER_SKINS[i];
-  const card = document.createElement("button");
-  card.type = "button";
-  card.style.cssText =
-    "display: flex; align-items: center; padding: 10px 8px;" +
-    "border: 2px solid rgba(255,255,255,0.25); border-radius: 8px;" +
-    "background: rgba(10,10,16,0.55); cursor: pointer; transition: border-color 0.1s;";
-  const preview = document.createElement("canvas");
-  preview.width = 16;
-  preview.height = 32;
-  preview.style.cssText = "width: 64px; height: 128px; image-rendering: pixelated;";
-  drawSkinPreview(preview, skin);
-  card.appendChild(preview);
-  card.addEventListener("click", () => {
-    selectedSkin = i;
-    refreshPickerCards();
-  });
-  pickerRow.appendChild(card);
-  pickerCards.push(card);
+function optionRow(label: string): HTMLDivElement {
+  const caption = document.createElement("div");
+  caption.textContent = label;
+  caption.style.cssText = `font: ${UI_FONT}; font-size: 10px; color: rgba(255,255,255,0.55);`;
+  optionsCol.appendChild(caption);
+  const row = document.createElement("div");
+  row.style.cssText = "display: flex; gap: 6px; flex-wrap: wrap;";
+  optionsCol.appendChild(row);
+  return row;
 }
-refreshPickerCards();
+
+function optionButton(
+  row: HTMLElement,
+  field: keyof Appearance,
+  value: number,
+  css: string,
+): HTMLButtonElement {
+  const el = document.createElement("button");
+  el.type = "button";
+  el.style.cssText =
+    "border: 2px solid rgba(255,255,255,0.25); border-radius: 6px; cursor: pointer;" +
+    `background: rgba(10,10,16,0.55); transition: border-color 0.1s; padding: 0; ${css}`;
+  el.addEventListener("click", () => {
+    selected[field] = value;
+    refreshCreator();
+  });
+  row.appendChild(el);
+  optionButtons.push({ field, value, el });
+  return el;
+}
+
+{
+  const bodyRow = optionRow("Body");
+  const labels = ["Male", "Female"];
+  for (let body = 0; body < labels.length; body++) {
+    const el = optionButton(bodyRow, "body", body, "padding: 5px 12px;");
+    el.textContent = labels[body];
+    el.style.font = UI_FONT;
+    el.style.color = "#fff";
+  }
+
+  const toneRow = optionRow("Skin");
+  for (let tone = 0; tone < SKIN_TONES.length; tone++) {
+    const el = optionButton(toneRow, "tone", tone, "width: 26px; height: 26px;");
+    el.style.background = SKIN_TONES[tone];
+  }
+
+  const hairRow = optionRow("Hair");
+  for (let style = 0; style < HAIR_STYLES; style++) {
+    const el = optionButton(hairRow, "hair", style, "padding: 2px 3px; line-height: 0;");
+    const mini = document.createElement("canvas");
+    mini.width = 16;
+    mini.height = 32;
+    mini.style.cssText = "width: 28px; height: 56px; image-rendering: pixelated;";
+    el.appendChild(mini);
+    hairMinis.push({ style, canvas: mini });
+  }
+
+  const colorRow = optionRow("Hair color");
+  for (let color = 0; color < HAIR_COLORS.length; color++) {
+    const el = optionButton(colorRow, "hairColor", color, "width: 26px; height: 26px;");
+    el.style.background = HAIR_COLORS[color];
+  }
+}
+
+refreshCreator();
 
 const playButton = document.createElement("button");
 playButton.type = "button";
@@ -3143,23 +3436,24 @@ playButton.style.cssText =
   "color: #08130a; background: rgba(120,220,120,0.9); border: none; border-radius: 6px;" +
   "cursor: pointer;";
 playButton.addEventListener("click", () => {
-  chosenSkin = selectedSkin;
+  const look = currentLook();
+  chosenLook = look;
   characterChosen = true;
   try {
-    localStorage.setItem(SKIN_STORAGE_KEY, CHARACTER_SKINS[selectedSkin].name);
+    localStorage.setItem(LOOK_STORAGE_KEY, String(look));
   } catch {
     // storage can be unavailable in some embeds; the pick still applies
   }
-  dressRig(selfRig, skinByIndex(selectedSkin));
+  applySelfLook(look);
   sendSkinChoice();
-  pickerBackdrop.style.display = "none";
+  creatorBackdrop.style.display = "none";
   // the click is a user gesture: enter the game pointer-locked like the
   // inventory close path; the grace window swallows the re-lock click if
   // the browser refuses
   noa.container.setPointerLock(true);
   fireSuppressedUntil = performance.now() + 1500;
 });
-pickerPanel.appendChild(playButton);
+creatorPanel.appendChild(playButton);
 
 /*
  *      Networking
@@ -3257,10 +3551,16 @@ function handleStreamEvent(event: { bytes: Uint8Array; json<T = unknown>(): T })
       }
     } else if (message.type === "inventory") {
       invSlots = message.slots
-        .slice(0, INV_SLOTS)
+        .slice(0, INV_SLOTS + ARMOR_SLOTS)
         .map((entry) => (entry ? { item: entry.i, count: entry.n } : null));
-      while (invSlots.length < INV_SLOTS) {
+      while (invSlots.length < INV_SLOTS + ARMOR_SLOTS) {
         invSlots.push(null);
+      }
+      // our own armor rides the inventory's wear slots; repaint on change
+      const wornPack = packArmor(invSlots);
+      if (wornPack !== myArmor) {
+        myArmor = wornPack;
+        dressRig(selfRig, selfRig.look, myArmor);
       }
       const invTotal = invSlots.reduce((sum, slot) => sum + (slot ? slot.count : 0), 0);
       if (lastInvTotal >= 0 && invTotal > lastInvTotal) {
@@ -3278,18 +3578,23 @@ function handleStreamEvent(event: { bytes: Uint8Array; json<T = unknown>(): T })
     } else if (message.type === "welcome") {
       for (const entry of message.players) {
         playerNames.set(entry.id, entry.name);
-        setPlayerSkin(entry.id, entry.skin);
+        setPlayerLook(entry.id, entry.skin);
+        setPlayerArmor(entry.id, entry.armor);
       }
       updateHud();
     } else if (message.type === "join") {
       playerNames.set(message.id, message.name);
-      setPlayerSkin(message.id, message.skin);
+      setPlayerLook(message.id, message.skin);
+      setPlayerArmor(message.id, message.armor);
       updateHud();
     } else if (message.type === "skin") {
-      setPlayerSkin(message.id, message.skin);
+      setPlayerLook(message.id, message.skin);
+    } else if (message.type === "armor") {
+      setPlayerArmor(message.id, message.armor);
     } else if (message.type === "leave") {
       playerNames.delete(message.id);
-      playerSkins.delete(message.id);
+      playerLooks.delete(message.id);
+      playerArmor.delete(message.id);
       removeRemotePlayer(message.id);
     }
   }

@@ -1,5 +1,6 @@
 import type { CharState } from "./sim.js";
-import { isValidSkin, skinForId } from "./skins.js";
+import { appearanceForId, isValidAppearance } from "./appearance.js";
+import { isValidArmorPack } from "./items.js";
 
 export const READY_MESSAGE = "ready";
 
@@ -43,27 +44,35 @@ export function parseEquipMessage(value: unknown): EquipMessage | undefined {
   return undefined;
 }
 
-// Client -> server: the character skin picked in the join screen (an index
-// into SKIN_IDS). Usually sent before the first input, i.e. before the
-// player's body materializes server-side.
+// Client -> server: the appearance built in the character creator (packed,
+// see shared/appearance.ts). Usually sent before the first input, i.e.
+// before the player's body materializes server-side.
 export type SkinMessage = {
   type: "skin";
   skin: number;
 };
 
 export function parseSkinMessage(value: unknown): SkinMessage | undefined {
-  if (isRecord(value) && value.type === "skin" && isValidSkin(value.skin)) {
+  if (isRecord(value) && value.type === "skin" && isValidAppearance(value.skin)) {
     return { type: "skin", skin: value.skin };
   }
   return undefined;
 }
 
-// Server -> clients: a player picked (or changed) their skin after their
-// join was already broadcast.
+// Server -> clients: a player picked (or changed) their appearance after
+// their join was already broadcast.
 export type SkinChangeMessage = {
   type: "skin";
   id: string;
   skin: number;
+};
+
+// Server -> clients: a player's equipped armor changed (packed wear slots,
+// see packArmor in items.ts), so their character can be redrawn.
+export type ArmorChangeMessage = {
+  type: "armor";
+  id: string;
+  armor: number;
 };
 
 // Client -> server: melee attack on another player.
@@ -326,6 +335,7 @@ export type RosterEntry = {
   id: string;
   name: string;
   skin: number;
+  armor: number;
 };
 
 export type WelcomeMessage = {
@@ -340,6 +350,7 @@ export type JoinMessage = {
   id: string;
   name: string;
   skin: number;
+  armor: number;
 };
 
 export type LeaveMessage = {
@@ -357,7 +368,8 @@ export type ServerStreamMessage =
   | HurtMessage
   | DeathMessage
   | SwingMessage
-  | SkinChangeMessage;
+  | SkinChangeMessage
+  | ArmorChangeMessage;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -408,7 +420,8 @@ export function parseServerStreamMessage(value: unknown): ServerStreamMessage | 
           players.push({
             id: entry.id,
             name: entry.name,
-            skin: isValidSkin(entry.skin) ? entry.skin : skinForId(entry.id),
+            skin: isValidAppearance(entry.skin) ? entry.skin : appearanceForId(entry.id),
+            armor: isValidArmorPack(entry.armor) ? entry.armor : 0,
           });
         }
       }
@@ -470,11 +483,15 @@ export function parseServerStreamMessage(value: unknown): ServerStreamMessage | 
       type: "join",
       id: value.id,
       name: value.name,
-      skin: isValidSkin(value.skin) ? value.skin : skinForId(value.id),
+      skin: isValidAppearance(value.skin) ? value.skin : appearanceForId(value.id),
+      armor: isValidArmorPack(value.armor) ? value.armor : 0,
     };
   }
-  if (value.type === "skin" && typeof value.id === "string" && isValidSkin(value.skin)) {
+  if (value.type === "skin" && typeof value.id === "string" && isValidAppearance(value.skin)) {
     return { type: "skin", id: value.id, skin: value.skin };
+  }
+  if (value.type === "armor" && typeof value.id === "string" && isValidArmorPack(value.armor)) {
+    return { type: "armor", id: value.id, armor: value.armor };
   }
   if (value.type === "leave" && typeof value.id === "string") {
     return { type: "leave", id: value.id };

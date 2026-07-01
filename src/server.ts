@@ -8,22 +8,29 @@ import {
   encodeSnapshots,
 } from "./shared/netCodec.js";
 import {
+  ARMOR_BASE,
+  ARMOR_SLOTS,
   ARROW,
   BOW,
   FEATHER,
+  INV_SLOTS,
   MAX_HP,
+  armorPiece,
+  armorReduction,
   arrowLaunch,
   blockHP,
   blockToItem,
   bonusDrop,
   dropsOnImpact,
   hitDamage,
+  isArmorIndex,
   isBlockItem,
   isThrowable,
   isValidItem,
   itemToBlock,
   knockback,
   meleeDamage,
+  packArmor,
   projectileDamage,
   starterSlots,
   stackLimit,
@@ -52,7 +59,7 @@ import {
   parseSkinMessage,
   parseThrowMessage,
 } from "./shared/messages.js";
-import { skinForId } from "./shared/skins.js";
+import { appearanceForId } from "./shared/appearance.js";
 import { craftCellOf, isCraftSlot, matchRecipe } from "./shared/recipes.js";
 import {
   SIM_TICK_MS,
@@ -114,8 +121,11 @@ const BLOCK_DAMAGE_RESET_MS = 10_000;
 type Player = {
   name: string;
   userId: string;
-  // character skin index (see shared/skins.ts), picked in the join screen
+  // packed appearance (see shared/appearance.ts), built in the creator screen
   skin: number;
+  // packed wear slots (see packArmor), mirroring the inventory's armor slots;
+  // kept on the player so join/roster/armor broadcasts don't rescan slots
+  armor: number;
   char: CharState;
   heading: number;
   lastSeq: number;
@@ -637,6 +647,10 @@ function damagePlayer(
   if (now < victim.protectedUntil) {
     return;
   }
+  // equipped armor absorbs a fraction of the hit; a landed hit always
+  // costs at least 1 hp so a full set doesn't make a player invulnerable
+  const inv = world.inventories.get(victim.userId);
+  amount = Math.max(1, Math.round(amount * (1 - (inv ? armorReduction(inv) : 0))));
   victim.hp -= amount;
   victim.lastDamageAt = now;
   const h = Math.hypot(kbx, kbz) || 1;
@@ -671,6 +685,10 @@ function inventoryOf(world: World, connectionId: string): InvSlot[] {
     inv = starterSlots();
     world.inventories.set(key, inv);
   }
+  // pad arrays saved before the armor slots existed
+  while (inv.length < INV_SLOTS + ARMOR_SLOTS) {
+    inv.push(null);
+  }
   return inv;
 }
 
@@ -680,14 +698,27 @@ function wireSlots(slots: readonly InvSlot[]): InvWireSlot[] {
 
 function sendInventory(world: World, connectionId: string) {
   const player = world.players.get(connectionId);
+  const inv = inventoryOf(world, connectionId);
   server.streams.send(connectionId, {
     type: "inventory",
-    slots: wireSlots(inventoryOf(world, connectionId)),
+    slots: wireSlots(inv),
     craft: {
       size: player?.craftSize ?? 0,
       grid: wireSlots(player?.craftGrid ?? []),
     },
   });
+  // every inventory change funnels through here, so this is where a change
+  // to the wear slots becomes visible to everyone else
+  if (player) {
+    const packed = packArmor(inv);
+    if (packed !== player.armor) {
+      player.armor = packed;
+      server.streams.broadcast(
+        { type: "armor", id: connectionId, armor: packed },
+        { except: [connectionId] },
+      );
+    }
+  }
 }
 
 // Stacks into existing piles (hotbar first by array order), then the first
@@ -697,17 +728,16 @@ function grantItem(world: World, connectionId: string, item: number, count: numb
   const inv = inventoryOf(world, connectionId);
   const limit = stackLimit(item);
   let remaining = count;
-  for (const slot of inv) {
-    if (remaining === 0) {
-      break;
-    }
+  // both passes stop before the wear slots: pickups never auto-equip
+  for (let i = 0; i < INV_SLOTS && remaining > 0; i++) {
+    const slot = inv[i];
     if (slot && slot.item === item && slot.count < limit) {
       const take = Math.min(limit - slot.count, remaining);
       slot.count += take;
       remaining -= take;
     }
   }
-  for (let i = 0; i < inv.length && remaining > 0; i++) {
+  for (let i = 0; i < INV_SLOTS && remaining > 0; i++) {
     if (!inv[i]) {
       const take = Math.min(limit, remaining);
       inv[i] = { item, count: take };
@@ -788,6 +818,12 @@ function handleInvMove(world: World, connectionId: string, from: number, to: num
   }
   const source = src.get();
   if (!source) {
+    return;
+  }
+  // wear slots only accept their matching armor piece; echo so a client
+  // whose optimistic move disagreed reconciles
+  if (isArmorIndex(to) && armorPiece(source.item) !== to - ARMOR_BASE) {
+    sendInventory(world, connectionId);
     return;
   }
   const target = dst.get();
@@ -1307,16 +1343,17 @@ function addPlayer(world: World, connection: Connection) {
   const fresh = parked && server.elapsedMs() - parked.at < PARK_TTL_MS ? parked : undefined;
   world.parked.delete(connection.userId);
 
-  // a pick made in this connection's join screen wins over a parked skin
-  // (the player may have re-picked on reload)
+  // a pick made in this connection's creator screen wins over a parked
+  // appearance (the player may have re-picked on reload)
   const pendingSkin = world.pendingSkins.get(connection.id);
   world.pendingSkins.delete(connection.id);
-  const skin = pendingSkin ?? fresh?.skin ?? skinForId(connection.id);
+  const skin = pendingSkin ?? fresh?.skin ?? appearanceForId(connection.id);
 
-  world.players.set(connection.id, {
+  const player: Player = {
     name: connection.userName,
     userId: connection.userId,
     skin,
+    armor: 0,
     char: fresh ? fresh.char : spawnState(),
     heading: fresh ? fresh.heading : 0,
     lastSeq: 0,
@@ -1332,9 +1369,13 @@ function addPlayer(world: World, connection: Connection) {
     craftSize: 0,
     craftGrid: [],
     craftTable: null,
-  });
+  };
+  world.players.set(connection.id, player);
+  // armor rides the inventory, which is keyed by userId — resolvable only
+  // now that the player entry exists
+  player.armor = packArmor(inventoryOf(world, connection.id));
   server.streams.broadcast(
-    { type: "join", id: connection.id, name: connection.userName, skin },
+    { type: "join", id: connection.id, name: connection.userName, skin, armor: player.armor },
     { except: [connection.id] },
   );
   sendInventory(world, connection.id);
@@ -1485,7 +1526,7 @@ function syncConnections(world: World) {
     world.greeted.add(connection.id);
     const roster: RosterEntry[] = [];
     for (const [id, player] of world.players) {
-      roster.push({ id, name: player.name, skin: player.skin });
+      roster.push({ id, name: player.name, skin: player.skin, armor: player.armor });
     }
     connection.streams.send({ type: "welcome", you: connection.id, players: roster });
   }

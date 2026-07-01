@@ -7,9 +7,13 @@
 import {
   ARROW,
   AXE,
+  BOOTS,
   BOW,
   blockToItem,
+  CHESTPLATE,
   FEATHER,
+  HELMET,
+  LEGGINGS,
   PICKAXE,
   PLANK,
   ROCK,
@@ -18,7 +22,7 @@ import {
   STICK,
   STRING,
 } from "./items.js";
-import { CRAFTING_TABLE_ID, LOG_ID, SNOW_ID, STONE_ID } from "./terrain.js";
+import { CRAFTING_TABLE_ID, IRON_ORE_ID, LOG_ID, SNOW_ID, STONE_ID } from "./terrain.js";
 
 // invMove slot indices: 0..35 are inventory, CRAFT_GRID_BASE..+8 are the
 // (up to) nine crafting-grid cells. Keeps the two address spaces disjoint.
@@ -37,6 +41,7 @@ const LOG_ITEM = blockToItem(LOG_ID);
 const STONE_ITEM = blockToItem(STONE_ID);
 const SNOW_ITEM = blockToItem(SNOW_ID);
 const TABLE_ITEM = blockToItem(CRAFTING_TABLE_ID);
+const IRON_ITEM = blockToItem(IRON_ORE_ID);
 
 // Shaped patterns are the recipe's bounding box (no empty border rows/cols);
 // 0 marks an interior empty cell. Patterns match anywhere in the grid and are
@@ -123,6 +128,46 @@ export const RECIPES: readonly Recipe[] = [
     pattern: [[ROCK], [STICK], [FEATHER]],
     out: ARROW,
     count: 4,
+  },
+  // Armor — forged straight from mined iron ore at the 3x3 table, in
+  // Minecraft's classic piece shapes.
+  {
+    kind: "shaped",
+    pattern: [
+      [IRON_ITEM, IRON_ITEM, IRON_ITEM],
+      [IRON_ITEM, 0, IRON_ITEM],
+    ],
+    out: HELMET,
+    count: 1,
+  },
+  {
+    kind: "shaped",
+    pattern: [
+      [IRON_ITEM, 0, IRON_ITEM],
+      [IRON_ITEM, IRON_ITEM, IRON_ITEM],
+      [IRON_ITEM, IRON_ITEM, IRON_ITEM],
+    ],
+    out: CHESTPLATE,
+    count: 1,
+  },
+  {
+    kind: "shaped",
+    pattern: [
+      [IRON_ITEM, IRON_ITEM, IRON_ITEM],
+      [IRON_ITEM, 0, IRON_ITEM],
+      [IRON_ITEM, 0, IRON_ITEM],
+    ],
+    out: LEGGINGS,
+    count: 1,
+  },
+  {
+    kind: "shaped",
+    pattern: [
+      [IRON_ITEM, 0, IRON_ITEM],
+      [IRON_ITEM, 0, IRON_ITEM],
+    ],
+    out: BOOTS,
+    count: 1,
   },
 ];
 
