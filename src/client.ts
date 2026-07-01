@@ -841,7 +841,7 @@ function paintCharacter(ctx: CanvasRenderingContext2D, look: number, armor: numb
 // self rig's module-scope build, because storedLook() runs during module
 // evaluation (a later declaration would be a temporal-dead-zone crash).
 const LOOK_STORAGE_KEY = "voxels.look";
-const DEFAULT_LOOK = packAppearance({ tone: 1, hair: 2, hairColor: 1, shirt: 0, pants: 0 });
+const DEFAULT_LOOK = packAppearance({ tone: 2, hair: 2, hairColor: 1, shirt: 0, pants: 0 });
 
 function storedLook(): number {
   try {
@@ -1095,14 +1095,11 @@ type ItemSpriteConfig = {
 };
 
 const ITEM_SPRITES: Record<number, ItemSpriteConfig> = {
+  // tool art has the business edge on the art-left side, which the extrusion
+  // maps to the character's forward — so no aboutFace on any of these (the
+  // first-person view model spins tools 180° itself; see refreshViewModel)
   [PICKAXE]: { url: "/assets/items/pickaxe.png", size: 0.85, grip: [3.5, 12.5], diagonal: true },
-  [AXE]: {
-    url: "/assets/items/axe.png",
-    size: 0.85,
-    grip: [3.5, 12.5],
-    diagonal: true,
-    aboutFace: true,
-  },
+  [AXE]: { url: "/assets/items/axe.png", size: 0.85, grip: [3.5, 12.5], diagonal: true },
   [SHOVEL]: { url: "/assets/items/shovel.png", size: 0.85, grip: [3.5, 12.5], diagonal: true },
   [ROCK]: { url: "/assets/items/rock.png", size: 0.34 },
   [SNOWBALL]: { url: "/assets/items/snowball.png", size: 0.3 },
@@ -1441,6 +1438,17 @@ function cameraForward(): { x: number; y: number; z: number } {
   return (noa.rendering.camera as any).getForwardRay().direction;
 }
 
+// Forward along the BODY's facing (same math the camera applies to (0,0,1)
+// in noa/lib/camera.ts, with the body heading in place of the camera's).
+// Identical to cameraForward() except while Alt-orbiting, when the camera
+// swings around the frozen body — projectiles launch from the character, so
+// they follow this, not the orbit camera.
+function bodyForward(): { x: number; y: number; z: number } {
+  const pitch = noa.camera.pitch;
+  const cp = Math.cos(pitch);
+  return { x: Math.sin(playerHeading) * cp, y: -Math.sin(pitch), z: Math.cos(playerHeading) * cp };
+}
+
 let equippedItem: number = HAND;
 let firstPerson = false;
 let swingT = 0;
@@ -1580,11 +1588,12 @@ function refreshViewModel(): void {
     } else {
       // tools hang with the handle vertical and the sprite face toward the
       // camera — a clean, readable hold. A small forward pitch gives a bit of
-      // 3D depth; keeping yaw and roll at zero is what avoids twisting the flat
-      // sprite. The root's resting yaw (0.3) supplies the slight side angle, so
-      // this reads the same for every tool (no per-tool case).
+      // 3D depth. The half-turn yaw exists because camera space looks down -z
+      // while rigs face +z: without it the tool's business edge (forward on
+      // the rig) would point back at the viewer. The root's resting yaw (0.3)
+      // supplies the slight side angle, so this reads the same for every tool.
       tool.position.set(-0.02, -0.06, -0.1);
-      tool.rotation.set(-0.2, 0, 0);
+      tool.rotation.set(-0.2, Math.PI, 0);
     }
   }
   root.scale.setScalar(0.9);
@@ -1684,7 +1693,8 @@ noa.inputs.down.on("mid-fire", () => {
   }
   swingT = 1;
   playWhoosh(0.4);
-  const dir = cameraForward();
+  // thrown from the character's hand, so it follows the body's facing
+  const dir = bodyForward();
   void client.streams
     .send({ type: "throw", item: held.item, slot: selectedSlot, dx: dir.x, dy: dir.y, dz: dir.z })
     .catch(() => {});
@@ -3183,7 +3193,9 @@ noa.inputs.up.on("fire", () => {
     return;
   }
   playBowShot(0.35 + charge * 0.3);
-  const dir = cameraForward();
+  // arrows leave the bow, not the camera: while Alt-orbiting the torso (and
+  // the drawn bow) keep pointing along the body heading, so fire that way
+  const dir = bodyForward();
   // remember the launch heading (render space: Z flipped) to seed the arrow's
   // orientation the instant it spawns
   lastArrowDir.set(dir.x, dir.y, -dir.z).normalize();
