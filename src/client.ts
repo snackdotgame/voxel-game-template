@@ -31,6 +31,8 @@ import {
   HAIR_LONG,
   HAIR_PONYTAIL,
   HAIR_STYLES,
+  PANTS_COLORS,
+  SHIRT_COLORS,
   SKIN_TONES,
   appearanceForId,
   isValidAppearance,
@@ -720,9 +722,8 @@ function setBoxUVs(
  *  follow the classic-format unwrap that setBoxUVs applies.
  */
 
-// one shared outfit; armor draws over it
-const SHIRT = "#7d94a5";
-const PANTS = "#46505e";
+// shirt/pants colors come from the shared appearance palettes; armor draws
+// over the outfit
 const SHOES = "#3b2f25";
 const IRON = "#ccd3d9";
 const IRON_DARK = "#8b939c";
@@ -738,6 +739,8 @@ function paintCharacter(ctx: CanvasRenderingContext2D, look: number, armor: numb
   const a = unpackAppearance(look);
   const tone = SKIN_TONES[a.tone] ?? SKIN_TONES[0];
   const hair = HAIR_COLORS[a.hairColor] ?? HAIR_COLORS[0];
+  const shirt = SHIRT_COLORS[a.shirt] ?? SHIRT_COLORS[0];
+  const pants = PANTS_COLORS[a.pants] ?? PANTS_COLORS[0];
   const fill = (color: string, x: number, y: number, w: number, h: number) => {
     ctx.fillStyle = color;
     ctx.fillRect(x, y, w, h);
@@ -760,15 +763,15 @@ function paintCharacter(ctx: CanvasRenderingContext2D, look: number, armor: numb
   fill(shade(tone, 0.76), 11, 14, 2, 1);
 
   // shirt: all torso faces + shoulder tops of the arms as short sleeves
-  fill(SHIRT, 16, 20, 24, 12);
-  fill(SHIRT, 20, 16, 16, 4);
-  fill(shade(SHIRT, 0.85), 16, 31, 24, 1);
-  fill(SHIRT, 40, 20, 16, 5);
-  fill(SHIRT, 44, 16, 4, 4);
+  fill(shirt, 16, 20, 24, 12);
+  fill(shirt, 20, 16, 16, 4);
+  fill(shade(shirt, 0.85), 16, 31, 24, 1);
+  fill(shirt, 40, 20, 16, 5);
+  fill(shirt, 44, 16, 4, 4);
 
   // pants + shoes on the legs (soles use the leg bottom face)
-  fill(PANTS, 0, 20, 16, 9);
-  fill(PANTS, 4, 16, 4, 4);
+  fill(pants, 0, 20, 16, 9);
+  fill(pants, 4, 16, 4, 4);
   fill(SHOES, 0, 29, 16, 3);
   fill(SHOES, 8, 16, 4, 4);
 
@@ -838,7 +841,7 @@ function paintCharacter(ctx: CanvasRenderingContext2D, look: number, armor: numb
 // self rig's module-scope build, because storedLook() runs during module
 // evaluation (a later declaration would be a temporal-dead-zone crash).
 const LOOK_STORAGE_KEY = "voxels.look";
-const DEFAULT_LOOK = packAppearance({ body: 0, tone: 1, hair: 2, hairColor: 1 });
+const DEFAULT_LOOK = packAppearance({ tone: 1, hair: 2, hairColor: 1, shirt: 0, pants: 0 });
 
 function storedLook(): number {
   try {
@@ -881,9 +884,6 @@ function buildRig(name: string, look: number, armor = 0): Rig {
   body.name = `${name}-body`;
   root.add(body);
   const material = makeSkinMaterial(name);
-  // the slim body hangs 3px arms where the broad one hangs 4px
-  const armW = unpackAppearance(look).body === 1 ? 3 : 4;
-  const armX = ((8 + armW) / 2) * SKIN_PX;
 
   const box = (
     part: string,
@@ -914,7 +914,6 @@ function buildRig(name: string, look: number, armor = 0): Rig {
 
   const limb = (
     part: string,
-    pxW: number,
     uv: [number, number, number, number, number],
     pivotY: number,
     xOff: number,
@@ -923,21 +922,20 @@ function buildRig(name: string, look: number, armor = 0): Rig {
     pivot.name = `${name}-${part}-pivot`;
     body.add(pivot);
     pivot.position.set(xOff, pivotY, 0);
-    box(part, pxW, 12, 4, uv, pivot, -0.3375);
+    box(part, 4, 12, 4, uv, pivot, -0.3375);
     return pivot;
   };
 
-  const armUV: [number, number, number, number, number] = [ARM_UV[0], ARM_UV[1], armW, 12, 4];
   // limb sides follow skinview3d: the character faces local +z and its
   // right arm hangs at negative x (the mirror of the old Babylon rig)
   const rig: Rig = {
     root,
     head,
     body,
-    leftArm: limb("left-arm", armW, armUV, 1.305, armX),
-    rightArm: limb("right-arm", armW, armUV, 1.305, -armX),
-    leftLeg: limb("left-leg", 4, LEG_UV, 0.675, 0.1125),
-    rightLeg: limb("right-leg", 4, LEG_UV, 0.675, -0.1125),
+    leftArm: limb("left-arm", ARM_UV, 1.305, 0.3375),
+    rightArm: limb("right-arm", ARM_UV, 1.305, -0.3375),
+    leftLeg: limb("left-leg", LEG_UV, 0.675, 0.1125),
+    rightLeg: limb("right-leg", LEG_UV, 0.675, -0.1125),
     phase: 0,
     idleT: 0,
     tool: null,
@@ -1859,9 +1857,8 @@ for (const comp of [
   }
 }
 
-// starts as last session's character; the creator screen re-dresses it (or
-// rebuilds it, when the body type changed — see applySelfLook)
-let selfRig = buildRig("self", storedLook());
+// starts as last session's character; the creator screen re-dresses it
+const selfRig = buildRig("self", storedLook());
 ents.addComponent(noa.playerEntity, ents.names.mesh, {
   mesh: selfRig.root,
   offset: [0, 0, 0],
@@ -2186,12 +2183,7 @@ function setPlayerLook(id: string, look: number): void {
   // exist wearing the fallback appearance
   const remote = remotePlayers.get(id);
   if (remote) {
-    if (unpackAppearance(remote.rig.look).body !== unpackAppearance(look).body) {
-      // arm geometry differs between bodies; the next snapshot rebuilds it
-      removeRemotePlayer(id);
-    } else {
-      dressRig(remote.rig, look, playerArmor.get(id) ?? 0);
-    }
+    dressRig(remote.rig, look, playerArmor.get(id) ?? 0);
   }
 }
 
@@ -3238,24 +3230,6 @@ function sendSkinChoice(): void {
   void client.streams.send({ type: "skin", skin: chosenLook }).catch(() => {});
 }
 
-// Dress (or, when the body type changed, rebuild) our own rig.
-function applySelfLook(look: number): void {
-  if (unpackAppearance(selfRig.look).body !== unpackAppearance(look).body) {
-    // arm geometry differs between bodies: swap in a rebuilt rig (the mesh
-    // component disposes the old object tree on removal)
-    ents.removeComponent(noa.playerEntity, ents.names.mesh);
-    selfRig = buildRig("self", look, myArmor);
-    ents.addComponent(noa.playerEntity, ents.names.mesh, {
-      mesh: selfRig.root,
-      offset: [0, 0, 0],
-    });
-    attachToolToRig(selfRig, "self", equippedItem);
-    refreshViewModel();
-  } else {
-    dressRig(selfRig, look, myArmor);
-  }
-}
-
 // Flat "paper doll" views assembled from the painted 64x32 skin onto a
 // 16x32 canvas, CSS-scaled up with image-rendering: pixelated. The back
 // view is what makes the hair styles legible (length, ponytail).
@@ -3265,21 +3239,20 @@ dollScratch.height = 32;
 
 function drawDoll(canvas: HTMLCanvasElement, look: number, back = false): void {
   paintCharacter(dollScratch.getContext("2d")!, look, 0);
-  const w = unpackAppearance(look).body === 1 ? 3 : 4;
   const headX = back ? 24 : 8;
   const torsoX = back ? 32 : 20;
-  const armX = back ? 48 + w : 44;
+  const armX = back ? 52 : 44;
   const legX = back ? 12 : 4;
   const ctx = canvas.getContext("2d")!;
   ctx.imageSmoothingEnabled = false;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.drawImage(dollScratch, headX, 8, 8, 8, 4, 0, 8, 8); // head
   ctx.drawImage(dollScratch, torsoX, 20, 8, 12, 4, 8, 8, 12); // torso
-  ctx.drawImage(dollScratch, armX, 20, w, 12, 4 - w, 8, w, 12); // right arm
+  ctx.drawImage(dollScratch, armX, 20, 4, 12, 0, 8, 4, 12); // right arm
   ctx.drawImage(dollScratch, legX, 20, 4, 12, 4, 20, 4, 12); // right leg
   // left arm/leg mirror the right ones, like the rig
   ctx.scale(-1, 1);
-  ctx.drawImage(dollScratch, armX, 20, w, 12, -(12 + w), 8, w, 12); // left arm
+  ctx.drawImage(dollScratch, armX, 20, 4, 12, -16, 8, 4, 12); // left arm
   ctx.drawImage(dollScratch, legX, 20, 4, 12, -12, 20, 4, 12); // left leg
   ctx.setTransform(1, 0, 0, 1, 0, 0);
 }
@@ -3349,12 +3322,16 @@ function refreshCreator(): void {
   for (const opt of optionButtons) {
     const picked = selected[opt.field] === opt.value;
     opt.el.style.borderColor = picked ? "#fff" : "rgba(255,255,255,0.25)";
-    // tone/color swatches keep their palette color; selection shows on the
+    // color swatches keep their palette color; selection shows on the
     // border alone
     if (opt.field === "tone") {
       opt.el.style.background = SKIN_TONES[opt.value];
     } else if (opt.field === "hairColor") {
       opt.el.style.background = HAIR_COLORS[opt.value];
+    } else if (opt.field === "shirt") {
+      opt.el.style.background = SHIRT_COLORS[opt.value];
+    } else if (opt.field === "pants") {
+      opt.el.style.background = PANTS_COLORS[opt.value];
     } else {
       opt.el.style.background = picked ? "rgba(60,70,95,0.6)" : "rgba(10,10,16,0.55)";
     }
@@ -3393,15 +3370,6 @@ function optionButton(
 }
 
 {
-  const bodyRow = optionRow("Body");
-  const labels = ["Male", "Female"];
-  for (let body = 0; body < labels.length; body++) {
-    const el = optionButton(bodyRow, "body", body, "padding: 5px 12px;");
-    el.textContent = labels[body];
-    el.style.font = UI_FONT;
-    el.style.color = "#fff";
-  }
-
   const toneRow = optionRow("Skin");
   for (let tone = 0; tone < SKIN_TONES.length; tone++) {
     const el = optionButton(toneRow, "tone", tone, "width: 26px; height: 26px;");
@@ -3424,6 +3392,18 @@ function optionButton(
     const el = optionButton(colorRow, "hairColor", color, "width: 26px; height: 26px;");
     el.style.background = HAIR_COLORS[color];
   }
+
+  const shirtRow = optionRow("Shirt");
+  for (let shirt = 0; shirt < SHIRT_COLORS.length; shirt++) {
+    const el = optionButton(shirtRow, "shirt", shirt, "width: 26px; height: 26px;");
+    el.style.background = SHIRT_COLORS[shirt];
+  }
+
+  const pantsRow = optionRow("Pants");
+  for (let pants = 0; pants < PANTS_COLORS.length; pants++) {
+    const el = optionButton(pantsRow, "pants", pants, "width: 26px; height: 26px;");
+    el.style.background = PANTS_COLORS[pants];
+  }
 }
 
 refreshCreator();
@@ -3444,7 +3424,7 @@ playButton.addEventListener("click", () => {
   } catch {
     // storage can be unavailable in some embeds; the pick still applies
   }
-  applySelfLook(look);
+  dressRig(selfRig, look, myArmor);
   sendSkinChoice();
   creatorBackdrop.style.display = "none";
   // the click is a user gesture: enter the game pointer-locked like the
