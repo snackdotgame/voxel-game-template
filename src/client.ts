@@ -3030,14 +3030,6 @@ setupMobileControls({
  *  is remembered per-device and preselected next time.
  */
 
-const SKIN_LABELS: Record<string, string> = {
-  builder: "Builder",
-  "casual-matt": "Matt",
-  "candy-girl": "Candy",
-  "farmer-survivor": "Farmer",
-  "winter-girl": "Winter",
-};
-
 const SKIN_STORAGE_KEY = "voxels.skin";
 
 let characterChosen = false;
@@ -3125,8 +3117,8 @@ for (let i = 0; i < CHARACTER_SKINS.length; i++) {
   const card = document.createElement("button");
   card.type = "button";
   card.style.cssText =
-    "display: flex; flex-direction: column; align-items: center; gap: 6px;" +
-    "padding: 10px 8px 6px; border: 2px solid rgba(255,255,255,0.25); border-radius: 8px;" +
+    "display: flex; align-items: center; padding: 10px 8px;" +
+    "border: 2px solid rgba(255,255,255,0.25); border-radius: 8px;" +
     "background: rgba(10,10,16,0.55); cursor: pointer; transition: border-color 0.1s;";
   const preview = document.createElement("canvas");
   preview.width = 16;
@@ -3134,10 +3126,6 @@ for (let i = 0; i < CHARACTER_SKINS.length; i++) {
   preview.style.cssText = "width: 64px; height: 128px; image-rendering: pixelated;";
   drawSkinPreview(preview, skin);
   card.appendChild(preview);
-  const label = document.createElement("div");
-  label.textContent = SKIN_LABELS[skin.name] ?? skin.name;
-  label.style.cssText = `font: ${UI_FONT}; font-size: 11px; color: rgba(255,255,255,0.85);`;
-  card.appendChild(label);
   card.addEventListener("click", () => {
     selectedSkin = i;
     refreshPickerCards();
