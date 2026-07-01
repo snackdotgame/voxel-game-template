@@ -67,11 +67,14 @@ import {
   type CharState,
   type Stepper,
   makeStepper,
+  onGround,
   spawnState,
 } from "./shared/sim.js";
 import { encodeChunkState, maxRecordsForPayload } from "./shared/chunkCodec.js";
 import {
   CRAFTING_TABLE_ID,
+  LEAVES_ID,
+  LOG_ID,
   WATER_ID,
   baseVoxelID,
   chunkCoord,
@@ -291,7 +294,7 @@ export async function main() {
       const players: PlayerSnapshot[] = [];
       for (const [id, player] of world.players) {
         player.stepsThisTick = 0;
-        drainInputQueue(world, player);
+        drainInputQueue(world, id, player);
         syncChunkWindow(world, id, player);
         players.push({
           id,
@@ -661,10 +664,55 @@ function damagePlayer(
   victim.char.sleep = 10;
   server.streams.broadcast({ type: "hurt", id: victimId, by: attackerId, amount });
   if (victim.hp <= 0) {
-    victim.char = spawnState();
+    victim.char = spawnFor(world, victimId);
     victim.hp = MAX_HP;
     victim.protectedUntil = now + RESPAWN_PROTECTION_MS;
     server.streams.broadcast({ type: "death", victim: victimId, attacker: attackerId });
+  }
+}
+
+// gravity (10 blocks/s^2) times the character body's gravityMultiplier (2)
+const FALL_GRAVITY = 20;
+// falls up to ~3 real blocks land safely; beyond that it costs ~1 hp per
+// block, like Minecraft. The margin is 2 rather than 3 because air drag makes
+// the v^2/2g estimate read about a block under the true drop height.
+const FALL_SAFE_BLOCKS = 2;
+
+// Landing hard hurts, like Minecraft: ~1 hp per block fallen beyond a safe
+// three, with water (feet in a fluid cell) breaking the fall entirely. Armor
+// doesn't help — the hurt/death messages carry the victim as their own
+// attacker, which clients render as a fall death.
+function applyFallDamage(world: World, victimId: string, impactVy: number) {
+  const victim = world.players.get(victimId);
+  if (!victim) {
+    return;
+  }
+  const blocks = (impactVy * impactVy) / (2 * FALL_GRAVITY);
+  const amount = Math.floor(blocks - FALL_SAFE_BLOCKS);
+  if (amount < 1) {
+    return;
+  }
+  const feet = blockAt(
+    world,
+    Math.floor(victim.char.x),
+    Math.floor(victim.char.y),
+    Math.floor(victim.char.z),
+  );
+  if (feet === WATER_ID) {
+    return;
+  }
+  const now = server.elapsedMs();
+  if (now < victim.protectedUntil) {
+    return;
+  }
+  victim.hp -= amount;
+  victim.lastDamageAt = now;
+  server.streams.broadcast({ type: "hurt", id: victimId, by: victimId, amount });
+  if (victim.hp <= 0) {
+    victim.char = spawnFor(world, victimId);
+    victim.hp = MAX_HP;
+    victim.protectedUntil = now + RESPAWN_PROTECTION_MS;
+    server.streams.broadcast({ type: "death", victim: victimId, attacker: victimId });
   }
 }
 
@@ -1308,22 +1356,28 @@ function handleInput(world: World, event: DatagramEvent) {
       }
       continue;
     }
-    applyInput(world, player, message);
+    applyInput(world, event.connection.id, player, message);
   }
 }
 
-function applyInput(world: World, player: Player, message: CharInput) {
+function applyInput(world: World, id: string, player: Player, message: CharInput) {
+  const wasAirborne = !onGround(player.char);
+  const fallVy = player.char.vy;
   player.char = world.step(player.char, message);
   player.heading = message.heading;
   player.lastSeq = message.seq;
   player.stepsThisTick += 1;
+  // an airborne body touching down this step just landed at fallVy
+  if (wasAirborne && fallVy < 0 && onGround(player.char)) {
+    applyFallDamage(world, id, fallVy);
+  }
 }
 
-function drainInputQueue(world: World, player: Player) {
+function drainInputQueue(world: World, id: string, player: Player) {
   while (player.inputQueue.length > 0 && player.stepsThisTick < MAX_STEPS_PER_TICK) {
     const message = player.inputQueue.shift();
     if (message && message.seq > player.lastSeq) {
-      applyInput(world, player, message);
+      applyInput(world, id, player, message);
     }
   }
 }
@@ -1354,7 +1408,7 @@ function addPlayer(world: World, connection: Connection) {
     userId: connection.userId,
     skin,
     armor: 0,
-    char: fresh ? fresh.char : spawnState(),
+    char: fresh ? fresh.char : spawnFor(world, connection.id),
     heading: fresh ? fresh.heading : 0,
     lastSeq: 0,
     item: fresh ? fresh.item : 0,
@@ -1424,6 +1478,43 @@ function groundY(world: World, x: number, z: number): number {
     }
   }
   return 16;
+}
+
+// Players spawn scattered on a ring around the map origin: close enough to
+// find each other, spread out enough that nobody materializes inside anyone
+// else, and always standing on the ground. Water and treetop columns are
+// retried (the last attempt is taken as-is so this always terminates).
+const SPAWN_RING_MIN = 3;
+const SPAWN_RING_MAX = 10;
+
+function spawnFor(world: World, seed: string): CharState {
+  let rng = 1;
+  for (let i = 0; i < seed.length; i++) {
+    rng = (rng * 31 + seed.charCodeAt(i)) >>> 0;
+  }
+  const char = spawnState();
+  // extra scramble rounds: sequential connection ids hash to adjacent
+  // seeds, and a single xorshift round leaves their angles clumped
+  rng = nextRng(nextRng(rng || 1));
+  for (let attempt = 0; attempt < 8; attempt++) {
+    rng = nextRng(rng || 1);
+    const angle = (rng / 0x100000000) * Math.PI * 2;
+    rng = nextRng(rng);
+    const dist = SPAWN_RING_MIN + (rng / 0x100000000) * (SPAWN_RING_MAX - SPAWN_RING_MIN);
+    const x = Math.cos(angle) * dist + 0.5;
+    const z = Math.sin(angle) * dist + 0.5;
+    const y = groundY(world, x, z);
+    const feet = blockAt(world, Math.floor(x), y, Math.floor(z));
+    const under = blockAt(world, Math.floor(x), y - 1, Math.floor(z));
+    if ((feet === WATER_ID || under === LEAVES_ID || under === LOG_ID) && attempt < 7) {
+      continue;
+    }
+    char.x = x;
+    char.z = z;
+    char.y = y;
+    break;
+  }
+  return char;
 }
 
 function spawnChickens(world: World) {

@@ -3534,9 +3534,12 @@ function handleStreamEvent(event: { bytes: Uint8Array; json<T = unknown>(): T })
       const attackerName =
         message.attacker === myId ? "you" : (playerNames.get(message.attacker) ?? "a player");
       showNotice(
-        message.victim === myId
-          ? `You were slain by ${attackerName}!`
-          : `${victimName} was slain by ${attackerName}`,
+        // a victim who is their own attacker died to the world (fall damage)
+        message.victim === message.attacker
+          ? `${victimName} fell from a great height${message.victim === myId ? "!" : ""}`
+          : message.victim === myId
+            ? `You were slain by ${attackerName}!`
+            : `${victimName} was slain by ${attackerName}`,
       );
       if (message.victim === myId) {
         flashHurt(1);
