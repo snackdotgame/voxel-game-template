@@ -677,8 +677,10 @@ type Rig = {
   idleT: number;
   tool: Group | null;
   skin: MeshLambertMaterial;
-  // what the skin texture currently shows (kept for repaints and to detect
-  // body changes, which need a geometry rebuild)
+  // armor overlay meshes indexed by wear slot (helmet..boots); dressRig
+  // toggles their visibility to match the equipped pieces
+  armorParts: Mesh[][];
+  // what the rig currently shows (kept for repaints)
   look: number;
   armor: number;
 };
@@ -750,11 +752,8 @@ function setBoxUVs(
  *  follow the classic-format unwrap that setBoxUVs applies.
  */
 
-// shirt/pants colors come from the shared appearance palettes; armor draws
-// over the outfit
+// shirt/pants colors come from the shared appearance palettes
 const SHOES = "#3b2f25";
-const IRON = "#ccd3d9";
-const IRON_DARK = "#8b939c";
 const EYES = "#47617f";
 
 function shade(hex: string, f: number): string {
@@ -763,7 +762,7 @@ function shade(hex: string, f: number): string {
   return `rgb(${ch(n >> 16)}, ${ch((n >> 8) & 0xff)}, ${ch(n & 0xff)})`;
 }
 
-function paintCharacter(ctx: CanvasRenderingContext2D, look: number, armor: number): void {
+function paintCharacter(ctx: CanvasRenderingContext2D, look: number): void {
   const a = unpackAppearance(look);
   const tone = SKIN_TONES[a.tone] ?? SKIN_TONES[0];
   const hair = HAIR_COLORS[a.hairColor] ?? HAIR_COLORS[0];
@@ -826,43 +825,6 @@ function paintCharacter(ctx: CanvasRenderingContext2D, look: number, armor: numb
     fill(hair, 35, 20, 2, 5);
     fill(shade(hair, 0.8), 35, 24, 2, 1);
   }
-
-  // armor overlays, head to toe
-  const pieces = unpackArmor(armor);
-  if (pieces[0]) {
-    // helmet: crown + a brow band all around, deeper over sides and back
-    fill(IRON, 8, 0, 8, 8);
-    fill(IRON, 0, 8, 32, 2);
-    fill(IRON_DARK, 8, 9, 8, 1);
-    fill(IRON, 0, 10, 8, 2);
-    fill(IRON, 16, 10, 8, 2);
-    fill(IRON, 24, 10, 8, 2);
-    fill(IRON_DARK, 0, 11, 8, 1);
-    fill(IRON_DARK, 16, 11, 8, 1);
-    fill(IRON_DARK, 24, 11, 8, 1);
-  }
-  if (pieces[1]) {
-    // chestplate: full torso + pauldrons over the sleeves
-    fill(IRON, 16, 20, 24, 12);
-    fill(IRON, 20, 16, 16, 4);
-    fill(IRON_DARK, 16, 28, 24, 1);
-    fill(IRON_DARK, 23, 20, 2, 1);
-    fill(IRON, 40, 20, 16, 4);
-    fill(IRON, 44, 16, 4, 4);
-    fill(IRON_DARK, 40, 23, 16, 1);
-  }
-  if (pieces[2]) {
-    // leggings: upper legs, under the boot line
-    fill(IRON, 0, 20, 16, 7);
-    fill(IRON, 4, 16, 4, 4);
-    fill(IRON_DARK, 0, 26, 16, 1);
-  }
-  if (pieces[3]) {
-    // boots: lower legs + soles
-    fill(IRON_DARK, 0, 28, 16, 1);
-    fill(IRON, 0, 29, 16, 3);
-    fill(IRON_DARK, 8, 16, 4, 4);
-  }
 }
 
 // The last confirmed look, remembered per-device. Declared here, above the
@@ -893,14 +855,119 @@ function makeSkinMaterial(name: string): MeshLambertMaterial {
   return material;
 }
 
-// Repaint a rig's skin texture for a new appearance and/or armor set.
+/*
+ *      Armor overlays (Minecraft's armor-layer approach)
+ *
+ *  Worn armor renders as slightly inflated boxes over the body parts,
+ *  textured with alpha-cutout iron art in the same classic 64x32 layout
+ *  the skin uses. Like Minecraft, the art is split into two layers so
+ *  boots and leggings can both use the leg UV region: layer 1 carries
+ *  helmet + chestplate + boots, layer 2 the leggings. Both materials are
+ *  shared by every rig; per-piece meshes just toggle visibility.
+ */
+
+const IRON_HI = "#f4f5f6";
+const IRON_BASE = "#d6d9dc";
+const IRON_MID = "#aab0b6";
+const IRON_DK = "#787f87";
+const IRON_EDGE = "#4f545b";
+
+function paintArmorLayer(ctx: CanvasRenderingContext2D, layer: 1 | 2): void {
+  const fill = (color: string, x: number, y: number, w: number, h: number) => {
+    ctx.fillStyle = color;
+    ctx.fillRect(x, y, w, h);
+  };
+  ctx.clearRect(0, 0, 64, 32);
+  if (layer === 1) {
+    // helmet: crown, full sides/back, and a front with an open face —
+    // brow band above, cheek guards at the edges
+    fill(IRON_BASE, 8, 0, 8, 8);
+    fill(IRON_HI, 9, 1, 6, 1);
+    fill(IRON_MID, 16, 0, 8, 8);
+    for (const x of [0, 8, 16, 24]) {
+      fill(IRON_BASE, x, 8, 8, 8);
+      fill(IRON_HI, x, 9, 8, 1);
+      fill(IRON_MID, x, 14, 8, 2);
+    }
+    ctx.clearRect(10, 11, 4, 5); // the face opening
+    fill(IRON_EDGE, 10, 10, 4, 1); // brow shadow over the opening
+    fill(IRON_EDGE, 9, 9, 1, 1);
+    fill(IRON_EDGE, 14, 9, 1, 1);
+
+    // chestplate: full torso with collar, center seam, and hem
+    fill(IRON_BASE, 20, 16, 16, 4);
+    fill(IRON_BASE, 16, 20, 24, 12);
+    fill(IRON_EDGE, 16, 20, 24, 1);
+    fill(IRON_HI, 16, 21, 24, 1);
+    fill(IRON_MID, 16, 28, 24, 3);
+    fill(IRON_EDGE, 16, 31, 24, 1);
+    fill(IRON_MID, 23, 23, 2, 4); // front seam
+    fill(IRON_EDGE, 21, 22, 1, 1);
+    fill(IRON_EDGE, 26, 22, 1, 1);
+
+    // pauldrons: shoulder caps + the upper arm, open below
+    fill(IRON_BASE, 44, 16, 4, 4);
+    fill(IRON_BASE, 40, 20, 16, 5);
+    fill(IRON_HI, 40, 21, 16, 1);
+    fill(IRON_EDGE, 40, 24, 16, 1);
+
+    // boots: lower legs + soles, open above
+    fill(IRON_EDGE, 0, 27, 16, 1);
+    fill(IRON_BASE, 0, 28, 16, 4);
+    fill(IRON_HI, 0, 28, 16, 1);
+    fill(IRON_DK, 8, 16, 4, 4);
+  } else {
+    // leggings: a belt over the lower torso and thigh guards that stop
+    // where the boots take over
+    fill(IRON_MID, 28, 16, 8, 4);
+    fill(IRON_EDGE, 16, 27, 24, 1);
+    fill(IRON_BASE, 16, 28, 24, 4);
+    fill(IRON_MID, 16, 30, 24, 2);
+    fill(IRON_BASE, 4, 16, 4, 4);
+    fill(IRON_BASE, 0, 20, 16, 7);
+    fill(IRON_MID, 0, 25, 16, 1);
+    fill(IRON_EDGE, 0, 26, 16, 1);
+  }
+}
+
+let armorMaterials: [MeshLambertMaterial, MeshLambertMaterial] | null = null;
+
+function getArmorMaterials(): [MeshLambertMaterial, MeshLambertMaterial] {
+  if (!armorMaterials) {
+    const make = (layer: 1 | 2) => {
+      const canvas = document.createElement("canvas");
+      canvas.width = 64;
+      canvas.height = 32;
+      paintArmorLayer(canvas.getContext("2d")!, layer);
+      const texture = new CanvasTexture(canvas);
+      texture.magFilter = NearestFilter;
+      texture.minFilter = NearestFilter;
+      const material = noa.rendering.makeStandardMaterial(`armor-layer-${layer}`);
+      material.map = texture;
+      // crisp cutouts for the face opening / open lower arms and legs
+      material.alphaTest = 0.5;
+      material.userData.shared = true;
+      return material;
+    };
+    armorMaterials = [make(1), make(2)];
+  }
+  return armorMaterials;
+}
+
+// Repaint a rig's skin for a new appearance and show the worn armor pieces.
 function dressRig(rig: Rig, look: number, armor: number): void {
   rig.look = look;
   rig.armor = armor;
   const texture = rig.skin.map;
   if (texture instanceof CanvasTexture) {
-    paintCharacter((texture.image as HTMLCanvasElement).getContext("2d")!, look, armor);
+    paintCharacter((texture.image as HTMLCanvasElement).getContext("2d")!, look);
     texture.needsUpdate = true;
+  }
+  const pieces = unpackArmor(armor);
+  for (let piece = 0; piece < rig.armorParts.length; piece++) {
+    for (const mesh of rig.armorParts[piece]) {
+      mesh.visible = pieces[piece] !== 0;
+    }
   }
 }
 
@@ -956,18 +1023,70 @@ function buildRig(name: string, look: number, armor = 0): Rig {
 
   // limb sides follow skinview3d: the character faces local +z and its
   // right arm hangs at negative x (the mirror of the old Babylon rig)
+  const leftArm = limb("left-arm", ARM_UV, 1.305, 0.3375);
+  const rightArm = limb("right-arm", ARM_UV, 1.305, -0.3375);
+  const leftLeg = limb("left-leg", LEG_UV, 0.675, 0.1125);
+  const rightLeg = limb("right-leg", LEG_UV, 0.675, -0.1125);
+
+  // armor overlays: inflated boxes over the body parts, Minecraft-style.
+  // Boots inflate more than leggings so the two leg overlays never z-fight,
+  // and the leggings' belt sits inside the chestplate for the same reason.
+  const [layer1, layer2] = getArmorMaterials();
+  const overlay = (
+    part: string,
+    parent: Group,
+    pxW: number,
+    pxH: number,
+    pxD: number,
+    uv: [number, number, number, number, number],
+    yInParent: number,
+    inflate: number,
+    armorMaterial: MeshLambertMaterial,
+  ) => {
+    const geometry = new BoxGeometry(
+      pxW * SKIN_PX + inflate,
+      pxH * SKIN_PX + inflate,
+      pxD * SKIN_PX + inflate,
+    );
+    setBoxUVs(geometry, uv);
+    const mesh = new Mesh(geometry, armorMaterial);
+    mesh.name = `${name}-${part}`;
+    parent.add(mesh);
+    mesh.position.y = yInParent;
+    mesh.visible = false;
+    return mesh;
+  };
+  const armorParts: Mesh[][] = [
+    [overlay("helmet", head, 8, 8, 8, HEAD_UV, 0.225, 0.07, layer1)],
+    [
+      overlay("chest", body, 8, 12, 4, BODY_UV, 1.0125, 0.08, layer1),
+      overlay("chest-left-arm", leftArm, 4, 12, 4, ARM_UV, -0.3375, 0.06, layer1),
+      overlay("chest-right-arm", rightArm, 4, 12, 4, ARM_UV, -0.3375, 0.06, layer1),
+    ],
+    [
+      overlay("leg-belt", body, 8, 12, 4, BODY_UV, 1.0125, 0.04, layer2),
+      overlay("leg-left", leftLeg, 4, 12, 4, LEG_UV, -0.3375, 0.045, layer2),
+      overlay("leg-right", rightLeg, 4, 12, 4, LEG_UV, -0.3375, 0.045, layer2),
+    ],
+    [
+      overlay("boot-left", leftLeg, 4, 12, 4, LEG_UV, -0.3375, 0.1, layer1),
+      overlay("boot-right", rightLeg, 4, 12, 4, LEG_UV, -0.3375, 0.1, layer1),
+    ],
+  ];
+
   const rig: Rig = {
     root,
     head,
     body,
-    leftArm: limb("left-arm", ARM_UV, 1.305, 0.3375),
-    rightArm: limb("right-arm", ARM_UV, 1.305, -0.3375),
-    leftLeg: limb("left-leg", LEG_UV, 0.675, 0.1125),
-    rightLeg: limb("right-leg", LEG_UV, 0.675, -0.1125),
+    leftArm,
+    rightArm,
+    leftLeg,
+    rightLeg,
     phase: 0,
     idleT: 0,
     tool: null,
     skin: material,
+    armorParts,
     look,
     armor,
   };
@@ -1597,6 +1716,15 @@ function refreshViewModel(): void {
   arm.name = "view-arm";
   arm.frustumCulled = false;
   root.add(arm);
+  // a worn chestplate shows its pauldron on the first-person arm too
+  if (unpackArmor(myArmor)[1]) {
+    const sleeveGeometry = new BoxGeometry(0.19, 0.53, 0.19);
+    setBoxUVs(sleeveGeometry, ARM_UV);
+    const sleeve = new Mesh(sleeveGeometry, getArmorMaterials()[0]);
+    sleeve.name = "view-arm-armor";
+    sleeve.frustumCulled = false;
+    arm.add(sleeve);
+  }
   // arm extends -y at rest; positive x-rotation tips the hand end forward
   // into the scene (toward -z)
   arm.position.set(0, -0.1, 0.12);
@@ -2805,9 +2933,20 @@ invPanel.appendChild(invTitle);
 // the result crafts (shift-click crafts as many as the grid allows).
 const craftSlots2: Slot[] = [];
 const craftSlots3: Slot[] = [];
+// the top of the panel reads like the player: a head-to-toe column of wear
+// slots on the left (helmet, chest, legs, boots), crafting to the right
+const topSection = document.createElement("div");
+topSection.style.cssText =
+  "display: flex; align-items: flex-start; gap: 18px; margin-bottom: 14px;";
+invPanel.appendChild(topSection);
+
+const armorColumn = document.createElement("div");
+armorColumn.style.cssText = "display: flex; flex-direction: column; gap: 5px;";
+topSection.appendChild(armorColumn);
+
 const craftSection = document.createElement("div");
-craftSection.style.cssText = "display: flex; align-items: center; gap: 14px; margin-bottom: 14px;";
-invPanel.appendChild(craftSection);
+craftSection.style.cssText = "display: flex; align-items: center; gap: 14px;";
+topSection.appendChild(craftSection);
 const grid2El = document.createElement("div");
 grid2El.style.cssText = "display: grid; grid-template-columns: repeat(2, 44px); gap: 5px;";
 const grid3El = document.createElement("div");
@@ -2842,22 +2981,17 @@ resultTile.root.addEventListener("click", (ev) => {
 // which piece each slot takes while it's empty
 const armorTiles: Slot[] = [];
 const armorGhosts: HTMLImageElement[] = [];
-{
-  const armorSection = document.createElement("div");
-  armorSection.style.cssText = "display: flex; gap: 5px; margin-bottom: 12px;";
-  invPanel.appendChild(armorSection);
-  for (let piece = 0; piece < ARMOR_SLOTS; piece++) {
-    const slot = makeSlot(armorSection, "");
-    slot.root.dataset.invSlot = String(ARMOR_BASE + piece);
-    slot.root.style.cursor = "grab";
-    const ghost = document.createElement("img");
-    ghost.src = ITEM_ICON_FILES[HELMET + piece] ?? "";
-    ghost.style.cssText =
-      "position: absolute; width: 28px; height: 28px; image-rendering: pixelated; opacity: 0.25;";
-    slot.root.insertBefore(ghost, slot.root.firstChild);
-    armorTiles.push(slot);
-    armorGhosts.push(ghost);
-  }
+for (let piece = 0; piece < ARMOR_SLOTS; piece++) {
+  const slot = makeSlot(armorColumn, "");
+  slot.root.dataset.invSlot = String(ARMOR_BASE + piece);
+  slot.root.style.cursor = "grab";
+  const ghost = document.createElement("img");
+  ghost.src = ITEM_ICON_FILES[HELMET + piece] ?? "";
+  ghost.style.cssText =
+    "position: absolute; width: 28px; height: 28px; image-rendering: pixelated; opacity: 0.25;";
+  slot.root.insertBefore(ghost, slot.root.firstChild);
+  armorTiles.push(slot);
+  armorGhosts.push(ghost);
 }
 
 // panel slot index -> inventory slot index: storage rows first (9-35),
@@ -3278,7 +3412,7 @@ dollScratch.width = 64;
 dollScratch.height = 32;
 
 function drawDoll(canvas: HTMLCanvasElement, look: number, back = false): void {
-  paintCharacter(dollScratch.getContext("2d")!, look, 0);
+  paintCharacter(dollScratch.getContext("2d")!, look);
   const headX = back ? 24 : 8;
   const torsoX = back ? 32 : 20;
   const armX = back ? 52 : 44;
@@ -3579,11 +3713,13 @@ function handleStreamEvent(event: { bytes: Uint8Array; json<T = unknown>(): T })
       while (invSlots.length < INV_SLOTS + ARMOR_SLOTS) {
         invSlots.push(null);
       }
-      // our own armor rides the inventory's wear slots; repaint on change
+      // our own armor rides the inventory's wear slots; redress on change
       const wornPack = packArmor(invSlots);
       if (wornPack !== myArmor) {
         myArmor = wornPack;
         dressRig(selfRig, selfRig.look, myArmor);
+        // the first-person arm's pauldron follows the chest piece
+        refreshViewModel();
       }
       const invTotal = invSlots.reduce((sum, slot) => sum + (slot ? slot.count : 0), 0);
       if (lastInvTotal >= 0 && invTotal > lastInvTotal) {
