@@ -683,101 +683,87 @@ function setBoxUVs(
   box.attributes.uv.needsUpdate = true;
 }
 
-const skinImage = new Promise<HTMLImageElement>((resolve, reject) => {
-  const img = new Image();
-  img.onload = () => resolve(img);
-  img.onerror = () => reject(new Error("failed to load character skin"));
-  img.src = `${TEX}/character.png`;
-});
+type CharacterSkin = {
+  name: string;
+  url: string;
+};
 
-function hueRotate(pixels: Uint8ClampedArray, degrees: number): void {
-  for (let i = 0; i < pixels.length; i += 4) {
-    if (pixels[i + 3] === 0) {
-      continue;
-    }
-    const r = pixels[i] / 255;
-    const g = pixels[i + 1] / 255;
-    const b = pixels[i + 2] / 255;
-    const max = Math.max(r, g, b);
-    const min = Math.min(r, g, b);
-    const l = (max + min) / 2;
-    const d = max - min;
-    if (d === 0) {
-      continue;
-    }
-    const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
-    let h: number;
-    if (max === r) {
-      h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
-    } else if (max === g) {
-      h = ((b - r) / d + 2) / 6;
-    } else {
-      h = ((r - g) / d + 4) / 6;
-    }
-    h = (h + degrees / 360) % 1;
-    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
-    const p = 2 * l - q;
-    const channel = (t: number) => {
-      let u = t;
-      if (u < 0) u += 1;
-      if (u > 1) u -= 1;
-      if (u < 1 / 6) return p + (q - p) * 6 * u;
-      if (u < 1 / 2) return q;
-      if (u < 2 / 3) return p + (q - p) * (2 / 3 - u) * 6;
-      return p;
-    };
-    pixels[i] = Math.round(channel(h + 1 / 3) * 255);
-    pixels[i + 1] = Math.round(channel(h) * 255);
-    pixels[i + 2] = Math.round(channel(h - 1 / 3) * 255);
+const CHARACTER_SKINS: readonly CharacterSkin[] = [
+  { name: "builder", url: `${TEX}/character.png` },
+  { name: "casual-matt", url: `${TEX}/characters/casual-matt.png` },
+  { name: "candy-girl", url: `${TEX}/characters/candy-girl.png` },
+  { name: "farmer-survivor", url: `${TEX}/characters/farmer-survivor.png` },
+  { name: "winter-girl", url: `${TEX}/characters/winter-girl.png` },
+];
+
+const skinImages = new Map<string, Promise<HTMLImageElement>>();
+
+function hashId(id: string): number {
+  let hash = 0;
+  for (let i = 0; i < id.length; i++) {
+    hash = (hash * 31 + id.charCodeAt(i)) >>> 0;
   }
+  return hash;
 }
 
-function drawSkin(texture: CanvasTexture, hueShiftDegrees: number): void {
-  void skinImage.then((img) => {
+function skinForId(id: string): CharacterSkin {
+  return CHARACTER_SKINS[hashId(id) % CHARACTER_SKINS.length];
+}
+
+function loadSkinImage(skin: CharacterSkin): Promise<HTMLImageElement> {
+  let load = skinImages.get(skin.url);
+  if (!load) {
+    load = new Promise<HTMLImageElement>((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error(`failed to load character skin: ${skin.url}`));
+      img.src = skin.url;
+    });
+    skinImages.set(skin.url, load);
+  }
+  return load;
+}
+
+function drawSkin(texture: CanvasTexture, skin: CharacterSkin): void {
+  void loadSkinImage(skin).then((img) => {
     const canvas = texture.image as HTMLCanvasElement;
     const ctx = canvas.getContext("2d")!;
     ctx.clearRect(0, 0, 64, 32);
-    ctx.drawImage(img, 0, 0);
-    if (hueShiftDegrees !== 0) {
-      // rows 16-32 hold the body, arms, and legs; the head keeps its skin tone
-      const body = ctx.getImageData(0, 16, 64, 16);
-      hueRotate(body.data, hueShiftDegrees);
-      ctx.putImageData(body, 0, 16);
-    }
+    ctx.drawImage(img, 0, 0, 64, 32, 0, 0, 64, 32);
     texture.needsUpdate = true;
   });
 }
 
-function makeSkinMaterial(name: string, hueShiftDegrees: number): MeshLambertMaterial {
+function makeSkinMaterial(name: string, skin: CharacterSkin): MeshLambertMaterial {
   const canvas = document.createElement("canvas");
   canvas.width = 64;
   canvas.height = 32;
   const texture = new CanvasTexture(canvas);
   texture.magFilter = NearestFilter;
   texture.minFilter = NearestFilter;
-  drawSkin(texture, hueShiftDegrees);
+  drawSkin(texture, skin);
   const material = noa.rendering.makeStandardMaterial(name);
   material.map = texture;
   return material;
 }
 
-// re-tint a rig's existing skin texture (used once our own id is known, so
-// the outfit we see on ourselves matches what everyone else sees)
-function tintRig(rig: Rig, hueShiftDegrees: number): void {
+// Swap a rig's existing skin texture (used once our own id is known, so the
+// character we see on ourselves matches what everyone else sees).
+function dressRig(rig: Rig, skin: CharacterSkin): void {
   const texture = rig.skin.map;
   if (texture instanceof CanvasTexture) {
-    drawSkin(texture, hueShiftDegrees);
+    drawSkin(texture, skin);
   }
 }
 
-function buildRig(name: string, hueShiftDegrees: number): Rig {
-  console.debug(`[rig] build ${name} hue=${hueShiftDegrees}`);
+function buildRig(name: string, skin: CharacterSkin): Rig {
+  console.debug(`[rig] build ${name} skin=${skin.name}`);
   const root = new Group();
   root.name = `${name}-root`;
   const body = new Group();
   body.name = `${name}-body`;
   root.add(body);
-  const material = makeSkinMaterial(name, hueShiftDegrees);
+  const material = makeSkinMaterial(name, skin);
 
   const box = (
     part: string,
@@ -959,14 +945,6 @@ function applyBowDrawToRig(rig: Rig, draw: number, pitch: number): void {
     bowAimQuat.setFromEuler(bowAimEuler);
     rig.tool.quaternion.copy(rig.rightArm.quaternion).invert().multiply(bowAimQuat);
   }
-}
-
-function hueForId(id: string): number {
-  let hash = 0;
-  for (let i = 0; i < id.length; i++) {
-    hash = (hash * 31 + id.charCodeAt(i)) >>> 0;
-  }
-  return 40 + (hash % 280);
 }
 
 /*
@@ -1751,7 +1729,7 @@ for (const comp of [
   }
 }
 
-const selfRig = buildRig("self", 0);
+const selfRig = buildRig("self", CHARACTER_SKINS[0]);
 ents.addComponent(noa.playerEntity, ents.names.mesh, {
   mesh: selfRig.root,
   offset: [0, 0, 0],
@@ -2075,7 +2053,7 @@ function upsertRemotePlayer(snap: PlayerSnapshot): void {
     return;
   }
 
-  const rig = buildRig(`remote-${snap.id}`, hueForId(snap.id));
+  const rig = buildRig(`remote-${snap.id}`, skinForId(snap.id));
   attachToolToRig(rig, `remote-${snap.id}`, snap.item);
   const entityId = ents.add(
     [snap.state.x, snap.state.y, snap.state.z],
@@ -3027,7 +3005,6 @@ setupMobileControls({
  */
 
 let myId = "";
-let myOutfitHue = 0;
 
 let streamEventsSeen = 0;
 const streamEventLog: string[] = [];
@@ -3219,9 +3196,8 @@ async function connect(): Promise<void> {
   void client.connection.then((connection) => {
     myId = connection.connectionId;
     myName = connection.userName;
-    // wear the same outfit everyone else sees on us
-    myOutfitHue = hueForId(myId);
-    tintRig(selfRig, myOutfitHue);
+    // Wear the same skin everyone else deterministically sees for this id.
+    dressRig(selfRig, skinForId(myId));
     updateHud();
   });
   try {

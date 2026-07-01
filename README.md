@@ -175,6 +175,9 @@ contributors, licensed CC BY-SA 4.0 — see `assets/textures/LICENSE-soothing32.
 grass/snow side tiles are composited from the pack's base + overlay textures. Some tool,
 material, and throwable sprites in `assets/items` are also adapted from Soothing 32; the
 remaining item sprites are original project art — see `assets/items/LICENSE-items.txt`.
+Additional player skins in `assets/textures/characters` are CC0 skins from the
+[SkinsDB](https://skinsdb.terraqueststudios.net/) database — see
+`assets/textures/characters/LICENSE-skins.txt`.
 
 Sampled sound effects are credited in the asset license files:
 
