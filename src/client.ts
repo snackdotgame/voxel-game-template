@@ -118,6 +118,7 @@ import {
   editKey,
   makeIsFluid,
   makeIsSolid,
+  setWorldSeed,
 } from "./shared/terrain.js";
 
 const noa = new Engine({
@@ -234,7 +235,13 @@ type ChunkData = {
   set(i: number, j: number, k: number, value: number): void;
 };
 
-noa.world.on("worldDataNeeded", (id: string, data: ChunkData, x: number, y: number, z: number) => {
+// Worldgen holds until the server's welcome message delivers the session's
+// world seed — a chunk generated before that would bake the wrong terrain.
+// Requests queue up here and flush the moment the seed lands.
+let worldSeedKnown = false;
+let pendingChunks: [string, ChunkData, number, number, number][] = [];
+
+function fillChunk(id: string, data: ChunkData, x: number, y: number, z: number): void {
   for (let i = 0; i < data.shape[0]; i++) {
     for (let j = 0; j < data.shape[1]; j++) {
       for (let k = 0; k < data.shape[2]; k++) {
@@ -263,6 +270,27 @@ noa.world.on("worldDataNeeded", (id: string, data: ChunkData, x: number, y: numb
     }
   }
   noa.world.setChunkData(id, data);
+}
+
+function applyWorldSeed(seed: number): void {
+  if (worldSeedKnown) {
+    return;
+  }
+  worldSeedKnown = true;
+  setWorldSeed(seed);
+  const queued = pendingChunks;
+  pendingChunks = [];
+  for (const [id, data, x, y, z] of queued) {
+    fillChunk(id, data, x, y, z);
+  }
+}
+
+noa.world.on("worldDataNeeded", (id: string, data: ChunkData, x: number, y: number, z: number) => {
+  if (!worldSeedKnown) {
+    pendingChunks.push([id, data, x, y, z]);
+    return;
+  }
+  fillChunk(id, data, x, y, z);
 });
 
 function applyEdit(edit: BlockEdit) {
@@ -3571,6 +3599,7 @@ function handleStreamEvent(event: { bytes: Uint8Array; json<T = unknown>(): T })
       syncEquipped();
       updateHud();
     } else if (message.type === "welcome") {
+      applyWorldSeed(message.seed);
       for (const entry of message.players) {
         playerNames.set(entry.id, entry.name);
         setPlayerLook(entry.id, entry.skin);

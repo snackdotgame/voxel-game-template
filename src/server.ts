@@ -80,8 +80,10 @@ import {
   chunkCoord,
   chunkKey,
   editKey,
+  getWorldSeed,
   makeIsFluid,
   makeIsSolid,
+  setWorldSeed,
 } from "./shared/terrain.js";
 
 const MAX_EDITS = 200_000;
@@ -245,6 +247,12 @@ const CHICKEN_WANDER_MIN_MS = 900;
 const CHICKEN_WANDER_MAX_MS = 3200;
 
 export async function main() {
+  // every session generates a fresh world: one random seed, picked before
+  // anything touches the terrain, drives all noise on both sides (clients
+  // receive it in their welcome message and hold worldgen until then)
+  setWorldSeed((Math.random() * 0x100000000) >>> 0);
+  console.log(`world seed: ${getWorldSeed()}`);
+
   const edits = new Map<string, Map<string, BlockEdit>>();
   const lookupEdit = (x: number, y: number, z: number) =>
     edits.get(chunkKey(chunkCoord(x), chunkCoord(z)))?.get(editKey(x, y, z));
@@ -1619,7 +1627,12 @@ function syncConnections(world: World) {
     for (const [id, player] of world.players) {
       roster.push({ id, name: player.name, skin: player.skin, armor: player.armor });
     }
-    connection.streams.send({ type: "welcome", you: connection.id, players: roster });
+    connection.streams.send({
+      type: "welcome",
+      you: connection.id,
+      players: roster,
+      seed: getWorldSeed(),
+    });
   }
 
   // a connection the runtime no longer reports is gone: park its player

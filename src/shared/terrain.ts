@@ -24,11 +24,35 @@ export const SEA_LEVEL = 0;
  *
  *  Integer-hash value noise so the client worldgen, client prediction
  *  sim, and server authoritative sim all see the same world. No
- *  Math.random anywhere.
+ *  Math.random anywhere — all variation flows from the world seed below.
  */
 
+// The session's world seed, mixed into every noise hash. The server picks
+// one per session and delivers it in the welcome message; both sides must
+// set it before generating any terrain (setWorldSeed drops the column
+// cache, but chunks already baked from another seed stay wrong).
+let worldSeed = 0;
+
+export function setWorldSeed(seed: number): void {
+  worldSeed = seed >>> 0;
+  columnCache.clear();
+}
+
+export function getWorldSeed(): number {
+  return worldSeed;
+}
+
+export function isValidWorldSeed(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 0xffffffff;
+}
+
 function hash3(x: number, y: number, z: number): number {
-  let h = (Math.imul(x, 374761393) + Math.imul(y, 668265263) + Math.imul(z, 2147483647)) | 0;
+  let h =
+    (Math.imul(x, 374761393) +
+      Math.imul(y, 668265263) +
+      Math.imul(z, 2147483647) +
+      Math.imul(worldSeed, 951274213)) |
+    0;
   h = Math.imul(h ^ (h >>> 13), 1274126177);
   h ^= h >>> 16;
   return (h >>> 0) / 4294967296;

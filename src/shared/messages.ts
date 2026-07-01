@@ -1,6 +1,7 @@
 import type { CharState } from "./sim.js";
 import { appearanceForId, isValidAppearance } from "./appearance.js";
 import { isValidArmorPack } from "./items.js";
+import { isValidWorldSeed } from "./terrain.js";
 
 export const READY_MESSAGE = "ready";
 
@@ -343,6 +344,8 @@ export type WelcomeMessage = {
   you: string;
   // players already in the session, so names resolve before their first join
   players: RosterEntry[];
+  // the session's world seed; the client holds worldgen until it arrives
+  seed: number;
 };
 
 export type JoinMessage = {
@@ -426,7 +429,12 @@ export function parseServerStreamMessage(value: unknown): ServerStreamMessage | 
         }
       }
     }
-    return { type: "welcome", you: value.you, players };
+    return {
+      type: "welcome",
+      you: value.you,
+      players,
+      seed: isValidWorldSeed(value.seed) ? value.seed : 0,
+    };
   }
   if (value.type === "edit") {
     return parseEditMessage(value);
