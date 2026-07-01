@@ -298,6 +298,12 @@ export function starterSlots(): InvSlot[] {
   slots[5] = { item: SNOWBALL, count: 6 };
   slots[6] = { item: BOW, count: 1 };
   slots[7] = { item: ARROW, count: 16 };
+  // TESTING: spawn wearing the full iron set — remove before shipping so
+  // armor has to be crafted (iron ore at a crafting table)
+  slots[ARMOR_BASE] = { item: HELMET, count: 1 };
+  slots[ARMOR_BASE + 1] = { item: CHESTPLATE, count: 1 };
+  slots[ARMOR_BASE + 2] = { item: LEGGINGS, count: 1 };
+  slots[ARMOR_BASE + 3] = { item: BOOTS, count: 1 };
   return slots;
 }
 
