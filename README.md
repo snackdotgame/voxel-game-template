@@ -1,4 +1,4 @@
-# Noa Voxels
+# Voxel Adventure
 
 A multiplayer voxel sandbox built on [noa-engine](https://github.com/fenomas/noa) and the
 [Snack](https://snack.game) platform. Run around a procedurally generated voxel world in third

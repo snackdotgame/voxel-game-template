@@ -16,7 +16,7 @@
       "upperLimit": 16,
       "default": 16
     },
-    "name": "Noa Voxels",
+    "name": "Voxel Adventure",
     "visibility": "private",
     "slug": "noa-voxels",
     "titleImage": "assets/noa-voxels-cover.webp",
