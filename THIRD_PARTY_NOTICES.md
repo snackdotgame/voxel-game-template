@@ -1,8 +1,20 @@
 # Third-Party Notices
 
-This project includes small portions of code adapted from third-party open
-source projects. These notices apply to source code only; bundled media
+This project includes source code adapted from third-party open source
+projects. These notices apply to source code only; bundled media
 provenance is tracked in `assets/PROVENANCE.md`.
+
+## noa-engine
+
+Repository: <https://github.com/fenomas/noa>
+
+License: MIT
+
+Used in: `src/noa`, vendored from noa-engine 0.33 and converted to TypeScript.
+The full MIT license text for this vendored code is included at
+`src/noa/LICENSE.txt`.
+
+Copyright (c) 2015-2022 Andy Hall (andy@fenomas.com)
 
 ## skinview3d
 

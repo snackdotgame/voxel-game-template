@@ -1,8 +1,7 @@
 # Asset Provenance
 
-This file records where the bundled visual and audio assets come from. A future
-root project license should not be read as overriding the third-party asset
-licenses listed here.
+This file records where the bundled visual and audio assets come from. The root
+project license does not override the third-party asset licenses listed here.
 
 ## Project-Owned Assets
 
@@ -11,7 +10,8 @@ licenses listed here.
   and mark remain project/brand identifiers.
 - `assets/noa-voxels-cover.webp` is AI-generated project artwork created for
   this template. It is not sourced from the third-party asset packs listed
-  below.
+  below. The exact generator, prompt, and creation date were not recorded in
+  this repository.
 - Current character textures are generated procedurally at runtime from
   `src/shared/appearance.ts`; there are no bundled character skin PNGs in the
   current tree.
