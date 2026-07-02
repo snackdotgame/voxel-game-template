@@ -57,6 +57,7 @@ import {
   BOW,
   BOW_DRAW_MS,
   BOW_MIN_CHARGE,
+  BLOCK_REACH,
   CHESTPLATE,
   FEATHER,
   HAND,
@@ -65,6 +66,7 @@ import {
   INV_SLOTS,
   LEGGINGS,
   MAX_HP,
+  MELEE_RANGE,
   PICKAXE,
   PLANK,
   ROCK,
@@ -3338,13 +3340,13 @@ function findAttackTarget(): string | null {
   const oy = predicted.y + 1.5;
   const oz = predicted.z;
   let best: string | null = null;
-  let bestDist = 4.2;
+  let bestDist = MELEE_RANGE;
   for (const [id, remote] of remotePlayers) {
     const cx = remote.target.x - ox;
     const cy = remote.target.y + 0.9 - oy;
     const cz = remote.target.z - oz;
     const dist = Math.hypot(cx, cy, cz);
-    if (dist > 4.2 || dist >= bestDist) {
+    if (dist > MELEE_RANGE || dist >= bestDist) {
       continue;
     }
     const along = cx * dir.x + cy * dir.y + cz * dir.z;
@@ -3361,6 +3363,16 @@ function findAttackTarget(): string | null {
   return best;
 }
 
+// the targeting ray is camera-based (long, to cover third-person zoom), so
+// block interactions get their own limit: block center within reach of the
+// character's eye line
+function blockInReach(x: number, y: number, z: number): boolean {
+  return (
+    Math.hypot(x + 0.5 - predicted.x, y + 0.5 - (predicted.y + 1.5), z + 0.5 - predicted.z) <=
+    BLOCK_REACH
+  );
+}
+
 function primaryAction(fromHold: boolean): void {
   if (fireSuppressed()) {
     return;
@@ -3375,6 +3387,10 @@ function primaryAction(fromHold: boolean): void {
   if (!noa.targetedBlock) {
     return;
   }
+  const [x, y, z] = noa.targetedBlock.position;
+  if (!blockInReach(x, y, z)) {
+    return;
+  }
   const block = noa.targetedBlock.blockID;
   if (hitDamage(equippedItem, block) <= 0) {
     if (!fromHold) {
@@ -3386,7 +3402,6 @@ function primaryAction(fromHold: boolean): void {
     }
     return;
   }
-  const [x, y, z] = noa.targetedBlock.position;
   void client.streams.send({ type: "hit", x, y, z }).catch(() => {});
 }
 
@@ -3429,7 +3444,9 @@ noa.inputs.down.on("alt-fire", () => {
   // right-clicking a crafting table opens its 3x3 grid instead of placing
   if (target && target.blockID === CRAFTING_TABLE_ID) {
     const [tx, ty, tz] = target.position;
-    setInventoryOpen(true, 3, { x: tx, y: ty, z: tz });
+    if (blockInReach(tx, ty, tz)) {
+      setInventoryOpen(true, 3, { x: tx, y: ty, z: tz });
+    }
     return;
   }
   swingT = 1;
@@ -3442,6 +3459,9 @@ noa.inputs.down.on("alt-fire", () => {
     return;
   }
   const [x, y, z] = target.adjacent;
+  if (!blockInReach(x, y, z)) {
+    return;
+  }
   // optimistic placement, reconciled by the server's echo (or reverted)
   predictEdit(itemToBlock(held.item), x, y, z);
   void client.streams

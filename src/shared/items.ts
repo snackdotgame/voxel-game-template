@@ -206,6 +206,12 @@ export function bonusDrop(block: number): number | null {
 
 export const MAX_HP = 20;
 
+// Interaction ranges from the character's eye line, like Minecraft's
+// survival reach: how far a melee swing can land on another player, and
+// how far away a block can be dug, placed against, or used.
+export const MELEE_RANGE = 3;
+export const BLOCK_REACH = 4.5;
+
 // Damage a melee swing deals with this item in hand.
 const MELEE_DAMAGE: readonly number[] = [2, 4, 5, 3, 2, 1];
 

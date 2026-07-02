@@ -11,10 +11,12 @@ import {
   ARMOR_BASE,
   ARMOR_SLOTS,
   ARROW,
+  BLOCK_REACH,
   BOW,
   FEATHER,
   INV_SLOTS,
   MAX_HP,
+  MELEE_RANGE,
   armorPiece,
   armorReduction,
   arrowLaunch,
@@ -113,7 +115,10 @@ const PROJECTILE_TTL_MS = 5_000;
 const MAX_PROJECTILES = 256;
 
 const ATTACK_COOLDOWN_MS = 400;
-const ATTACK_RANGE = 4.2;
+// validation ranges allow a block of slack over the client-side limits:
+// the server's view of the attacker lags their client by a round trip
+const ATTACK_RANGE = MELEE_RANGE + 1;
+const BLOCK_RANGE = BLOCK_REACH + 1.5;
 const MELEE_KNOCKBACK = 5;
 const RESPAWN_PROTECTION_MS = 2_000;
 // regen 1 hp/s once this long has passed without taking damage
@@ -1108,9 +1113,17 @@ function blockAt(world: World, x: number, y: number, z: number): number {
   return edit ? edit.block : baseVoxelID(x, y, z);
 }
 
+// block center within the player's (slack-padded) reach of their eye line
+function blockInRange(player: Player, x: number, y: number, z: number): boolean {
+  return (
+    Math.hypot(x + 0.5 - player.char.x, y + 0.5 - (player.char.y + 1.5), z + 0.5 - player.char.z) <=
+    BLOCK_RANGE
+  );
+}
+
 function handleHit(world: World, id: string, x: number, y: number, z: number) {
   const player = world.players.get(id);
-  if (!player) {
+  if (!player || !blockInRange(player, x, y, z)) {
     return;
   }
   const block = blockAt(world, x, y, z);
@@ -1145,6 +1158,9 @@ function handlePlace(world: World, id: string, place: PlaceMessage) {
   const { item, slot, x, y, z } = place;
   const player = world.players.get(id);
   if (!player || !isValidItem(item) || !isBlockItem(item)) {
+    return;
+  }
+  if (!blockInRange(player, x, y, z)) {
     return;
   }
   const target = blockAt(world, x, y, z);

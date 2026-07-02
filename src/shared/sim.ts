@@ -26,7 +26,7 @@ const SPRINT_SPEED = 5.612;
 // lungs. Shared so the server's drowning logic and the client's bubble
 // meter agree. EYE_HEIGHT is below the true eye line so a body floating at
 // buoyancy equilibrium reads as surfaced, not drowning.
-export const BREATH_MAX_MS = 10_000;
+export const BREATH_MAX_MS = 20_000;
 export const BREATH_REFILL_RATE = 4;
 export const EYE_HEIGHT = 1.5;
 
@@ -93,10 +93,10 @@ export function cloneState(state: CharState): CharState {
 }
 
 export function makeStepper(isSolid: IsSolid, isFluid: IsSolid = () => false): Stepper {
-  // fluidDensity tuned so an idle body floats: buoyancy (gravity * density
-  // * displaced volume, body 0.6*1.8*0.6) beats the doubled gravity once
-  // ~3/4 submerged, so the head bobs clear of the surface without input
-  const world = new Physics({ fluidDensity: 4.1 }, isSolid, isFluid);
+  // fluidDensity tuned just under neutral buoyancy (~3.09 for this body:
+  // buoyancy = gravity * density * displaced 0.6*1.8*0.6 vs doubled
+  // gravity), so an idle body sinks — but gently, not like a stone
+  const world = new Physics({ fluidDensity: 3.05 }, isSolid, isFluid);
   const body = world.addBody(new aabb([0, 0, 0], [CHAR_WIDTH, CHAR_HEIGHT, CHAR_WIDTH]));
   // match noa's player body setup (Engine constructor)
   body.gravityMultiplier = 2;
