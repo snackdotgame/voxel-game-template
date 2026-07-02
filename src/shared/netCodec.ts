@@ -3,7 +3,7 @@
 // layouts with a 2-byte magic so receivers can distinguish them from the
 // JSON stream messages.
 //
-// Input packet 'VI' (4 + 9 bytes per record):
+// Input packet 'VI' (4 + 13 bytes per record):
 //   0  u8   0x56 'V'
 //   1  u8   0x49 'I'
 //   2  u8   version
@@ -11,6 +11,7 @@
 //   then per input, oldest first:
 //     u32  input seq
 //     f32  heading (radians)
+//     f32  pitch (radians, positive looking down; drives swim direction)
 //     u8   buttons: fwd 1, back 2, left 4, right 8, jump 16, sprint 32
 //   Datagrams are fire-and-forget, so every packet carries the tail of the
 //   sender's unacked inputs (the snapshot lastSeq is the ack that trims
@@ -35,6 +36,7 @@
 //     u8   jump count
 //     u8   equipped item id
 //     u8   hp
+//     u8   breath (255 = full lungs, 0 = drowning)
 //   Names travel on the reliable channel (welcome roster / join), not here.
 
 import type { PlayerSnapshot } from "./messages.js";
@@ -54,12 +56,12 @@ const MAGIC_S = 0x53;
 const MAGIC_P = 0x50;
 const MAGIC_D = 0x44;
 const MAGIC_N = 0x4e;
-export const NET_CODEC_VERSION = 4;
+export const NET_CODEC_VERSION = 5;
 
 const INPUT_HEADER_BYTES = 4;
-const INPUT_RECORD_BYTES = 9;
+const INPUT_RECORD_BYTES = 13;
 const SNAPSHOT_HEADER_BYTES = 4;
-const RECORD_FIXED_BYTES = 53;
+const RECORD_FIXED_BYTES = 54;
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
@@ -81,7 +83,8 @@ export function encodeInputs(inputs: readonly CharInput[]): Uint8Array {
     const input = inputs[i];
     view.setUint32(offset, input.seq, true);
     view.setFloat32(offset + 4, input.heading, true);
-    bytes[offset + 8] =
+    view.setFloat32(offset + 8, input.pitch, true);
+    bytes[offset + 12] =
       (input.fwd ? 1 : 0) |
       (input.back ? 2 : 0) |
       (input.left ? 4 : 0) |
@@ -109,13 +112,17 @@ export function decodeInputs(bytes: Uint8Array): CharInput[] | undefined {
   let offset = INPUT_HEADER_BYTES;
   for (let i = 0; i < count; i++) {
     const heading = view.getFloat32(offset + 4, true);
-    if (!Number.isFinite(heading)) {
+    const pitch = view.getFloat32(offset + 8, true);
+    if (!Number.isFinite(heading) || !Number.isFinite(pitch)) {
       return undefined;
     }
-    const buttons = bytes[offset + 8];
+    const buttons = bytes[offset + 12];
     inputs.push({
       seq: view.getUint32(offset, true),
       heading,
+      // half-pi bound like a real look pitch, so a hostile client can't
+      // request outsized dive speeds
+      pitch: Math.max(-Math.PI / 2, Math.min(Math.PI / 2, pitch)),
       fwd: (buttons & 1) !== 0,
       back: (buttons & 2) !== 0,
       left: (buttons & 4) !== 0,
@@ -183,6 +190,7 @@ export function encodeSnapshots(
       bytes[offset + 50] = Math.max(0, Math.min(255, snap.state.jumpCount));
       bytes[offset + 51] = Math.max(0, Math.min(255, snap.item));
       bytes[offset + 52] = Math.max(0, Math.min(255, snap.hp));
+      bytes[offset + 53] = Math.max(0, Math.min(255, snap.breath));
       offset += RECORD_FIXED_BYTES;
     }
     packets.push(bytes);
@@ -328,6 +336,7 @@ export function decodeSnapshots(bytes: Uint8Array): PlayerSnapshot[] | undefined
       heading: view.getFloat32(offset + 4, true),
       item: bytes[offset + 51],
       hp: bytes[offset + 52],
+      breath: bytes[offset + 53],
       state: {
         x: view.getFloat64(offset + 8, true),
         y: view.getFloat64(offset + 16, true),

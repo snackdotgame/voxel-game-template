@@ -2161,6 +2161,7 @@ function sampleInput(): CharInput {
   return {
     seq: nextSeq++,
     heading: playerHeading,
+    pitch: noa.camera.pitch,
     fwd: !ui && state.forward === true,
     back: !ui && state.backward === true,
     left: !ui && state.left === true,
@@ -2267,6 +2268,10 @@ function reconcile(snap: PlayerSnapshot) {
   if (snap.hp !== myHp) {
     myHp = snap.hp;
     updateHearts();
+  }
+  if (snap.breath !== myBreath) {
+    myBreath = snap.breath;
+    updateBubbles();
   }
   const ackIndex = pending.findIndex((entry) => entry.input.seq === snap.lastSeq);
   if (ackIndex === -1) {
@@ -2943,6 +2948,32 @@ function updateHearts(): void {
   }
 }
 updateHearts();
+
+// breath bubbles, Minecraft-style: a row above the hearts that only shows
+// while the lungs aren't full, draining as breath (0-255, from the server
+// snapshots) runs out
+const bubblesEl = uiDiv(
+  "bottom: 84px; left: 50%; transform: translateX(-50%); display: none; gap: 3px;" +
+    "font: 13px/1 system-ui, sans-serif; text-shadow: 0 1px 2px #000;",
+);
+const BUBBLE_COUNT = 10;
+const bubbleSpans: HTMLSpanElement[] = [];
+for (let i = 0; i < BUBBLE_COUNT; i++) {
+  const span = document.createElement("span");
+  span.textContent = "●";
+  bubblesEl.appendChild(span);
+  bubbleSpans.push(span);
+}
+
+let myBreath = 255;
+
+function updateBubbles(): void {
+  bubblesEl.style.display = myBreath >= 255 ? "none" : "flex";
+  const full = Math.ceil((myBreath / 255) * BUBBLE_COUNT);
+  for (let i = 0; i < BUBBLE_COUNT; i++) {
+    bubbleSpans[i].style.color = i < full ? "#8fd3ff" : "rgba(255,255,255,0.18)";
+  }
+}
 
 let connectionState = "connecting";
 let myName = "";
@@ -3774,9 +3805,12 @@ function handleStreamEvent(event: { bytes: Uint8Array; json<T = unknown>(): T })
       const attackerName =
         message.attacker === myId ? "you" : (playerNames.get(message.attacker) ?? "a player");
       showNotice(
-        // a victim who is their own attacker died to the world (fall damage)
+        // a victim who is their own attacker died to the world; the cause
+        // says how (drowned vs the default, a hard landing)
         message.victim === message.attacker
-          ? `${victimName} fell from a great height${message.victim === myId ? "!" : ""}`
+          ? message.cause === "drown"
+            ? `${victimName} drowned${message.victim === myId ? "!" : ""}`
+            : `${victimName} fell from a great height${message.victim === myId ? "!" : ""}`
           : message.victim === myId
             ? `You were slain by ${attackerName}!`
             : `${victimName} was slain by ${attackerName}`,

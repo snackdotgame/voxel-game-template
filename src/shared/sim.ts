@@ -21,9 +21,20 @@ const HALF_W = CHAR_WIDTH / 2;
 const WALK_SPEED = 4.317;
 const SPRINT_SPEED = 5.612;
 
+// Breath: how long a player can stay underwater (eyes below the surface)
+// before drowning damage starts, and how much faster surfacing refills the
+// lungs. Shared so the server's drowning logic and the client's bubble
+// meter agree. EYE_HEIGHT is below the true eye line so a body floating at
+// buoyancy equilibrium reads as surfaced, not drowning.
+export const BREATH_MAX_MS = 10_000;
+export const BREATH_REFILL_RATE = 4;
+export const EYE_HEIGHT = 1.5;
+
 export type CharInput = {
   seq: number;
   heading: number;
+  // look pitch in radians (positive = looking down); swimming follows it
+  pitch: number;
   fwd: boolean;
   back: boolean;
   left: boolean;
@@ -82,9 +93,10 @@ export function cloneState(state: CharState): CharState {
 }
 
 export function makeStepper(isSolid: IsSolid, isFluid: IsSolid = () => false): Stepper {
-  // fluidDensity tuned so a fully submerged body sinks slowly; holding
-  // jump adds swim force to rise
-  const world = new Physics({ fluidDensity: 2.8 }, isSolid, isFluid);
+  // fluidDensity tuned so an idle body floats: buoyancy (gravity * density
+  // * displaced volume, body 0.6*1.8*0.6) beats the doubled gravity once
+  // ~3/4 submerged, so the head bobs clear of the surface without input
+  const world = new Physics({ fluidDensity: 4.1 }, isSolid, isFluid);
   const body = world.addBody(new aabb([0, 0, 0], [CHAR_WIDTH, CHAR_HEIGHT, CHAR_WIDTH]));
   // match noa's player body setup (Engine constructor)
   body.gravityMultiplier = 2;
@@ -153,10 +165,17 @@ export function makeStepper(isSolid: IsSolid, isFluid: IsSolid = () => false): S
       move.heading = heading;
     }
 
-    // swimming: holding jump in water pushes upward (deterministic — the
-    // check reads the world, not transient body state)
-    if (input.jump && isFluid(Math.floor(prev.x), Math.floor(prev.y + 0.6), Math.floor(prev.z))) {
+    // swimming (deterministic — the checks read the world, not transient
+    // body state): holding jump pushes upward; otherwise, while stroking,
+    // vertical speed follows the look pitch, so a level gaze holds depth
+    // (sprinting doesn't drag you under) and aiming down dives
+    const inWater = isFluid(Math.floor(prev.x), Math.floor(prev.y + 0.6), Math.floor(prev.z));
+    if (input.jump && inWater) {
       body.applyForce([0, 34, 0]);
+    } else if (inWater && move.running) {
+      const targetVy = -Math.sin(input.pitch) * 4;
+      const force = Math.max(-40, Math.min(40, (targetVy - prev.vy) * 10));
+      body.applyForce([0, force, 0]);
     }
 
     // same per-tick order as noa: movement system, then physics

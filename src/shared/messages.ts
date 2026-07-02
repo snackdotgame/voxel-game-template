@@ -16,6 +16,8 @@ export type PlayerSnapshot = {
   // equipped item id (see ITEMS in items.ts)
   item: number;
   hp: number;
+  // remaining breath, 255 = full lungs, 0 = drowning (see BREATH_MAX_MS)
+  breath: number;
   state: CharState;
 };
 
@@ -103,11 +105,13 @@ export type HurtMessage = {
   amount: number;
 };
 
-// Server -> clients: a player died and respawned.
+// Server -> clients: a player died and respawned. Victim === attacker means
+// the world did it; `cause` distinguishes drowning from the default fall.
 export type DeathMessage = {
   type: "death";
   victim: string;
   attacker: string;
+  cause?: "drown";
 };
 
 // Client -> server: one dig hit on a block (blocks have HP).
@@ -472,7 +476,12 @@ export function parseServerStreamMessage(value: unknown): ServerStreamMessage | 
     typeof value.victim === "string" &&
     typeof value.attacker === "string"
   ) {
-    return { type: "death", victim: value.victim, attacker: value.attacker };
+    return {
+      type: "death",
+      victim: value.victim,
+      attacker: value.attacker,
+      cause: value.cause === "drown" ? "drown" : undefined,
+    };
   }
   if (value.type === "inventory" && Array.isArray(value.slots)) {
     const slots = parseWireSlots(value.slots);

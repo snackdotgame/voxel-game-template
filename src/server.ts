@@ -62,6 +62,9 @@ import {
 import { appearanceForId } from "./shared/appearance.js";
 import { craftCellOf, isCraftSlot, matchRecipe } from "./shared/recipes.js";
 import {
+  BREATH_MAX_MS,
+  BREATH_REFILL_RATE,
+  EYE_HEIGHT,
   SIM_TICK_MS,
   type CharInput,
   type CharState,
@@ -136,6 +139,9 @@ type Player = {
   lastSeq: number;
   item: number;
   hp: number;
+  // remaining breath in sim-time ms; drains underwater and goes negative
+  // while drowning (each -DROWN_INTERVAL_MS costs a tick of damage)
+  breathMs: number;
   lastDamageAt: number;
   lastAttackAt: number;
   protectedUntil: number;
@@ -310,6 +316,7 @@ export async function main() {
           heading: player.heading,
           item: player.item,
           hp: player.hp,
+          breath: Math.round((Math.max(0, player.breathMs) / BREATH_MAX_MS) * 255),
           state: player.char,
         });
       }
@@ -674,6 +681,7 @@ function damagePlayer(
   if (victim.hp <= 0) {
     victim.char = spawnFor(world, victimId);
     victim.hp = MAX_HP;
+    victim.breathMs = BREATH_MAX_MS;
     victim.protectedUntil = now + RESPAWN_PROTECTION_MS;
     server.streams.broadcast({ type: "death", victim: victimId, attacker: attackerId });
   }
@@ -719,8 +727,42 @@ function applyFallDamage(world: World, victimId: string, impactVy: number) {
   if (victim.hp <= 0) {
     victim.char = spawnFor(world, victimId);
     victim.hp = MAX_HP;
+    victim.breathMs = BREATH_MAX_MS;
     victim.protectedUntil = now + RESPAWN_PROTECTION_MS;
     server.streams.broadcast({ type: "death", victim: victimId, attacker: victimId });
+  }
+}
+
+// Drowning: once breath runs out, staying under costs a heart each second
+// until the player surfaces or dies. Armor doesn't absorb it, and like fall
+// damage the victim is their own attacker — the death message carries
+// cause: "drown" so clients word it right.
+const DROWN_DAMAGE = 2;
+const DROWN_INTERVAL_MS = 1_000;
+
+function applyDrownDamage(world: World, victimId: string) {
+  const victim = world.players.get(victimId);
+  if (!victim) {
+    return;
+  }
+  const now = server.elapsedMs();
+  if (now < victim.protectedUntil) {
+    return;
+  }
+  victim.hp -= DROWN_DAMAGE;
+  victim.lastDamageAt = now;
+  server.streams.broadcast({ type: "hurt", id: victimId, by: victimId, amount: DROWN_DAMAGE });
+  if (victim.hp <= 0) {
+    victim.char = spawnFor(world, victimId);
+    victim.hp = MAX_HP;
+    victim.breathMs = BREATH_MAX_MS;
+    victim.protectedUntil = now + RESPAWN_PROTECTION_MS;
+    server.streams.broadcast({
+      type: "death",
+      victim: victimId,
+      attacker: victimId,
+      cause: "drown",
+    });
   }
 }
 
@@ -1379,6 +1421,27 @@ function applyInput(world: World, id: string, player: Player, message: CharInput
   if (wasAirborne && fallVy < 0 && onGround(player.char)) {
     applyFallDamage(world, id, fallVy);
   }
+  // breath: eyes below the water surface drain the lungs in sim time; once
+  // they're empty, every further DROWN_INTERVAL_MS underwater costs a tick
+  // of drowning damage. Surfacing refills several times faster.
+  const eyes = blockAt(
+    world,
+    Math.floor(player.char.x),
+    Math.floor(player.char.y + EYE_HEIGHT),
+    Math.floor(player.char.z),
+  );
+  if (eyes === WATER_ID) {
+    player.breathMs -= SIM_TICK_MS;
+    if (player.breathMs <= -DROWN_INTERVAL_MS) {
+      player.breathMs = 0;
+      applyDrownDamage(world, id);
+    }
+  } else if (player.breathMs < BREATH_MAX_MS) {
+    player.breathMs = Math.min(
+      BREATH_MAX_MS,
+      Math.max(0, player.breathMs) + SIM_TICK_MS * BREATH_REFILL_RATE,
+    );
+  }
 }
 
 function drainInputQueue(world: World, id: string, player: Player) {
@@ -1421,6 +1484,7 @@ function addPlayer(world: World, connection: Connection) {
     lastSeq: 0,
     item: fresh ? fresh.item : 0,
     hp: fresh ? fresh.hp : MAX_HP,
+    breathMs: BREATH_MAX_MS,
     lastDamageAt: -100000,
     lastAttackAt: -100000,
     protectedUntil: 0,
@@ -1596,6 +1660,7 @@ function stepChickens(world: World, loadedChunks: Set<string>): Chicken[] {
     const input: CharInput = {
       seq: 0,
       heading: chicken.heading,
+      pitch: 0,
       fwd: chicken.moving,
       back: false,
       left: false,
