@@ -227,3 +227,9 @@ shared consistently, equipment visibility, inventory isolation, and position con
 after movement under 120ms latency / 30ms jitter / 10% datagram loss.
 
 Checks: `npm run check` (format, client+server typecheck, lint).
+
+## License
+
+Project-owned source code is licensed under the MIT License. Bundled third-party
+source and media keep their own license terms; see `THIRD_PARTY_NOTICES.md` and
+`assets/PROVENANCE.md`.
