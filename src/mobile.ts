@@ -15,6 +15,14 @@
  *    - Jump, first/third-person View, and Inventory buttons cover the keys
  *      (space / V / E) with no touch equivalent; hotbar slots become tappable.
  *
+ *  Layout: the Snack host shell pins its own menu controls to the top-left
+ *  corner (`.snack-shell-controls`: top/left max(8px, safe-area), ~44px tall,
+ *  z-index 70), so the View/Inventory buttons sit in a column BELOW that strip.
+ *  The action cluster sits bottom-right, raised above the hotbar (which spans
+ *  nearly the full width of a portrait phone once scaled to fit). Buttons show
+ *  icons, not words — SVG paths inlined from Lucide (https://lucide.dev,
+ *  ISC license) so no icon dependency is added.
+ *
  *  Fullscreen: requests real fullscreen on the first tap (reclaims the address
  *  bar on Android) and sizes the game to the dynamic viewport. The controls are
  *  pinned to the visible rect via the visualViewport API + safe-area insets, so
@@ -48,12 +56,70 @@ const JOY_DEAD = 0.22; // fraction of radius ignored before a direction counts
 const SPRINT_MAG = 0.82; // push past this fraction of full deflection to sprint
 const MOVE_SIDE_FRACTION = 0.45; // left fraction of the screen is the joystick zone
 
+/*
+ *      Icons
+ *
+ *  Path data copied from Lucide (https://lucide.dev), lucide-static v0.525.0,
+ *  ISC license. Rendered as 24x24 stroke icons that inherit the button color.
+ */
+const ICON_PICKAXE =
+  '<path d="M14.531 12.469 6.619 20.38a1 1 0 1 1-3-3l7.912-7.912"/>' +
+  '<path d="M15.686 4.314A12.5 12.5 0 0 0 5.461 2.958 1 1 0 0 0 5.58 4.71a22 22 0 0 1 6.318 3.393"/>' +
+  '<path d="M17.7 3.7a1 1 0 0 0-1.4 0l-4.6 4.6a1 1 0 0 0 0 1.4l2.6 2.6a1 1 0 0 0 1.4 0l4.6-4.6a1 1 0 0 0 0-1.4z"/>' +
+  '<path d="M19.686 8.314a12.501 12.501 0 0 1 1.356 10.225 1 1 0 0 1-1.751-.119 22 22 0 0 0-3.393-6.319"/>';
+const ICON_ARROW_BIG_UP = '<path d="M9 18v-6H5l7-7 7 7h-4v6H9z"/>';
+const ICON_BOX =
+  '<path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/>' +
+  '<path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/>';
+const ICON_SEND =
+  '<path d="M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z"/>' +
+  '<path d="m21.854 2.147-10.94 10.939"/>';
+const ICON_SWITCH_CAMERA =
+  '<path d="M11 19H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h5"/>' +
+  '<path d="M13 5h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-5"/>' +
+  '<circle cx="12" cy="12" r="3"/><path d="m18 22-3-3 3-3"/><path d="m6 2 3 3-3 3"/>';
+const ICON_BACKPACK =
+  '<path d="M4 10a4 4 0 0 1 4-4h8a4 4 0 0 1 4 4v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/>' +
+  '<path d="M8 10h8"/><path d="M8 18h8"/>' +
+  '<path d="M8 22v-6a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v6"/>' +
+  '<path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/>';
+const ICON_MOVE =
+  '<path d="M12 2v20"/><path d="m15 19-3 3-3-3"/><path d="m19 9 3 3-3 3"/>' +
+  '<path d="M2 12h20"/><path d="m5 9-3 3 3 3"/><path d="m9 5 3-3 3 3"/>';
+
+function svgIcon(paths: string, size: number): string {
+  return (
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}"` +
+    ' viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"' +
+    ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"' +
+    ` style="pointer-events: none; display: block;">${paths}</svg>`
+  );
+}
+
+// The Snack host shell rewrites the game frame's URL, dropping any query
+// params the shell page was opened with — and referrers are origin-only cross
+// origin — so `?touch=1` can't reach the game through the shell. localStorage
+// (set once on the game's origin from devtools) works as a sticky override.
+function touchOverride(): string | null {
+  const own = new URLSearchParams(window.location.search).get("touch");
+  if (own !== null) {
+    return own;
+  }
+  try {
+    return localStorage.getItem("snack-touch");
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Whether to show touch controls. Auto-detects a coarse-pointer touch device;
- * override with `?touch=1` / `?touch=0` in the URL for testing on desktop.
+ * override for desktop testing with `?touch=1` / `?touch=0` in the URL, or —
+ * since the host shell strips the game frame's query params — by running
+ * `localStorage.setItem("snack-touch", "1")` in the game frame's console.
  */
 export function isTouchDevice(): boolean {
-  const override = new URLSearchParams(window.location.search).get("touch");
+  const override = touchOverride();
   if (override === "1" || override === "true") {
     return true;
   }
@@ -160,6 +226,63 @@ function buildOverlayRoot(): HTMLDivElement {
 }
 
 /*
+ *      "Drag to move" hint
+ *
+ *  A pulsing pill floating in the joystick zone so new players discover the
+ *  invisible floating joystick. Removed on the first move-drag (the gesture it
+ *  teaches), or a while after the first touch for players who are busy
+ *  looking/mining instead. The timeout is armed by the first touch — not
+ *  install time — because blocking overlays (the character creator) sit above
+ *  the touch surface, and the hint shouldn't burn down behind them.
+ */
+const HINT_TIMEOUT_MS = 12000;
+
+type MoveHint = { dismiss: () => void; armTimeout: () => void };
+
+function showMoveHint(root: HTMLElement): MoveHint {
+  const style = document.createElement("style");
+  style.textContent =
+    "@keyframes snack-hint-pulse { 0%, 100% { transform: translateX(-50%) scale(1); }" +
+    " 50% { transform: translateX(-50%) scale(1.07); } }";
+  document.head.appendChild(style);
+
+  const hint = document.createElement("div");
+  hint.innerHTML = `${svgIcon(ICON_MOVE, 18)}<span>Drag to move</span>`;
+  hint.style.cssText =
+    "position: absolute; left: 22%; bottom: 32%; transform: translateX(-50%);" +
+    "display: flex; align-items: center; gap: 8px; padding: 10px 16px;" +
+    "border-radius: 999px; color: #fff; font: 600 13px/1 system-ui, sans-serif;" +
+    "background: rgba(20,20,28,0.6); border: 1px solid rgba(255,255,255,0.25);" +
+    "pointer-events: none; white-space: nowrap;" +
+    "animation: snack-hint-pulse 1.6s ease-in-out infinite;";
+  root.appendChild(hint);
+
+  let dismissed = false;
+  const dismiss = (): void => {
+    if (dismissed) {
+      return;
+    }
+    dismissed = true;
+    hint.style.animation = "";
+    hint.style.transition = "opacity 0.4s";
+    hint.style.opacity = "0";
+    setTimeout(() => {
+      hint.remove();
+      style.remove();
+    }, 450);
+  };
+  let armed = false;
+  const armTimeout = (): void => {
+    if (armed || dismissed) {
+      return;
+    }
+    armed = true;
+    setTimeout(dismiss, HINT_TIMEOUT_MS);
+  };
+  return { dismiss, armTimeout };
+}
+
+/*
  *      Joystick + look on one pointer-capture surface
  */
 function setupSurface(noa: Engine, root: HTMLElement): void {
@@ -179,6 +302,8 @@ function setupSurface(noa: Engine, root: HTMLElement): void {
     "border: 2px solid rgba(255,255,255,0.55);";
   joybase.appendChild(joyknob);
   root.appendChild(joybase);
+
+  const moveHint = showMoveHint(root);
 
   const st = noa.inputs.state as Record<string, boolean>;
   let moveId = -1;
@@ -213,8 +338,10 @@ function setupSurface(noa: Engine, root: HTMLElement): void {
   surface.addEventListener("pointerdown", (e: PointerEvent) => {
     e.preventDefault();
     surface.setPointerCapture(e.pointerId);
+    moveHint.armTimeout();
     const vv = window.visualViewport;
     if (e.clientX < window.innerWidth * MOVE_SIDE_FRACTION && moveId === -1) {
+      moveHint.dismiss();
       moveId = e.pointerId;
       center.x = e.clientX;
       center.y = e.clientY;
@@ -267,16 +394,25 @@ function setupSurface(noa: Engine, root: HTMLElement): void {
 /*
  *      Action buttons
  */
-type ButtonSpec = { label: string; bg: string; size: number; pos: string };
+type ButtonSpec = {
+  /** lucide path data, drawn at ~45% of the button diameter */
+  icon: string;
+  /** accessible name (the old text label) */
+  label: string;
+  bg: string;
+  size: number;
+  pos: string;
+};
 
 function makeButton(parent: HTMLElement, spec: ButtonSpec): HTMLDivElement {
   const el = document.createElement("div");
-  el.textContent = spec.label;
+  el.role = "button";
+  el.ariaLabel = spec.label;
+  el.innerHTML = svgIcon(spec.icon, Math.round(spec.size * 0.45));
   el.style.cssText =
     `position: absolute; ${spec.pos} width: ${spec.size}px; height: ${spec.size}px;` +
     "border-radius: 50%; display: flex; align-items: center; justify-content: center;" +
-    "text-align: center; color: #fff; font: 600 12px/1.05 system-ui, sans-serif;" +
-    `background: ${spec.bg}; border: 2px solid rgba(255,255,255,0.32);` +
+    `color: #fff; background: ${spec.bg}; border: 2px solid rgba(255,255,255,0.32);` +
     "box-shadow: 0 2px 6px rgba(0,0,0,0.4); pointer-events: auto; touch-action: none;" +
     "user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;";
   parent.appendChild(el);
@@ -307,6 +443,9 @@ function onTap(el: HTMLElement, fn: () => void): void {
   onHold(el, fn, () => {});
 }
 
+// The cluster floats above the hotbar: scaled to fit, the hotbar spans nearly
+// the full width of a portrait phone (9 slots ≈ 480px natural), with its top
+// edge around 52px up — so every button keeps `bottom` ≥ 64px to clear it.
 function setupActionButtons(noa: Engine, root: HTMLElement, opts: MobileControlOptions): void {
   const st = noa.inputs.state as Record<string, boolean>;
   const safeR = "env(safe-area-inset-right)";
@@ -315,10 +454,11 @@ function setupActionButtons(noa: Engine, root: HTMLElement, opts: MobileControlO
   // BREAK / ATTACK (big, corner) — hold to keep mining; emitting fire down/up
   // also drives bow draw + release. The client's 80ms repeat watches state.fire.
   const breakBtn = makeButton(root, {
-    label: "BREAK",
+    icon: ICON_PICKAXE,
+    label: "Break / attack",
     bg: "rgba(200,64,64,0.5)",
-    size: 84,
-    pos: `right: calc(22px + ${safeR}); bottom: calc(40px + ${safeB});`,
+    size: 92,
+    pos: `right: calc(16px + ${safeR}); bottom: calc(64px + ${safeB});`,
   });
   onHold(
     breakBtn,
@@ -334,10 +474,11 @@ function setupActionButtons(noa: Engine, root: HTMLElement, opts: MobileControlO
 
   // JUMP / SWIM — hold to keep rising in water
   const jumpBtn = makeButton(root, {
-    label: "JUMP",
+    icon: ICON_ARROW_BIG_UP,
+    label: "Jump / swim",
     bg: "rgba(70,120,210,0.5)",
-    size: 60,
-    pos: `right: calc(120px + ${safeR}); bottom: calc(46px + ${safeB});`,
+    size: 68,
+    pos: `right: calc(120px + ${safeR}); bottom: calc(72px + ${safeB});`,
   });
   onHold(
     jumpBtn,
@@ -351,28 +492,32 @@ function setupActionButtons(noa: Engine, root: HTMLElement, opts: MobileControlO
 
   // PLACE / USE — emits alt-fire (places held block, or opens a crafting table)
   const placeBtn = makeButton(root, {
-    label: "PLACE",
+    icon: ICON_BOX,
+    label: "Place / use",
     bg: "rgba(70,170,90,0.5)",
-    size: 60,
-    pos: `right: calc(120px + ${safeR}); bottom: calc(112px + ${safeB});`,
+    size: 68,
+    pos: `right: calc(120px + ${safeR}); bottom: calc(152px + ${safeB});`,
   });
   onTap(placeBtn, () => noa.inputs.down.emit("alt-fire"));
 
   // THROW — emits mid-fire (throws the held item)
   const throwBtn = makeButton(root, {
-    label: "THROW",
+    icon: ICON_SEND,
+    label: "Throw held item",
     bg: "rgba(90,90,120,0.5)",
-    size: 54,
-    pos: `right: calc(180px + ${safeR}); bottom: calc(50px + ${safeB});`,
+    size: 60,
+    pos: `right: calc(30px + ${safeR}); bottom: calc(168px + ${safeB});`,
   });
   onTap(throwBtn, () => noa.inputs.down.emit("mid-fire"));
 
-  // VIEW — first/third person toggle (the V key)
+  // VIEW — first/third person toggle (the V key). Below the host shell's menu
+  // strip (~44px tall at the top-left corner) so the two never overlap.
   const viewBtn = makeButton(root, {
-    label: "VIEW",
+    icon: ICON_SWITCH_CAMERA,
+    label: "Toggle first/third person",
     bg: "rgba(20,20,28,0.55)",
-    size: 50,
-    pos: "top: calc(14px + env(safe-area-inset-top)); left: calc(14px + env(safe-area-inset-left));",
+    size: 56,
+    pos: "top: calc(60px + env(safe-area-inset-top)); left: calc(12px + env(safe-area-inset-left));",
   });
   onTap(viewBtn, opts.toggleView);
 }
@@ -381,13 +526,24 @@ function setupActionButtons(noa: Engine, root: HTMLElement, opts: MobileControlO
  *      Hotbar
  *
  *  Move the HUD hotbar into the viewport-tracked overlay (so it sits in the
- *  visible rect), shrink it for narrow screens, and make each slot tappable.
+ *  visible rect), scale it to fit the visible width (never up past 1, so the
+ *  slots stay as big as the screen allows — a fixed shrink made them
+ *  needlessly small in landscape), and make each slot tappable.
  */
 function attachHotbar(root: HTMLElement, opts: MobileControlOptions): void {
   root.appendChild(opts.hotbarEl);
   opts.hotbarEl.style.transformOrigin = "bottom center";
-  opts.hotbarEl.style.transform = "translateX(-50%) scale(0.82)";
   opts.hotbarEl.style.bottom = "calc(12px + env(safe-area-inset-bottom))";
+  const fit = (): void => {
+    const width = window.visualViewport?.width ?? window.innerWidth;
+    // offsetWidth is the natural layout width — transforms don't affect it
+    const natural = opts.hotbarEl.offsetWidth;
+    const scale = natural > 0 ? Math.min(1, (width - 16) / natural) : 1;
+    opts.hotbarEl.style.transform = `translateX(-50%) scale(${scale})`;
+  };
+  fit();
+  window.visualViewport?.addEventListener("resize", fit);
+  window.addEventListener("resize", fit);
   opts.hotbarSlots.forEach((slot, i) => {
     slot.root.style.pointerEvents = "auto";
     slot.root.style.cursor = "pointer";
@@ -403,12 +559,16 @@ function attachHotbar(root: HTMLElement, opts: MobileControlOptions): void {
  */
 function setupInventoryButton(opts: MobileControlOptions): void {
   const el = document.createElement("div");
-  el.textContent = "INV";
+  el.role = "button";
+  el.ariaLabel = "Inventory";
+  el.innerHTML = svgIcon(ICON_BACKPACK, 25);
+  // stacked under the VIEW button in the left column (which itself sits below
+  // the host shell's top-left menu strip)
   el.style.cssText =
-    "position: fixed; z-index: 25; top: calc(14px + env(safe-area-inset-top));" +
-    "left: calc(74px + env(safe-area-inset-left)); width: 50px; height: 50px;" +
+    "position: fixed; z-index: 25; top: calc(128px + env(safe-area-inset-top));" +
+    "left: calc(12px + env(safe-area-inset-left)); width: 56px; height: 56px;" +
     "border-radius: 50%; display: flex; align-items: center; justify-content: center;" +
-    "color: #fff; font: 600 12px/1.05 system-ui, sans-serif; background: rgba(20,20,28,0.55);" +
+    "color: #fff; background: rgba(20,20,28,0.55);" +
     "border: 2px solid rgba(255,255,255,0.32); box-shadow: 0 2px 6px rgba(0,0,0,0.4);" +
     "pointer-events: auto; touch-action: none; user-select: none; -webkit-user-select: none;" +
     "-webkit-touch-callout: none;";
