@@ -675,6 +675,9 @@ type Rig = {
   body: Group;
   phase: number;
   idleT: number;
+  // blended swim-pose amount in radians of body pitch (0 = upright);
+  // eased like Minecraft's swimAmount so entering/leaving water is smooth
+  swimTilt: number;
   tool: Group | null;
   skin: MeshLambertMaterial;
   // armor overlay meshes indexed by wear slot (helmet..boots); dressRig
@@ -1084,6 +1087,7 @@ function buildRig(name: string, look: number, armor = 0): Rig {
     rightLeg,
     phase: 0,
     idleT: 0,
+    swimTilt: 0,
     tool: null,
     skin: material,
     armorParts,
@@ -1102,18 +1106,37 @@ function buildRig(name: string, look: number, armor = 0): Rig {
 // between vanilla walk (4.317) and sprint (5.612) ground speeds
 const RUN_SPEED_THRESHOLD = 5;
 
-function animateRig(rig: Rig, speed: number, grounded: boolean, dtSec: number, swinging = false) {
+// Swimming (like Minecraft's swim pose): the whole model pitches toward
+// horizontal about the hips while moving through water, arms and legs do a
+// symmetric breaststroke; floating in place treads water upright instead.
+const SWIM_TILT = 1.25; // radians of body pitch when in full stroke (~72°)
+const SWIM_PIVOT_Y = 0.675; // hip height — legs kick around this point
+
+function animateRig(
+  rig: Rig,
+  speed: number,
+  grounded: boolean,
+  dtSec: number,
+  swinging = false,
+  inWater = false,
+) {
   rig.idleT += dtSec;
+  const swimming = inWater && !grounded;
+  const stroking = swimming && speed > 0.4;
   const moving = grounded && speed > 0.4;
   const running = moving && speed > RUN_SPEED_THRESHOLD;
   if (moving) {
     rig.phase += dtSec * (running ? 10 : 8);
+  } else if (swimming) {
+    rig.phase += dtSec * (stroking ? 3.4 : 2.5);
   }
   const t = rig.phase;
   const PI = Math.PI;
 
   let lLegX = 0;
   let rLegX = 0;
+  let lLegZ = 0;
+  let rLegZ = 0;
   let lArmX = 0;
   let rArmX = 0;
   let lArmZ = 0;
@@ -1122,7 +1145,30 @@ function animateRig(rig: Rig, speed: number, grounded: boolean, dtSec: number, s
   let headX = 0;
   let bodyBob = 0;
 
-  if (!grounded) {
+  if (stroking) {
+    // breaststroke: both arms move together — reach forward past the head,
+    // pull out and down to the hips, then tuck back in for the recovery —
+    // while the legs frog-kick in counter-phase (knees tuck during the arm
+    // recovery, then snap straight into the glide)
+    const pull = Math.max(0, Math.sin(t)); // first half of the cycle
+    const tuck = Math.max(0, -Math.sin(t)); // second half
+    lArmX = -1.3 - 1.1 * Math.cos(t);
+    rArmX = lArmX;
+    lArmZ = 0.2 + 0.45 * pull;
+    rArmZ = -lArmZ;
+    lLegX = -0.3 + 0.5 * Math.sin(t);
+    rLegX = lLegX;
+    lLegZ = 0.2 * tuck;
+    rLegZ = -lLegZ;
+    // tip the face up toward the horizon while the body lies prone
+    headX = -rig.swimTilt * 0.75;
+  } else if (swimming) {
+    // treading water: arms sculling out to the sides, legs slowly cycling
+    lArmZ = 0.75 + Math.cos(t) * 0.25;
+    rArmZ = -(0.75 + Math.cos(t) * 0.25);
+    lLegX = Math.sin(t) * 0.35;
+    rLegX = Math.sin(t + PI) * 0.35;
+  } else if (!grounded) {
     // airborne: legs scissor slightly, arms trail up
     lLegX = 0.35;
     rLegX = -0.35;
@@ -1163,8 +1209,8 @@ function animateRig(rig: Rig, speed: number, grounded: boolean, dtSec: number, s
     node.rotation.x += (x - node.rotation.x) * blend;
     node.rotation.z += (z - node.rotation.z) * blend;
   };
-  ease(rig.leftLeg, lLegX, 0);
-  ease(rig.rightLeg, rLegX, 0);
+  ease(rig.leftLeg, lLegX, lLegZ);
+  ease(rig.rightLeg, rLegX, rLegZ);
   ease(rig.leftArm, lArmX, lArmZ);
   if (!swinging) {
     ease(rig.rightArm, rArmX, rArmZ);
@@ -1172,7 +1218,16 @@ function animateRig(rig: Rig, speed: number, grounded: boolean, dtSec: number, s
   }
   rig.head.rotation.y += (headY - rig.head.rotation.y) * blend;
   rig.head.rotation.x += (headX - rig.head.rotation.x) * blend;
-  rig.body.position.y = bodyBob;
+
+  // swim tilt: pitch the whole model (rig.body carries every part) toward
+  // horizontal, pivoting about the hips instead of the feet — the position
+  // offset cancels the hip point's motion under the rotation so the body
+  // lies flat in the water rather than planking up from the ankles
+  const tiltBlend = 1 - Math.exp(-dtSec * 6);
+  rig.swimTilt += ((stroking ? SWIM_TILT : 0) - rig.swimTilt) * tiltBlend;
+  rig.body.rotation.x = rig.swimTilt;
+  rig.body.position.y = bodyBob + SWIM_PIVOT_Y * (1 - Math.cos(rig.swimTilt));
+  rig.body.position.z = -SWIM_PIVOT_Y * Math.sin(rig.swimTilt);
 }
 
 // HitAnimation from minecraft-web-client, verbatim: the swing arm pose
@@ -2453,7 +2508,13 @@ noa.on("beforeRender", () => {
   selfRig.root.rotation.y = Math.PI - playerHeading;
   const selfSpeed = Math.hypot(predicted.vx, predicted.vz);
   const selfMoving = onGround(predicted) && selfSpeed > 0.4;
-  animateRig(selfRig, selfSpeed, onGround(predicted), dtSec, swingT > 0);
+  // same depth the sim uses for "can swim up": torso in water means swimming
+  const selfSwimming = isFluid(
+    Math.floor(predicted.x),
+    Math.floor(predicted.y + 0.6),
+    Math.floor(predicted.z),
+  );
+  animateRig(selfRig, selfSpeed, onGround(predicted), dtSec, swingT > 0, selfSwimming);
   // while orbiting (Alt held), the body stays put but the head turns to look
   // toward the camera. Like Minecraft's head/body split, the turn is capped at
   // a neck's range (~75°) so it never twists past the shoulder, and it's eased
@@ -2467,7 +2528,12 @@ noa.on("beforeRender", () => {
   // head pitch tracks the look angle (Minecraft maps look pitch straight to
   // head.xRot), biased so the resting third-person camera (tilted slightly down
   // at the character) reads as the face looking straight ahead
-  const headPitchTarget = Math.max(-1.3, Math.min(1.3, noa.camera.pitch - HEAD_PITCH_BIAS));
+  // while prone in a swim stroke, tip the face back up toward the horizon
+  // (the swim tilt would otherwise leave it staring at the lake bed)
+  const headPitchTarget = Math.max(
+    -1.3,
+    Math.min(1.3, noa.camera.pitch - HEAD_PITCH_BIAS - selfRig.swimTilt * 0.75),
+  );
   const headBlend = 1 - Math.exp(-dtSec * 12);
   orbitHeadYaw += (headYawTarget - orbitHeadYaw) * headBlend;
   orbitHeadPitch += (headPitchTarget - orbitHeadPitch) * headBlend;
@@ -2658,7 +2724,19 @@ noa.on("beforeRender", () => {
     const animState = shown ? shown.state : remote.target;
     const remoteSpeed = Math.hypot(animState.vx, animState.vz);
     const remoteMoving = onGround(animState) && remoteSpeed > 0.4;
-    animateRig(remote.rig, remoteSpeed, onGround(animState), dtSec, remote.swingT > 0);
+    const remoteSwimming = isFluid(
+      Math.floor(animState.x),
+      Math.floor(animState.y + 0.6),
+      Math.floor(animState.z),
+    );
+    animateRig(
+      remote.rig,
+      remoteSpeed,
+      onGround(animState),
+      dtSec,
+      remote.swingT > 0,
+      remoteSwimming,
+    );
     if (remote.swingT > 0) {
       remote.swingT = Math.max(0, remote.swingT - dtSec * 3.1);
       applySwingToRig(remote.rig, remote.swingT, remoteMoving);
