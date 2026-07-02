@@ -113,12 +113,10 @@ Minecraft-proportioned box rigs (swinging arms/legs hung off shoulder/hip pivots
 with a classic-format 64x32 character skin. Procedural animation follows the
 Minecraft-classic/ClassiCube formulas: cosine limb swing with legs at ~1.4x arm amplitude in
 opposite phase, scaled by speed, plus idle breathing sway, body bob, an airborne pose, a
-use/attack animation, and yaw following each player's view heading. The animation math is
-ported verbatim from open-source references: walk/run/idle cycles from
-[skinview3d](https://github.com/bs-community/skinview3d) (MIT) and the third-person
-HitAnimation plus first-person hand-swing parameters from
-[minecraft-web-client](https://github.com/zardoy/minecraft-web-client) (MIT), with the rig's
-rotation signs verified empirically. Swings are broadcast, so everyone sees everyone mining
+use/attack animation, and yaw following each player's view heading. The character UV unwrap
+and parts of the walk/run/idle/swing animation are adapted from
+[skinview3d](https://github.com/bs-community/skinview3d), which is MIT licensed; see
+`THIRD_PARTY_NOTICES.md`. Swings are broadcast, so everyone sees everyone mining
 and attacking; holding the mouse keeps swinging and digging. Your own character is visible in third person, and your
 outfit — a deterministic hue shift derived from your connection id — is the same one everyone
 else sees, including the sleeve on your first-person arm, which wears the actual skin
@@ -169,6 +167,8 @@ as browsers require.
 
 ### Asset credits
 
+Asset provenance is summarized in `assets/PROVENANCE.md`.
+
 Block textures are from
 [Soothing 32](https://content.luanti.org/packages/Zughy/soothing32/) by Zughy and
 contributors, licensed CC BY-SA 4.0 — see `assets/textures/LICENSE-soothing32.txt`. Ore and
@@ -176,7 +176,9 @@ grass/snow side tiles are composited from the pack's base + overlay textures. So
 material, and throwable sprites in `assets/items` are also adapted from Soothing 32; the
 remaining item sprites are original project art — see `assets/items/LICENSE-items.txt`.
 Character textures are painted procedurally at runtime from each player's
-character-creator choices, so there are no skin image assets.
+character-creator choices, so there are no skin image assets in the current tree.
+`assets/noa-voxels-cover.webp` is AI-generated project artwork, and
+`assets/snack.svg` is original Snack.Game icon artwork.
 
 Sampled sound effects are credited in the asset license files:
 

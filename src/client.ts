@@ -139,8 +139,8 @@ const noa = new Engine({
 /*
  *      Blocks and terrain
  *
- *  Textures are from minetest_game (CC BY-SA 3.0), served out of
- *  assets/textures. See assets/textures/LICENSE-minetest-textures.txt.
+ *  Textures are from Soothing 32 (CC BY-SA 4.0), with adapted ore
+ *  and side tiles. See assets/PROVENANCE.md.
  */
 
 const TEX = "/assets/textures";
@@ -655,8 +655,7 @@ function blockSoundFamily(block: number, kind: "dig" | "step"): string {
  *
  *  Box body parts hung off pivot nodes so limbs swing from the
  *  shoulder/hip, textured with a classic-format 64x32 character skin
- *  (minetest_game's "Sam", CC BY-SA 3.0). Remote players get a
- *  deterministic hue shift on the clothing rows. The rig root sits at
+ *  painted procedurally from shared/appearance.ts. The rig root sits at
  *  the entity's bottom-center, facing +z at yaw 0.
  */
 
@@ -697,8 +696,8 @@ const BODY_UV: [number, number, number, number, number] = [16, 16, 8, 12, 4];
 const ARM_UV: [number, number, number, number, number] = [40, 16, 4, 12, 4];
 const LEG_UV: [number, number, number, number, number] = [0, 16, 4, 12, 4];
 
-// Standard Minecraft box-skin unwrap onto a three BoxGeometry, ported
-// verbatim from skinview3d (MIT, bs-community/skinview3d src/model.ts);
+// Standard Minecraft box-skin unwrap onto a three BoxGeometry, adapted
+// from skinview3d (MIT, bs-community/skinview3d src/model.ts);
 // the rig uses skinview3d's conventions throughout (character faces
 // local +z, right arm on -x), so its UV order applies directly.
 function setBoxUVs(
@@ -1101,10 +1100,9 @@ function buildRig(name: string, look: number, armor = 0): Rig {
 }
 
 // Animation math based on skinview3d (MIT, bs-community/skinview3d
-// src/animation.ts) and minecraft-web-client (MIT, zardoy/minecraft-web-client
-// renderer/viewer/three/entity/animations.js), with walk/run amplitudes
-// toned down from the references. Sign convention verified: negative
-// rotation.x swings a limb forward in our rig, matching theirs.
+// src/animation.ts), with walk/run amplitudes toned down from the reference.
+// Sign convention verified: negative rotation.x swings a limb forward in our
+// rig, matching theirs.
 // between vanilla walk (4.317) and sprint (5.612) ground speeds
 const RUN_SPEED_THRESHOLD = 5;
 
@@ -1232,7 +1230,7 @@ function animateRig(
   rig.body.position.z = -SWIM_PIVOT_Y * Math.sin(rig.swimTilt);
 }
 
-// HitAnimation from minecraft-web-client, verbatim: the swing arm pose
+// HitAnimation-style swing adapted from skinview3d: the swing arm pose
 // REPLACES the walk pose for the right arm (t runs 0..2pi over one swing,
 // which chains into a continuous cycle while hold-mining).
 function applySwingToRig(rig: Rig, swingT: number, moving: boolean) {
@@ -1751,9 +1749,8 @@ function craftCells(): number[] {
 // values are the Babylon calibration with z (and x/y rotations) negated.
 let viewModel: Group | null = null;
 const VIEW_MODEL_POS: [number, number, number] = [0.42, -0.42, -1.1];
-// walk/run hand bob (minecraft-web-client's HandIdleAnimator pattern:
-// x sways with the cycle, y dips on each step at double rate), eased so
-// starting/stopping movement never pops the arm
+// walk/run hand bob: x sways with the cycle, y dips on each step at double
+// rate, eased so starting/stopping movement never pops the arm
 let vmBobPhase = 0;
 const vmBob = { x: 0, y: 0 };
 
