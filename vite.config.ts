@@ -225,6 +225,13 @@ export default defineConfig({
     port: clientDevPort,
     strictPort: true,
   },
+  // the vendored box-intersect is CommonJS and symlinked (a file: dep), so the
+  // dev server won't pre-bundle it unless listed — without this the game fails
+  // to boot in dev ("does not provide an export named 'default'"); production
+  // builds already handle it via build.commonjsOptions below
+  optimizeDeps: {
+    include: ["box-intersect"],
+  },
   build: {
     outDir: "dist/client",
     emptyOutDir: true,
