@@ -19,8 +19,8 @@
   },
   "dependencies": {
     "@types/three": "^0.184.1",
-    "aabb-3d": "fenomas/aabb-3d",
-    "box-intersect": "fenomas/box-intersect",
+    "aabb-3d": "file:vendor/aabb-3d",
+    "box-intersect": "file:vendor/box-intersect",
     "ent-comp": "^0.11.0",
     "events": "^3.3.0",
     "fast-voxel-raycast": "^0.1.1",
@@ -30,7 +30,7 @@
     "ndarray": "^1.0.19",
     "three": "^0.184.0",
     "voxel-aabb-sweep": "^0.5.0",
-    "voxel-physics-engine": "^0.13.0"
+    "voxel-physics-engine": "file:vendor/voxel-physics-engine"
   },
   "devDependencies": {
     "@snack-game/cli": "^0.1.10",
@@ -41,6 +41,9 @@
     "pngjs": "^7.0.0",
     "turbo": "2.7.2",
     "vite": "7.3.0"
+  },
+  "overrides": {
+    "aabb-3d": "$aabb-3d"
   },
   "packageManager": "npm@11.12.1"
 }

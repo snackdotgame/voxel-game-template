@@ -1,0 +1,29 @@
+{
+  "name": "box-intersect",
+  "version": "1.0.3",
+  "description": "Any dimensional box intersection",
+  "main": "index.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mikolalysenko/box-intersect.git"
+  },
+  "keywords": [
+    "box",
+    "intersection",
+    "collision",
+    "detection",
+    "aabb",
+    "2d",
+    "3d"
+  ],
+  "author": "Mikola Lysenko",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/mikolalysenko/box-intersect/issues"
+  },
+  "homepage": "https://github.com/mikolalysenko/box-intersect",
+  "dependencies": {
+    "@jpweeks/typedarray-pool": "^2.0.0",
+    "bit-twiddle": "^1.0.2"
+  }
+}

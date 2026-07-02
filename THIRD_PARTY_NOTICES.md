@@ -16,6 +16,36 @@ The full MIT license text for this vendored code is included at
 
 Copyright (c) 2015-2022 Andy Hall (andy@fenomas.com)
 
+## aabb-3d
+
+Repository: <https://github.com/fenomas/aabb-3d>
+
+License: MIT
+
+Used in: vendored local dependency at `vendor/aabb-3d`, consumed by the shared
+physics simulation and vendored noa camera code. The MIT license text is
+included at `vendor/aabb-3d/LICENSE`.
+
+## box-intersect
+
+Repository: <https://github.com/fenomas/box-intersect>
+
+License: MIT
+
+Used in: vendored local dependency at `vendor/box-intersect`, consumed by the
+vendored noa entity-collision system. The MIT license text is included at
+`vendor/box-intersect/LICENSE`.
+
+## voxel-physics-engine
+
+Repository: <https://github.com/fenomas/voxel-physics-engine>
+
+License: MIT
+
+Used in: vendored local dependency at `vendor/voxel-physics-engine`, consumed by
+the shared character simulation. The MIT license text is included at
+`vendor/voxel-physics-engine/LICENSE`.
+
 ## skinview3d
 
 Repository: <https://github.com/bs-community/skinview3d>

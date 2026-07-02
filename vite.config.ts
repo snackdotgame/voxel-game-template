@@ -228,6 +228,9 @@ export default defineConfig({
   build: {
     outDir: "dist/client",
     emptyOutDir: true,
+    commonjsOptions: {
+      include: [/node_modules/, /vendor\/box-intersect/],
+    },
   },
   plugins: [snackClientRuntime(), snackAssets()],
 });
