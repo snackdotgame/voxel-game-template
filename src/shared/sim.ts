@@ -41,6 +41,10 @@ export type CharInput = {
   right: boolean;
   jump: boolean;
   sprint: boolean;
+  // explicit ground speed override in blocks/s (NPCs — each kind moves at its
+  // own pace). Player inputs never carry it (it isn't encoded on the wire),
+  // so player prediction and the server always agree on the walk/sprint rates.
+  maxSpeed?: number;
 };
 
 // Full snapshot of the rigid body + movement controller between ticks.
@@ -142,7 +146,7 @@ export function makeStepper(isSolid: IsSolid, isFluid: IsSolid = () => false): S
     move._currjumptime = prev.jumpMsLeft;
     move._isJumping = prev.jumping;
     move.jumping = input.jump;
-    move.maxSpeed = input.sprint ? SPRINT_SPEED : WALK_SPEED;
+    move.maxSpeed = input.maxSpeed ?? (input.sprint ? SPRINT_SPEED : WALK_SPEED);
 
     // WASD -> heading/running, mirroring noa's receivesInputs component
     const fb = input.fwd ? (input.back ? 0 : 1) : input.back ? -1 : 0;

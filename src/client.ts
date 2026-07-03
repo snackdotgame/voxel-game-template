@@ -774,12 +774,16 @@ function shade(hex: string, f: number): string {
   return `rgb(${ch(n >> 16)}, ${ch((n >> 8) & 0xff)}, ${ch(n & 0xff)})`;
 }
 
-function paintCharacter(ctx: CanvasRenderingContext2D, look: number): void {
+// Colors outside the player-facing palettes (the zombie's green hide);
+// omitted entries fall back to the appearance's palette picks.
+type SkinPalette = { tone?: string; shirt?: string; pants?: string };
+
+function paintCharacter(ctx: CanvasRenderingContext2D, look: number, palette?: SkinPalette): void {
   const a = unpackAppearance(look);
-  const tone = SKIN_TONES[a.tone] ?? SKIN_TONES[0];
+  const tone = palette?.tone ?? SKIN_TONES[a.tone] ?? SKIN_TONES[0];
   const hair = HAIR_COLORS[a.hairColor] ?? HAIR_COLORS[0];
-  const shirt = SHIRT_COLORS[a.shirt] ?? SHIRT_COLORS[0];
-  const pants = PANTS_COLORS[a.pants] ?? PANTS_COLORS[0];
+  const shirt = palette?.shirt ?? SHIRT_COLORS[a.shirt] ?? SHIRT_COLORS[0];
+  const pants = palette?.pants ?? PANTS_COLORS[a.pants] ?? PANTS_COLORS[0];
   const fill = (color: string, x: number, y: number, w: number, h: number) => {
     ctx.fillStyle = color;
     ctx.fillRect(x, y, w, h);
@@ -1992,8 +1996,10 @@ type NpcView = {
   hurtUntil: number;
   // attack animation phase, 1 -> 0 after an npcSwing broadcast
   swingT: number;
-  // meshes named "arm" by the builder (the zombie's), animated on swings
+  // meshes named "arm" by the builder, animated on swings
   arms: Mesh[];
+  // zombies use the full player rig (walk cycle + posable arms)
+  rig: Rig | null;
   // every material in the mesh, for the hurt flash
   materials: MeshLambertMaterial[];
 };
@@ -2076,27 +2082,23 @@ function buildCowMesh(name: string): Group {
   return root;
 }
 
-function buildZombieMesh(name: string): Group {
-  const { root, addBox } = npcRoot(name);
-  const skin = npcMaterial(`${name}-skin`, 0x6a9e5b);
-  const shirt = npcMaterial(`${name}-shirt`, 0x2e6157);
-  const pants = npcMaterial(`${name}-pants`, 0x3a3f52);
-  addBox(0.5, 0.68, 0.28, 0, 1.06, 0, shirt); // torso
-  addBox(0.42, 0.42, 0.42, 0, 1.62, 0, skin); // head
-  // the classic outstretched arms, reaching toward whatever it hunts. The
-  // geometry is shifted so each arm pivots at its shoulder — the swing
-  // animation rotates them there (meshes named "arm" get animated).
-  for (const side of [-0.2, 0.2]) {
-    const geometry = new BoxGeometry(0.14, 0.14, 0.55);
-    geometry.translate(0, 0, 0.24);
-    const arm = new Mesh(geometry, skin);
-    arm.position.set(side, 1.28, 0.12);
-    arm.name = "arm";
-    root.add(arm);
+// Zombies wear the ordinary character rig — the same proportions, skin
+// layout, and walk animation as players — repainted with a zombie palette
+// (green hide isn't in the player-facing SKIN_TONES).
+const ZOMBIE_LOOK = packAppearance({ tone: 0, hair: HAIR_BALD, hairColor: 0, shirt: 0, pants: 3 });
+const ZOMBIE_PALETTE: SkinPalette = { tone: "#6a9e5b", shirt: "#2e6157", pants: "#3a3f52" };
+
+function buildZombieRig(name: string): Rig {
+  const rig = buildRig(name, ZOMBIE_LOOK);
+  const texture = rig.skin.map;
+  if (texture instanceof CanvasTexture) {
+    const ctx = (texture.image as HTMLCanvasElement).getContext("2d");
+    if (ctx) {
+      paintCharacter(ctx, ZOMBIE_LOOK, ZOMBIE_PALETTE);
+      texture.needsUpdate = true;
+    }
   }
-  addBox(0.2, 0.72, 0.24, -0.13, 0.36, 0, pants); // legs
-  addBox(0.2, 0.72, 0.24, 0.13, 0.36, 0, pants);
-  return root;
+  return rig;
 }
 
 function buildSpiderMesh(name: string): Group {
@@ -2124,7 +2126,9 @@ const NPC_BUILDERS: readonly ((name: string) => Group)[] = [
   buildChickenMesh,
   buildPigMesh,
   buildCowMesh,
-  buildZombieMesh,
+  // zombies take the rig path in applyNpcViews; this fallback keeps the
+  // kind-indexed table total
+  (name) => buildZombieRig(name).root,
   buildSpiderMesh,
 ];
 const NPC_BOX: readonly [number, number][] = [
@@ -2159,7 +2163,27 @@ function applyNpcViews(snapshots: ProjectileSnapshot[]): void {
     // `item` carries the NPC kind; unknown kinds (older client vs newer
     // server) fall back to the chicken so nothing turns invisible
     const kind = snap.item < NPC_BUILDERS.length ? snap.item : 0;
-    const mesh = NPC_BUILDERS[kind](`npc-${NPC_NAMES[kind]}-${snap.id}`);
+    const materials: MeshLambertMaterial[] = [];
+    const arms: Mesh[] = [];
+    let rig: Rig | null = null;
+    let mesh: Group;
+    if (kind === NPC_ZOMBIE) {
+      rig = buildZombieRig(`npc-zombie-${snap.id}`);
+      mesh = rig.root;
+      // flash only the skin — the rig's armor overlays share materials
+      // with every other rig on screen
+      materials.push(rig.skin);
+    } else {
+      mesh = NPC_BUILDERS[kind](`npc-${NPC_NAMES[kind]}-${snap.id}`);
+      mesh.traverse((child) => {
+        if (child instanceof Mesh) {
+          materials.push(child.material as MeshLambertMaterial);
+          if (child.name === "arm") {
+            arms.push(child);
+          }
+        }
+      });
+    }
     const [width, height] = NPC_BOX[kind];
     const entityId = ents.add(
       [snap.x, snap.y, snap.z],
@@ -2170,16 +2194,6 @@ function applyNpcViews(snapshots: ProjectileSnapshot[]): void {
       false,
       false,
     );
-    const materials: MeshLambertMaterial[] = [];
-    const arms: Mesh[] = [];
-    mesh.traverse((child) => {
-      if (child instanceof Mesh) {
-        materials.push(child.material as MeshLambertMaterial);
-        if (child.name === "arm") {
-          arms.push(child);
-        }
-      }
-    });
     npcViews.set(snap.id, {
       entityId,
       mesh,
@@ -2191,6 +2205,7 @@ function applyNpcViews(snapshots: ProjectileSnapshot[]): void {
       hurtUntil: 0,
       swingT: 0,
       arms,
+      rig,
       materials,
     });
   }
@@ -2836,16 +2851,27 @@ noa.on("beforeRender", () => {
       view.waddle += dtSec * (view.kind === NPC_SPIDER ? 20 : view.kind === NPC_ZOMBIE ? 7 : 12);
     }
     view.mesh.rotation.y = view.faceY;
-    const sway = view.kind === NPC_ZOMBIE ? 0.06 : 0.12;
-    view.mesh.rotation.z = speed > 0.0006 ? Math.sin(view.waddle) * sway : 0;
     if (view.swingT > 0) {
       view.swingT = Math.max(0, view.swingT - dtSec * 3.1);
     }
-    for (let i = 0; i < view.arms.length; i++) {
-      // walking swings the arms alternately; an attack chops both overhead
-      const walkSwing = speed > 0.0006 ? Math.sin(view.waddle) * 0.25 * (i === 0 ? 1 : -1) : 0;
-      const chop = Math.sin(view.swingT * Math.PI) * 1.2;
-      view.arms[i].rotation.x = walkSwing - chop;
+    if (view.rig) {
+      // the zombie's player rig animates itself (walk cycle from speed) —
+      // then both arms get the classic outstretched pose, raised into a
+      // chop on each attack swing
+      animateRig(view.rig, dtSec > 0 ? speed / dtSec : 0, true, dtSec);
+      const reach = -Math.PI / 2 + (speed > 0.0006 ? Math.sin(view.waddle) * 0.12 : 0);
+      const chop = Math.sin(view.swingT * Math.PI) * 0.7;
+      view.rig.leftArm.rotation.x = reach - chop;
+      view.rig.rightArm.rotation.x = reach - chop;
+      view.mesh.rotation.z = 0;
+    } else {
+      view.mesh.rotation.z = speed > 0.0006 ? Math.sin(view.waddle) * 0.12 : 0;
+      for (let i = 0; i < view.arms.length; i++) {
+        // walking swings the arms alternately; an attack chops both overhead
+        const walkSwing = speed > 0.0006 ? Math.sin(view.waddle) * 0.25 * (i === 0 ? 1 : -1) : 0;
+        const chop = Math.sin(view.swingT * Math.PI) * 1.2;
+        view.arms[i].rotation.x = walkSwing - chop;
+      }
     }
     const flash = now < view.hurtUntil;
     for (const material of view.materials) {

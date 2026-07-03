@@ -240,7 +240,10 @@ type NpcKindConfig = {
   damage: number;
   aggroRange: number;
   attackReach: number;
-  sprints: boolean;
+  // ground speed in blocks/s (players walk 4.3, sprint 5.6). Passives run at
+  // NPC_FLEE_SPEED_MULT times this when fleeing; hostiles chase at it flat,
+  // so every mob is outrunnable.
+  speed: number;
   drops: readonly { item: number; min: number; max: number }[];
 };
 
@@ -253,7 +256,7 @@ const NPC_CONFIG: readonly NpcKindConfig[] = [
     damage: 0,
     aggroRange: 0,
     attackReach: 0,
-    sprints: false,
+    speed: 2.5,
     drops: [{ item: FEATHER, min: 1, max: 2 }],
   },
   // pig
@@ -264,7 +267,7 @@ const NPC_CONFIG: readonly NpcKindConfig[] = [
     damage: 0,
     aggroRange: 0,
     attackReach: 0,
-    sprints: false,
+    speed: 3.0,
     drops: [{ item: PORKCHOP, min: 1, max: 2 }],
   },
   // cow
@@ -275,10 +278,10 @@ const NPC_CONFIG: readonly NpcKindConfig[] = [
     damage: 0,
     aggroRange: 0,
     attackReach: 0,
-    sprints: false,
+    speed: 2.8,
     drops: [{ item: BEEF, min: 1, max: 2 }],
   },
-  // zombie — tanky but walks: sprinting away works
+  // zombie — tanky but shambles: even walking away works
   {
     hp: 20,
     count: 4,
@@ -286,10 +289,10 @@ const NPC_CONFIG: readonly NpcKindConfig[] = [
     damage: 2,
     aggroRange: 14,
     attackReach: 1.8,
-    sprints: false,
+    speed: 2.2,
     drops: [{ item: ROTTEN_FLESH, min: 1, max: 2 }],
   },
-  // spider — fast and fragile; its string feeds the bow/arrow economy
+  // spider — quicker than a zombie but fragile; its string feeds the bow/arrow economy
   {
     hp: 12,
     count: 3,
@@ -297,7 +300,7 @@ const NPC_CONFIG: readonly NpcKindConfig[] = [
     damage: 2,
     aggroRange: 12,
     attackReach: 1.7,
-    sprints: true,
+    speed: 3.2,
     drops: [{ item: STRING, min: 1, max: 2 }],
   },
 ];
@@ -377,6 +380,8 @@ const DEAGGRO_FACTOR = 1.6;
 // under a slowly-turning mesh reads as strafing sideways.
 const NPC_TURN_RATE = 7;
 const NPC_PIVOT_RAD = 1.1;
+// fleeing passives bolt at this multiple of their kind's base speed
+const NPC_FLEE_SPEED_MULT = 1.5;
 
 export async function main() {
   // every session generates a fresh world: one random seed, picked before
@@ -2004,24 +2009,33 @@ function computeLoadedChunks(world: World): Set<string> {
 // Probe one block ahead of the feet along `heading` (movement convention:
 // dx = sin, dz = cos): true if that step leads into water or off a tall drop.
 function headingHazard(world: World, char: CharState, heading: number): boolean {
-  const ix = Math.floor(char.x + Math.sin(heading) * 1.1);
-  const iz = Math.floor(char.z + Math.cos(heading) * 1.1);
-  const iy = Math.floor(char.y + 0.01);
-  // stepping into water, or onto a water surface
-  if (world.isFluid(ix, iy, iz) || world.isFluid(ix, iy - 1, iz)) {
-    return true;
-  }
-  // walking off a drop with no floor within ~4 blocks
-  if (!world.isSolid(ix, iy - 1, iz)) {
-    let hasFloor = false;
-    for (let d = 2; d <= 4; d++) {
-      if (world.isSolid(ix, iy - d, iz) || world.isFluid(ix, iy - d, iz)) {
-        hasFloor = true;
-        break;
-      }
-    }
-    if (!hasFloor) {
+  // probe two step lengths ahead so a moving mob can't cut a corner into
+  // water between one tick's check and the next
+  for (const dist of [0.9, 1.7]) {
+    const ix = Math.floor(char.x + Math.sin(heading) * dist);
+    const iz = Math.floor(char.z + Math.cos(heading) * dist);
+    const iy = Math.floor(char.y + 0.01);
+    // stepping into water, or onto a water surface
+    if (world.isFluid(ix, iy, iz) || world.isFluid(ix, iy - 1, iz)) {
       return true;
+    }
+    // walking off a drop: hazardous unless SOLID ground lies within ~4
+    // below — water on the way down is a hazard, not a floor (counting it
+    // as one is what let mobs plunge off banks into lakes)
+    if (!world.isSolid(ix, iy - 1, iz)) {
+      let hasFloor = false;
+      for (let d = 2; d <= 4; d++) {
+        if (world.isFluid(ix, iy - d, iz)) {
+          return true;
+        }
+        if (world.isSolid(ix, iy - d, iz)) {
+          hasFloor = true;
+          break;
+        }
+      }
+      if (!hasFloor) {
+        return true;
+      }
     }
   }
   return false;
@@ -2141,7 +2155,6 @@ function stepNpcs(world: World, loadedChunks: Set<string>): Npc[] {
     }
 
     let moving = npc.mode !== "idle";
-    let sprint = npc.mode === "flee" || (npc.mode === "chase" && cfg.sprints);
     let desired = npc.wantHeading;
 
     if (npc.mode === "chase") {
@@ -2151,7 +2164,6 @@ function stepNpcs(world: World, loadedChunks: Set<string>): Npc[] {
         npc.targetId = null;
         npc.modeMsLeft = 300;
         moving = false;
-        sprint = false;
       } else {
         const dx = target.char.x - npc.char.x;
         const dy = target.char.y - npc.char.y;
@@ -2238,7 +2250,8 @@ function stepNpcs(world: World, loadedChunks: Set<string>): Npc[] {
       left: false,
       right: false,
       jump,
-      sprint,
+      sprint: false,
+      maxSpeed: cfg.speed * (npc.mode === "flee" ? NPC_FLEE_SPEED_MULT : 1),
     };
     npc.char = world.step(npc.char, input);
     active.push(npc);
