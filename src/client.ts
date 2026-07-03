@@ -3399,12 +3399,34 @@ function endDrag(ev: PointerEvent | null): void {
     const slotEl = under?.closest?.("[data-inv-slot]") as HTMLElement | null;
     if (slotEl?.dataset.invSlot !== undefined) {
       moveItem(dragFrom, Number(slotEl.dataset.invSlot), dragOne);
+    } else if (!under || !invPanel.contains(under)) {
+      // released outside the inventory panel (the world around it): toss the
+      // stack out. The server tosses it a couple of blocks ahead.
+      dropItem(dragFrom, dragOne);
     }
   }
   dragFrom = -1;
   dragOne = false;
   dragGhost?.remove();
   dragGhost = null;
+}
+
+// Optimistically remove the dropped items; the server's inventory echo (or a
+// refused drop) reconciles, exactly like moveItem.
+function dropItem(from: number, one: boolean): void {
+  const stack = slotAt(from);
+  if (!stack) {
+    return;
+  }
+  if (one && stack.count > 1) {
+    stack.count -= 1;
+  } else {
+    setSlotAt(from, null);
+  }
+  syncEquipped();
+  updateHud();
+  playWhoosh(0.18);
+  void client.streams.send({ type: "invDrop", from, one }).catch(() => {});
 }
 
 invBackdrop.addEventListener("contextmenu", (ev) => ev.preventDefault());

@@ -245,6 +245,22 @@ export function parseInvMoveMessage(value: unknown): InvMoveMessage | undefined 
   return undefined;
 }
 
+// Client -> server: toss the contents of a slot out into the world (dragging
+// a stack out of the inventory screen). `one` drops a single item (right-
+// button drag); otherwise the whole stack goes.
+export type InvDropMessage = {
+  type: "invDrop";
+  from: number;
+  one: boolean;
+};
+
+export function parseInvDropMessage(value: unknown): InvDropMessage | undefined {
+  if (isRecord(value) && value.type === "invDrop" && Number.isInteger(value.from)) {
+    return { type: "invDrop", from: value.from as number, one: value.one === true };
+  }
+  return undefined;
+}
+
 // Client -> server: open the crafting grid. size 2 is the inventory grid
 // (always allowed); size 3 is a crafting table, so x/y/z carry the table
 // block the player opened (validated for proximity server-side).

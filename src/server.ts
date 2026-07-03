@@ -64,6 +64,7 @@ import {
   parseEquipMessage,
   parseFireArrowMessage,
   parseHitMessage,
+  parseInvDropMessage,
   parseInvMoveMessage,
   parsePlaceMessage,
   parseSkinMessage,
@@ -159,6 +160,9 @@ type Player = {
   lastAttackAt: number;
   protectedUntil: number;
   stepsThisTick: number;
+  // whether the last NPC view packet this client got was non-empty, so an
+  // emptied view window still gets one trailing clear packet
+  sawNpcs: boolean;
   // inputs beyond the per-tick step budget wait here instead of dropping,
   // so client catch-up bursts don't force prediction rollbacks
   inputQueue: CharInput[];
@@ -333,7 +337,6 @@ type World = {
   hadProjectiles: boolean;
   npcs: Map<number, Npc>;
   nextNpcId: number;
-  hadNpcs: boolean;
   // world-level xorshift for spawn placement (per-NPC decisions use npc.rng)
   spawnRng: number;
 };
@@ -352,6 +355,12 @@ const PASSIVE_SPAWN_RADIUS = 28;
 const HOSTILE_SPAWN_MIN = 26;
 const HOSTILE_SPAWN_MAX = 48;
 const HOSTILE_MIN_PLAYER_GAP = 16;
+// Per-client NPC view window, in chunk columns (Chebyshev). Slightly past the
+// client's ~2.5-chunk terrain render distance so mobs appear a touch before
+// the terrain edge, but well inside the SYNC_RADIUS sim window — an NPC that
+// is only "loaded" by some faraway player stays out of your packets instead
+// of rendering on terrain your client hasn't generated.
+const NPC_VIEW_RADIUS = 3;
 // refill each kind toward its population cap this often
 const NPC_RESPAWN_INTERVAL_MS = 10_000;
 const NPC_ATTACK_COOLDOWN_MS = 1_000;
@@ -395,7 +404,6 @@ export async function main() {
     hadProjectiles: false,
     npcs: new Map(),
     nextNpcId: 1,
-    hadNpcs: false,
     spawnRng: (getWorldSeed() ^ 0x5eed) >>> 0 || 1,
   };
   spawnInitialNpcs(world);
@@ -467,25 +475,35 @@ export async function main() {
       world.hadDrops = world.drops.size > 0;
     }
 
-    // NPCs: only simulate/broadcast the ones whose chunk is "loaded" (within
-    // SYNC_RADIUS of a player). NPCs elsewhere stay frozen and unsent, so
-    // the client despawns them (the view layer drops anything not in the
-    // latest packet); the trailing empty packet clears the last ones.
+    // NPCs: only simulate the ones whose chunk is "loaded" (within
+    // SYNC_RADIUS of a player); NPCs elsewhere stay frozen. Each client
+    // then gets only the NPCs inside its own view window, so mobs kept
+    // alive by a distant player never render on unloaded terrain. The view
+    // layer drops anything not in the latest packet, and a trailing empty
+    // packet clears the last ones for clients whose window just emptied.
     tickNpcRespawns(world);
     const loadedChunks = computeLoadedChunks(world);
     const activeNpcs = stepNpcs(world, loadedChunks);
-    if (activeNpcs.length > 0 || world.hadNpcs) {
-      const snapshots: ProjectileSnapshot[] = activeNpcs.map((npc) => ({
-        id: npc.id,
-        item: npc.kind,
-        x: npc.char.x,
-        y: npc.char.y,
-        z: npc.char.z,
-      }));
-      for (const packet of encodeNpcs(snapshots, server.datagrams.maxSize)) {
-        server.datagrams.broadcast(packet);
+    for (const [id, player] of world.players) {
+      const pcx = chunkCoord(player.char.x);
+      const pcz = chunkCoord(player.char.z);
+      const visible: ProjectileSnapshot[] = [];
+      for (const npc of activeNpcs) {
+        const dist = Math.max(
+          Math.abs(chunkCoord(npc.char.x) - pcx),
+          Math.abs(chunkCoord(npc.char.z) - pcz),
+        );
+        if (dist <= NPC_VIEW_RADIUS) {
+          visible.push({ id: npc.id, item: npc.kind, x: npc.char.x, y: npc.char.y, z: npc.char.z });
+        }
       }
-      world.hadNpcs = activeNpcs.length > 0;
+      if (visible.length === 0 && !player.sawNpcs) {
+        continue;
+      }
+      for (const packet of encodeNpcs(visible, server.datagrams.maxSize)) {
+        server.datagrams.send(id, packet);
+      }
+      player.sawNpcs = visible.length > 0;
     }
 
     await Promise.race([server.sleep(SIM_TICK_MS), pumps]);
@@ -709,6 +727,11 @@ function handleStream(world: World, event: StreamEvent) {
     if (world.players.has(event.connection.id)) {
       handleInvMove(world, event.connection.id, move.from, move.to, move.one);
     }
+    return;
+  }
+  const invDrop = parseInvDropMessage(value);
+  if (invDrop) {
+    handleInvDrop(world, event.connection.id, invDrop.from, invDrop.one);
     return;
   }
   const craftOpen = parseCraftOpenMessage(value);
@@ -1111,6 +1134,61 @@ function handleInvMove(world: World, connectionId: string, from: number, to: num
   sendInventory(world, connectionId);
 }
 
+// How far in front of the player a dragged-out stack lands, and how long it
+// stays un-collectable. The toss must clear the auto-pickup box (1.6 blocks,
+// per-axis) even on a diagonal heading, or the drop bounces straight back
+// into the inventory of a player standing still.
+const DROP_TOSS_DIST = 2.6;
+const DROP_TOSS_NO_PICKUP_MS = 1_500;
+
+// Toss a slot's contents out into the world (dragging a stack out of the
+// inventory screen). Works for any invMove-addressable slot: inventory,
+// hotbar, wear slots (drops unequip), and open crafting-grid cells.
+function handleInvDrop(world: World, connectionId: string, from: number, one: boolean) {
+  const player = world.players.get(connectionId);
+  if (!player) {
+    return;
+  }
+  const ref = slotRef(world, connectionId, player, from);
+  const stack = ref?.get();
+  if (!ref || !stack) {
+    // a drop the server can't resolve: echo so the optimistic client reverts
+    sendInventory(world, connectionId);
+    return;
+  }
+  const item = stack.item;
+  const count = one ? 1 : stack.count;
+  stack.count -= count;
+  if (stack.count <= 0) {
+    ref.set(null);
+  }
+  // land ahead of the player at chest height; against a wall, at the feet
+  const fx = player.char.x + Math.sin(player.heading) * DROP_TOSS_DIST;
+  const fz = player.char.z + Math.cos(player.heading) * DROP_TOSS_DIST;
+  const fy = player.char.y + 1;
+  const clear = !world.isSolid(Math.floor(fx), Math.floor(fy), Math.floor(fz));
+  for (let i = 0; i < count; i++) {
+    // fan multi-item drops into a small spiral so they don't render as one
+    const angle = i * 2.4;
+    const radius = 0.18 * Math.sqrt(i);
+    const dx = Math.cos(angle) * radius;
+    const dz = Math.sin(angle) * radius;
+    if (clear) {
+      spawnDrop(world, item, fx + dx, fy, fz + dz, DROP_TOSS_NO_PICKUP_MS);
+    } else {
+      spawnDrop(
+        world,
+        item,
+        player.char.x + dx,
+        player.char.y + 0.5,
+        player.char.z + dz,
+        DROP_TOSS_NO_PICKUP_MS,
+      );
+    }
+  }
+  sendInventory(world, connectionId);
+}
+
 /*
  *      Crafting
  *
@@ -1331,13 +1409,20 @@ function handlePlace(world: World, id: string, place: PlaceMessage) {
  *      until someone walks over them
  */
 
-function spawnDrop(world: World, item: number, x: number, y: number, z: number) {
+function spawnDrop(
+  world: World,
+  item: number,
+  x: number,
+  y: number,
+  z: number,
+  noPickupMs = DROP_PICKUP_DELAY_MS,
+) {
   if (world.drops.size >= MAX_DROPS) {
     return;
   }
   const id = world.nextDropId;
   world.nextDropId = (world.nextDropId + 1) % 65536 || 1;
-  world.drops.set(id, { id, item, x, y, z, ttlMs: DROP_TTL_MS, noPickupMs: DROP_PICKUP_DELAY_MS });
+  world.drops.set(id, { id, item, x, y, z, ttlMs: DROP_TTL_MS, noPickupMs });
   world.dropsDirty = true;
 }
 
@@ -1666,6 +1751,7 @@ function addPlayer(world: World, connection: Connection) {
     lastAttackAt: -100000,
     protectedUntil: 0,
     stepsThisTick: 0,
+    sawNpcs: false,
     inputQueue: [],
     syncedChunks: new Set(),
     lastChunk: "none",
