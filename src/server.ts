@@ -11,12 +11,16 @@ import {
   ARMOR_BASE,
   ARMOR_SLOTS,
   ARROW,
+  BEEF,
   BLOCK_REACH,
   BOW,
   FEATHER,
   INV_SLOTS,
   MAX_HP,
   MELEE_RANGE,
+  PORKCHOP,
+  ROTTEN_FLESH,
+  STRING,
   armorPiece,
   armorReduction,
   arrowLaunch,
@@ -24,6 +28,7 @@ import {
   blockToItem,
   bonusDrop,
   dropsOnImpact,
+  foodHeal,
   hitDamage,
   isArmorIndex,
   isBlockItem,
@@ -39,6 +44,7 @@ import {
   throwSpeed,
   type InvSlot,
 } from "./shared/items.js";
+import { NPC_KIND_COUNT, npcAttackerTag } from "./shared/npcs.js";
 import {
   type BlockEdit,
   type CraftOpenMessage,
@@ -49,9 +55,11 @@ import {
   type ThrowMessage,
   type RosterEntry,
   parseAttackMessage,
+  parseAttackNpcMessage,
   parseCraftCloseMessage,
   parseCraftOpenMessage,
   parseCraftTakeMessage,
+  parseEatMessage,
   parseEditMessage,
   parseEquipMessage,
   parseFireArrowMessage,
@@ -195,18 +203,97 @@ type Drop = {
   noPickupMs: number;
 };
 
-// A wandering NPC. It reuses the shared character stepper (so it gets terrain
-// collision, gravity and auto-step for free) driven by AI-chosen wander
-// inputs. `rng` is a per-chicken xorshift state so wander decisions need no
+// An NPC. Every kind reuses the shared character stepper (so it gets terrain
+// collision, gravity, water buoyancy and auto-step for free) driven by
+// AI-chosen inputs. `rng` is a per-NPC xorshift state so AI decisions need no
 // ambient Math.random.
-type Chicken = {
+type Npc = {
   id: number;
+  kind: number;
   char: CharState;
   heading: number;
-  wanderMsLeft: number;
-  moving: boolean;
+  hp: number;
+  // idle/walk alternate on a timer (the wander); flee runs from a recent hit
+  // until its timer expires; chase hunts targetId until it dies out of range
+  mode: "idle" | "walk" | "flee" | "chase";
+  modeMsLeft: number;
+  targetId: string | null;
+  lastAttackAt: number;
   rng: number;
 };
+
+// Per-kind stats. `count` is the population cap the slow respawn tick refills
+// to. Hostiles chase players inside aggroRange and melee inside attackReach;
+// sprinters chase at sprint speed (5.6 — a sprinting player can't shake them),
+// walkers at walk speed (4.3 — sprinting outruns them).
+type NpcKindConfig = {
+  hp: number;
+  count: number;
+  hostile: boolean;
+  damage: number;
+  aggroRange: number;
+  attackReach: number;
+  sprints: boolean;
+  drops: readonly { item: number; min: number; max: number }[];
+};
+
+const NPC_CONFIG: readonly NpcKindConfig[] = [
+  // chicken — the classic feather source, one arrow volley fells it
+  {
+    hp: 4,
+    count: 6,
+    hostile: false,
+    damage: 0,
+    aggroRange: 0,
+    attackReach: 0,
+    sprints: false,
+    drops: [{ item: FEATHER, min: 1, max: 2 }],
+  },
+  // pig
+  {
+    hp: 10,
+    count: 4,
+    hostile: false,
+    damage: 0,
+    aggroRange: 0,
+    attackReach: 0,
+    sprints: false,
+    drops: [{ item: PORKCHOP, min: 1, max: 2 }],
+  },
+  // cow
+  {
+    hp: 12,
+    count: 4,
+    hostile: false,
+    damage: 0,
+    aggroRange: 0,
+    attackReach: 0,
+    sprints: false,
+    drops: [{ item: BEEF, min: 1, max: 2 }],
+  },
+  // zombie — tanky but walks: sprinting away works
+  {
+    hp: 20,
+    count: 4,
+    hostile: true,
+    damage: 2,
+    aggroRange: 14,
+    attackReach: 1.8,
+    sprints: false,
+    drops: [{ item: ROTTEN_FLESH, min: 1, max: 2 }],
+  },
+  // spider — fast and fragile; its string feeds the bow/arrow economy
+  {
+    hp: 12,
+    count: 3,
+    hostile: true,
+    damage: 2,
+    aggroRange: 12,
+    attackReach: 1.7,
+    sprints: true,
+    drops: [{ item: STRING, min: 1, max: 2 }],
+  },
+];
 
 type Parked = {
   char: CharState;
@@ -240,22 +327,38 @@ type World = {
   editCount: number;
   step: Stepper;
   isSolid: (x: number, y: number, z: number) => boolean;
+  isFluid: (x: number, y: number, z: number) => boolean;
   projectiles: Map<number, Projectile>;
   nextProjectileId: number;
   hadProjectiles: boolean;
-  chickens: Map<number, Chicken>;
-  nextChickenId: number;
-  hadChickens: boolean;
+  npcs: Map<number, Npc>;
+  nextNpcId: number;
+  hadNpcs: boolean;
+  // world-level xorshift for spawn placement (per-NPC decisions use npc.rng)
+  spawnRng: number;
 };
 
-// Chickens only simulate/broadcast when within this many chunks of a player —
-// the "loaded chunk" window. Matches the edit-sync radius so a chicken is live
-// exactly when the terrain it stands on is streamed to someone.
-const CHICKEN_COUNT = 8;
-const CHICKEN_SPAWN_RADIUS = 24;
-const CHICKEN_IDLE_CHANCE = 0.35;
-const CHICKEN_WANDER_MIN_MS = 900;
-const CHICKEN_WANDER_MAX_MS = 3200;
+// NPCs only simulate/broadcast when within the "loaded chunk" window (chunks
+// within SYNC_RADIUS of a player) — matching the edit-sync radius, so an NPC
+// is live exactly when the terrain it stands on is streamed to someone.
+const NPC_IDLE_CHANCE = 0.35;
+const NPC_WANDER_MIN_MS = 900;
+const NPC_WANDER_MAX_MS = 3200;
+const NPC_FLEE_MIN_MS = 2400;
+const NPC_FLEE_MAX_MS = 3600;
+// passives spawn around the map origin; hostiles keep their distance from
+// players both at initial placement and on respawn
+const PASSIVE_SPAWN_RADIUS = 28;
+const HOSTILE_SPAWN_MIN = 26;
+const HOSTILE_SPAWN_MAX = 48;
+const HOSTILE_MIN_PLAYER_GAP = 16;
+// refill each kind toward its population cap this often
+const NPC_RESPAWN_INTERVAL_MS = 10_000;
+const NPC_ATTACK_COOLDOWN_MS = 1_000;
+const NPC_MELEE_KNOCKBACK = 4;
+// give up a chase beyond aggroRange times this (hysteresis so a target on the
+// edge doesn't flicker aggro on and off)
+const DEAGGRO_FACTOR = 1.6;
 
 export async function main() {
   // every session generates a fresh world: one random seed, picked before
@@ -286,14 +389,16 @@ export async function main() {
     editCount: 0,
     step: makeStepper(isSolid, isFluid),
     isSolid,
+    isFluid,
     projectiles: new Map(),
     nextProjectileId: 1,
     hadProjectiles: false,
-    chickens: new Map(),
-    nextChickenId: 1,
-    hadChickens: false,
+    npcs: new Map(),
+    nextNpcId: 1,
+    hadNpcs: false,
+    spawnRng: (getWorldSeed() ^ 0x5eed) >>> 0 || 1,
   };
-  spawnChickens(world);
+  spawnInitialNpcs(world);
 
   // recv() rejects when the runtime is shutting down; the pumps ending is
   // the signal to unwind the tick loop and return from main().
@@ -362,24 +467,25 @@ export async function main() {
       world.hadDrops = world.drops.size > 0;
     }
 
-    // NPCs: only simulate/broadcast chickens whose chunk is "loaded" (within
-    // SYNC_RADIUS of a player). Chickens elsewhere stay frozen and unsent, so
-    // the client despawns them (applyEntityViews drops anything not in the
+    // NPCs: only simulate/broadcast the ones whose chunk is "loaded" (within
+    // SYNC_RADIUS of a player). NPCs elsewhere stay frozen and unsent, so
+    // the client despawns them (the view layer drops anything not in the
     // latest packet); the trailing empty packet clears the last ones.
+    tickNpcRespawns(world);
     const loadedChunks = computeLoadedChunks(world);
-    const activeChickens = stepChickens(world, loadedChunks);
-    if (activeChickens.length > 0 || world.hadChickens) {
-      const snapshots: ProjectileSnapshot[] = activeChickens.map((chicken) => ({
-        id: chicken.id,
-        item: 0,
-        x: chicken.char.x,
-        y: chicken.char.y,
-        z: chicken.char.z,
+    const activeNpcs = stepNpcs(world, loadedChunks);
+    if (activeNpcs.length > 0 || world.hadNpcs) {
+      const snapshots: ProjectileSnapshot[] = activeNpcs.map((npc) => ({
+        id: npc.id,
+        item: npc.kind,
+        x: npc.char.x,
+        y: npc.char.y,
+        z: npc.char.z,
       }));
       for (const packet of encodeNpcs(snapshots, server.datagrams.maxSize)) {
         server.datagrams.broadcast(packet);
       }
-      world.hadChickens = activeChickens.length > 0;
+      world.hadNpcs = activeNpcs.length > 0;
     }
 
     await Promise.race([server.sleep(SIM_TICK_MS), pumps]);
@@ -554,6 +660,17 @@ function handleStream(world: World, event: StreamEvent) {
     handleAttack(world, event.connection.id, attack.target);
     return;
   }
+  const attackNpc = parseAttackNpcMessage(value);
+  if (attackNpc) {
+    broadcastSwing(world, event.connection.id);
+    handleAttackNpc(world, event.connection.id, attackNpc.id);
+    return;
+  }
+  const eat = parseEatMessage(value);
+  if (eat) {
+    handleEat(world, event.connection.id, eat.slot, eat.item);
+    return;
+  }
   if (
     typeof value === "object" &&
     value !== null &&
@@ -649,6 +766,42 @@ function handleAttack(world: World, attackerId: string, targetId: string) {
   }
   attacker.lastAttackAt = now;
   damagePlayer(world, targetId, attackerId, meleeDamage(attacker.item), dx, dz, MELEE_KNOCKBACK);
+}
+
+// Melee swing landing on an NPC: same cooldown and (slack-padded) reach as
+// player-vs-player melee, then the shared NPC damage path.
+function handleAttackNpc(world: World, attackerId: string, npcId: number) {
+  const attacker = world.players.get(attackerId);
+  const npc = world.npcs.get(npcId);
+  if (!attacker || !npc) {
+    return;
+  }
+  const now = server.elapsedMs();
+  if (now - attacker.lastAttackAt < ATTACK_COOLDOWN_MS) {
+    return;
+  }
+  const dx = npc.char.x - attacker.char.x;
+  const dy = npc.char.y - attacker.char.y;
+  const dz = npc.char.z - attacker.char.z;
+  if (Math.hypot(dx, dy, dz) > ATTACK_RANGE) {
+    return;
+  }
+  attacker.lastAttackAt = now;
+  damageNpc(world, npc, meleeDamage(attacker.item), dx, dz, MELEE_KNOCKBACK, attackerId);
+}
+
+// Eat the food in a slot: heals immediately, no hunger system. Ignored at
+// full health so a click can't waste a porkchop.
+function handleEat(world: World, id: string, slot: number, item: number) {
+  const player = world.players.get(id);
+  const heal = foodHeal(item);
+  if (!player || heal <= 0 || player.hp >= MAX_HP || player.hp <= 0) {
+    return;
+  }
+  if (!tryConsume(world, id, slot, item)) {
+    return;
+  }
+  player.hp = Math.min(MAX_HP, player.hp + heal);
 }
 
 // Damage + knockback land in the victim's authoritative state, so their own
@@ -1362,19 +1515,27 @@ function stepProjectiles(world: World) {
           break;
         }
       }
-      // chickens are fragile: any projectile that catches one fells it and
-      // leaves a feather (the only feather source, for crafting arrows)
+      // NPCs share the projectile damage tables with players (arrows carry
+      // their charge-scaled damage), so a full-draw arrow one-shots a chicken
+      // but a zombie takes a few
       if (alive) {
-        for (const [cid, chicken] of world.chickens) {
-          const c = chicken.char;
+        for (const npc of world.npcs.values()) {
+          const c = npc.char;
           if (
-            Math.abs(proj.x - c.x) <= 0.4 &&
+            Math.abs(proj.x - c.x) <= 0.5 &&
             proj.y >= c.y - 0.1 &&
-            proj.y <= c.y + 1.0 &&
-            Math.abs(proj.z - c.z) <= 0.4
+            proj.y <= c.y + 1.6 &&
+            Math.abs(proj.z - c.z) <= 0.5
           ) {
-            world.chickens.delete(cid);
-            spawnDrop(world, FEATHER, c.x, c.y + 0.3, c.z);
+            damageNpc(
+              world,
+              npc,
+              proj.damage ?? projectileDamage(proj.item),
+              proj.vx,
+              proj.vz,
+              proj.knock ?? knockback(proj.item),
+              proj.owner,
+            );
             if (dropsOnImpact(proj.item)) {
               spawnDrop(world, proj.item, proj.x, proj.y, proj.z);
             }
@@ -1543,7 +1704,12 @@ function removePlayer(world: World, id: string) {
 }
 
 /*
- *      NPCs (wandering chickens)
+ *      NPCs
+ *
+ *  Passive mobs (chicken, pig, cow) wander, avoid water and cliffs, and
+ *  flee when hurt. Hostile mobs (zombie, spider) additionally hunt: they
+ *  aggro on a visible player in range, chase with the same hazard steering,
+ *  and melee on a cooldown through the ordinary damagePlayer path.
  */
 
 function nextRng(state: number): number {
@@ -1605,29 +1771,113 @@ function spawnFor(world: World, seed: string): CharState {
   return char;
 }
 
-function spawnChickens(world: World) {
-  for (let i = 0; i < CHICKEN_COUNT; i++) {
-    const id = world.nextChickenId++;
-    let rng = (id * 0x9e3779b1) >>> 0 || 1;
-    rng = nextRng(rng);
-    const angle = (rng / 0x100000000) * Math.PI * 2;
-    rng = nextRng(rng);
-    const dist = (rng / 0x100000000) * CHICKEN_SPAWN_RADIUS;
-    const x = Math.cos(angle) * dist + 0.5;
-    const z = Math.sin(angle) * dist + 0.5;
-    const char = spawnState();
-    char.x = x;
-    char.z = z;
-    char.y = groundY(world, x, z);
-    rng = nextRng(rng);
-    world.chickens.set(id, {
-      id,
-      char,
-      heading: (rng / 0x100000000) * Math.PI * 2,
-      wanderMsLeft: 0,
-      moving: false,
-      rng,
-    });
+function worldRand(world: World): number {
+  world.spawnRng = nextRng(world.spawnRng);
+  return world.spawnRng / 0x100000000;
+}
+
+// The surface y an NPC can stand on at (x, z), or null for a bad column:
+// water (the old chicken spawner dropped birds on lake beds) or a treetop.
+function landingAt(world: World, x: number, z: number): number | null {
+  const y = groundY(world, x, z);
+  const ix = Math.floor(x);
+  const iz = Math.floor(z);
+  if (blockAt(world, ix, y, iz) === WATER_ID) {
+    return null;
+  }
+  const under = blockAt(world, ix, y - 1, iz);
+  if (under === LEAVES_ID || under === LOG_ID) {
+    return null;
+  }
+  return y;
+}
+
+function spawnNpc(world: World, kind: number, x: number, z: number): boolean {
+  const y = landingAt(world, x, z);
+  if (y === null) {
+    return false;
+  }
+  const id = world.nextNpcId;
+  world.nextNpcId = (world.nextNpcId + 1) % 65536 || 1;
+  const char = spawnState();
+  char.x = x;
+  char.y = y;
+  char.z = z;
+  world.npcs.set(id, {
+    id,
+    kind,
+    char,
+    heading: worldRand(world) * Math.PI * 2,
+    hp: NPC_CONFIG[kind].hp,
+    mode: "idle",
+    modeMsLeft: 0,
+    targetId: null,
+    lastAttackAt: -100_000,
+    rng: ((id * 0x9e3779b1) ^ getWorldSeed()) >>> 0 || 1,
+  });
+  return true;
+}
+
+// One placement attempt set for a kind. Passives cluster around an anchor
+// (a random player, or the origin before anyone joins); hostiles spawn on a
+// ring that keeps a minimum gap from every player, so nothing materializes
+// in someone's face.
+function trySpawnKind(world: World, kind: number): void {
+  const cfg = NPC_CONFIG[kind];
+  const players = [...world.players.values()];
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const anchor =
+      players.length > 0
+        ? players[Math.floor(worldRand(world) * players.length)].char
+        : { x: 0.5, z: 0.5 };
+    const angle = worldRand(world) * Math.PI * 2;
+    const dist = cfg.hostile
+      ? HOSTILE_SPAWN_MIN + worldRand(world) * (HOSTILE_SPAWN_MAX - HOSTILE_SPAWN_MIN)
+      : 8 + worldRand(world) * (PASSIVE_SPAWN_RADIUS - 8);
+    const x = anchor.x + Math.cos(angle) * dist;
+    const z = anchor.z + Math.sin(angle) * dist;
+    if (
+      cfg.hostile &&
+      players.some((p) => Math.hypot(p.char.x - x, p.char.z - z) < HOSTILE_MIN_PLAYER_GAP)
+    ) {
+      continue;
+    }
+    if (spawnNpc(world, kind, x, z)) {
+      return;
+    }
+  }
+}
+
+function spawnInitialNpcs(world: World) {
+  for (let kind = 0; kind < NPC_KIND_COUNT; kind++) {
+    for (let i = 0; i < NPC_CONFIG[kind].count; i++) {
+      trySpawnKind(world, kind);
+    }
+  }
+}
+
+// Slow refill toward each kind's population cap (one attempt per kind per
+// cycle), so hunted animals and slain zombies return over time. Skipped on an
+// empty server — populations only matter while someone is playing.
+let npcRespawnMs = 0;
+
+function tickNpcRespawns(world: World) {
+  npcRespawnMs += SIM_TICK_MS;
+  if (npcRespawnMs < NPC_RESPAWN_INTERVAL_MS) {
+    return;
+  }
+  npcRespawnMs = 0;
+  if (world.players.size === 0) {
+    return;
+  }
+  const counts = Array.from({ length: NPC_KIND_COUNT }, () => 0);
+  for (const npc of world.npcs.values()) {
+    counts[npc.kind] += 1;
+  }
+  for (let kind = 0; kind < NPC_KIND_COUNT; kind++) {
+    if (counts[kind] < NPC_CONFIG[kind].count) {
+      trySpawnKind(world, kind);
+    }
   }
 }
 
@@ -1647,47 +1897,290 @@ function computeLoadedChunks(world: World): Set<string> {
   return loaded;
 }
 
-// Step every chicken in a loaded chunk through the shared character sim with a
-// lazy wander: idle or pick a fresh heading when its timer expires. Chickens
+// Probe one block ahead of the feet along `heading` (movement convention:
+// dx = sin, dz = cos): true if that step leads into water or off a tall drop.
+function headingHazard(world: World, char: CharState, heading: number): boolean {
+  const ix = Math.floor(char.x + Math.sin(heading) * 1.1);
+  const iz = Math.floor(char.z + Math.cos(heading) * 1.1);
+  const iy = Math.floor(char.y + 0.01);
+  // stepping into water, or onto a water surface
+  if (world.isFluid(ix, iy, iz) || world.isFluid(ix, iy - 1, iz)) {
+    return true;
+  }
+  // walking off a drop with no floor within ~4 blocks
+  if (!world.isSolid(ix, iy - 1, iz)) {
+    let hasFloor = false;
+    for (let d = 2; d <= 4; d++) {
+      if (world.isSolid(ix, iy - d, iz) || world.isFluid(ix, iy - d, iz)) {
+        hasFloor = true;
+        break;
+      }
+    }
+    if (!hasFloor) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// A hazard-free heading near `desired`: the desired one, then increasingly
+// wide deflections to either side, then a full reverse; null when everything
+// is bad (boxed in). The first deflection side is randomized per call so a
+// blocked herd doesn't peel in lockstep.
+function safeHeading(world: World, npc: Npc, desired: number): number | null {
+  npc.rng = nextRng(npc.rng);
+  const flip = npc.rng / 0x100000000 < 0.5 ? -1 : 1;
+  for (const off of [0, 0.7, -0.7, 1.4, -1.4, 2.2, -2.2, Math.PI]) {
+    const heading = desired + off * flip;
+    if (!headingHazard(world, npc.char, heading)) {
+      return heading;
+    }
+  }
+  return null;
+}
+
+// Coarse eye-line visibility, sampled once per block. Good enough to stop
+// zombies aggroing through hills; chases re-steer around obstacles anyway.
+function canSee(world: World, from: CharState, to: CharState): boolean {
+  const x0 = from.x;
+  const y0 = from.y + 1.4;
+  const z0 = from.z;
+  const dx = to.x - x0;
+  const dy = to.y + 1.2 - y0;
+  const dz = to.z - z0;
+  const steps = Math.ceil(Math.hypot(dx, dy, dz));
+  for (let i = 1; i < steps; i++) {
+    const t = i / steps;
+    if (world.isSolid(Math.floor(x0 + dx * t), Math.floor(y0 + dy * t), Math.floor(z0 + dz * t))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Keep a still-valid chase target (with de-aggro hysteresis), else acquire the
+// nearest visible living player in aggro range.
+function updateAggro(world: World, npc: Npc, cfg: NpcKindConfig) {
+  if (npc.mode === "chase" && npc.targetId) {
+    const target = world.players.get(npc.targetId);
+    if (
+      target &&
+      target.hp > 0 &&
+      server.elapsedMs() >= target.protectedUntil &&
+      Math.hypot(target.char.x - npc.char.x, target.char.z - npc.char.z) <=
+        cfg.aggroRange * DEAGGRO_FACTOR
+    ) {
+      return;
+    }
+    npc.mode = "idle";
+    npc.targetId = null;
+    npc.modeMsLeft = 300;
+  }
+  let best: string | null = null;
+  let bestDist = cfg.aggroRange;
+  const now = server.elapsedMs();
+  for (const [id, player] of world.players) {
+    // respawn-protected players are invisible to hostiles, so a fresh spawn
+    // gets a head start instead of the zombie that just killed them waiting
+    // out the protection timer
+    if (player.hp <= 0 || now < player.protectedUntil) {
+      continue;
+    }
+    const dist = Math.hypot(player.char.x - npc.char.x, player.char.z - npc.char.z);
+    if (dist <= bestDist && canSee(world, npc.char, player.char)) {
+      best = id;
+      bestDist = dist;
+    }
+  }
+  if (best) {
+    npc.mode = "chase";
+    npc.targetId = best;
+  }
+}
+
+// Step every NPC in a loaded chunk through the shared character sim. NPCs
 // outside loaded chunks are skipped entirely (frozen, zero CPU). Returns the
-// chickens simulated this tick — the ones to broadcast.
-function stepChickens(world: World, loadedChunks: Set<string>): Chicken[] {
-  const active: Chicken[] = [];
-  for (const chicken of world.chickens.values()) {
-    const key = chunkKey(chunkCoord(chicken.char.x), chunkCoord(chicken.char.z));
+// NPCs simulated this tick — the ones to broadcast.
+function stepNpcs(world: World, loadedChunks: Set<string>): Npc[] {
+  const active: Npc[] = [];
+  const now = server.elapsedMs();
+  for (const npc of world.npcs.values()) {
+    const key = chunkKey(chunkCoord(npc.char.x), chunkCoord(npc.char.z));
     if (!loadedChunks.has(key)) {
       continue;
     }
-    chicken.wanderMsLeft -= SIM_TICK_MS;
-    if (chicken.wanderMsLeft <= 0) {
-      chicken.rng = nextRng(chicken.rng);
-      if (chicken.rng / 0x100000000 < CHICKEN_IDLE_CHANCE) {
-        chicken.moving = false;
-      } else {
-        chicken.moving = true;
-        chicken.rng = nextRng(chicken.rng);
-        chicken.heading = (chicken.rng / 0x100000000) * Math.PI * 2;
-      }
-      chicken.rng = nextRng(chicken.rng);
-      chicken.wanderMsLeft =
-        CHICKEN_WANDER_MIN_MS +
-        (chicken.rng / 0x100000000) * (CHICKEN_WANDER_MAX_MS - CHICKEN_WANDER_MIN_MS);
+    const cfg = NPC_CONFIG[npc.kind];
+    if (cfg.hostile) {
+      updateAggro(world, npc, cfg);
     }
+
+    // wander timer: only drives the idle/walk alternation — flee expiry is
+    // handled below, and chasing ignores it entirely
+    npc.modeMsLeft -= SIM_TICK_MS;
+    if (npc.mode === "flee" && npc.modeMsLeft <= 0) {
+      npc.mode = "idle";
+      npc.modeMsLeft = 400;
+    }
+    if ((npc.mode === "idle" || npc.mode === "walk") && npc.modeMsLeft <= 0) {
+      npc.rng = nextRng(npc.rng);
+      if (npc.rng / 0x100000000 < NPC_IDLE_CHANCE) {
+        npc.mode = "idle";
+      } else {
+        npc.mode = "walk";
+        npc.rng = nextRng(npc.rng);
+        npc.heading = (npc.rng / 0x100000000) * Math.PI * 2;
+      }
+      npc.rng = nextRng(npc.rng);
+      npc.modeMsLeft =
+        NPC_WANDER_MIN_MS + (npc.rng / 0x100000000) * (NPC_WANDER_MAX_MS - NPC_WANDER_MIN_MS);
+    }
+
+    let moving = npc.mode !== "idle";
+    let sprint = npc.mode === "flee" || (npc.mode === "chase" && cfg.sprints);
+    let desired = npc.heading;
+
+    if (npc.mode === "chase") {
+      const target = npc.targetId ? world.players.get(npc.targetId) : undefined;
+      if (!target) {
+        npc.mode = "idle";
+        npc.targetId = null;
+        npc.modeMsLeft = 300;
+        moving = false;
+        sprint = false;
+      } else {
+        const dx = target.char.x - npc.char.x;
+        const dy = target.char.y - npc.char.y;
+        const dz = target.char.z - npc.char.z;
+        desired = Math.atan2(dx, dz);
+        // in reach: stand and swing on a cooldown instead of shoving through
+        if (Math.hypot(dx, dz) <= cfg.attackReach && Math.abs(dy) < 2) {
+          moving = false;
+          if (now - npc.lastAttackAt >= NPC_ATTACK_COOLDOWN_MS && npc.targetId) {
+            npc.lastAttackAt = now;
+            damagePlayer(
+              world,
+              npc.targetId,
+              npcAttackerTag(npc.kind),
+              cfg.damage,
+              dx,
+              dz,
+              NPC_MELEE_KNOCKBACK,
+            );
+          }
+        }
+      }
+    }
+
+    const inWater = world.isFluid(
+      Math.floor(npc.char.x),
+      Math.floor(npc.char.y + 0.3),
+      Math.floor(npc.char.z),
+    );
+    let jump = false;
+    if (inWater) {
+      // paddle up and steer for the nearest bank (a shoreline heading reads
+      // as hazard-free); mobs that end up swimming climb back out
+      jump = true;
+      moving = true;
+      desired = safeHeading(world, npc, desired) ?? desired;
+    } else if (moving) {
+      const safe = safeHeading(world, npc, desired);
+      if (safe === null) {
+        // boxed in by water/cliffs on all sides: stand still a moment
+        moving = false;
+        if (npc.mode === "walk") {
+          npc.mode = "idle";
+          npc.modeMsLeft = 500;
+        }
+      } else {
+        desired = safe;
+        // hunting into a wall autoStep can't clear: hop (wander doesn't hop —
+        // a chicken pacing at a fence is fine, a stalled zombie is not)
+        if (
+          (npc.mode === "chase" || npc.mode === "flee") &&
+          onGround(npc.char) &&
+          Math.hypot(npc.char.vx, npc.char.vz) < 0.5
+        ) {
+          jump = true;
+        }
+      }
+    }
+    if (moving) {
+      npc.heading = desired;
+    }
+
     const input: CharInput = {
       seq: 0,
-      heading: chicken.heading,
+      heading: npc.heading,
       pitch: 0,
-      fwd: chicken.moving,
+      fwd: moving,
       back: false,
       left: false,
       right: false,
-      jump: false,
-      sprint: false,
+      jump,
+      sprint,
     };
-    chicken.char = world.step(chicken.char, input);
-    active.push(chicken);
+    npc.char = world.step(npc.char, input);
+    active.push(npc);
   }
   return active;
+}
+
+// Shared damage path for melee and projectiles vs NPCs: knockback, hurt
+// flash, drops + death broadcast, and the behavioral response (passives bolt
+// away along the knockback direction; hostiles turn on their attacker).
+function damageNpc(
+  world: World,
+  npc: Npc,
+  amount: number,
+  kbx: number,
+  kbz: number,
+  kbScale: number,
+  attackerId: string,
+) {
+  npc.hp -= amount;
+  const h = Math.hypot(kbx, kbz) || 1;
+  npc.char.vx += (kbx / h) * kbScale;
+  npc.char.vz += (kbz / h) * kbScale;
+  npc.char.vy += kbScale * 0.5;
+  npc.char.ry = 0;
+  npc.char.sleep = 10;
+
+  if (npc.hp <= 0) {
+    world.npcs.delete(npc.id);
+    for (const drop of NPC_CONFIG[npc.kind].drops) {
+      npc.rng = nextRng(npc.rng);
+      const count = drop.min + Math.floor((npc.rng / 0x100000000) * (drop.max - drop.min + 1));
+      for (let i = 0; i < count; i++) {
+        spawnDrop(world, drop.item, npc.char.x, npc.char.y + 0.4, npc.char.z);
+      }
+    }
+    server.streams.broadcast({
+      type: "npcDeath",
+      id: npc.id,
+      kind: npc.kind,
+      x: npc.char.x,
+      y: npc.char.y,
+      z: npc.char.z,
+    });
+    return;
+  }
+
+  server.streams.broadcast({ type: "npcHurt", id: npc.id });
+  if (NPC_CONFIG[npc.kind].hostile) {
+    if (world.players.has(attackerId)) {
+      npc.mode = "chase";
+      npc.targetId = attackerId;
+    }
+  } else {
+    // the knockback direction already points away from the attacker
+    npc.mode = "flee";
+    npc.targetId = null;
+    npc.heading = Math.atan2(kbx / h, kbz / h);
+    npc.rng = nextRng(npc.rng);
+    npc.modeMsLeft =
+      NPC_FLEE_MIN_MS + (npc.rng / 0x100000000) * (NPC_FLEE_MAX_MS - NPC_FLEE_MIN_MS);
+  }
 }
 
 function syncConnections(world: World) {

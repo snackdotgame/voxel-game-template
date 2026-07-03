@@ -91,6 +91,39 @@ export function parseAttackMessage(value: unknown): AttackMessage | undefined {
   return undefined;
 }
 
+// Client -> server: melee attack on an NPC (id from the NPC entity packets).
+export type AttackNpcMessage = {
+  type: "attackNpc";
+  id: number;
+};
+
+export function parseAttackNpcMessage(value: unknown): AttackNpcMessage | undefined {
+  if (isRecord(value) && value.type === "attackNpc" && Number.isInteger(value.id)) {
+    return { type: "attackNpc", id: value.id as number };
+  }
+  return undefined;
+}
+
+// Client -> server: eat the food held in an inventory slot. Carries the item
+// like place/throw do, so a racing equip can't get the wrong stack consumed.
+export type EatMessage = {
+  type: "eat";
+  item: number;
+  slot: number;
+};
+
+export function parseEatMessage(value: unknown): EatMessage | undefined {
+  if (
+    isRecord(value) &&
+    value.type === "eat" &&
+    Number.isInteger(value.item) &&
+    Number.isInteger(value.slot)
+  ) {
+    return { type: "eat", item: value.item as number, slot: value.slot as number };
+  }
+  return undefined;
+}
+
 // Server -> clients: a player swung their item (animation only).
 export type SwingMessage = {
   type: "swing";
@@ -112,6 +145,23 @@ export type DeathMessage = {
   victim: string;
   attacker: string;
   cause?: "drown";
+};
+
+// Server -> clients: an NPC took a hit (flash + sound; hp stays server-side).
+export type NpcHurtMessage = {
+  type: "npcHurt";
+  id: number;
+};
+
+// Server -> clients: an NPC died. Position lets clients play an effect where
+// it fell (the entity itself just vanishes from the next NPC packet).
+export type NpcDeathMessage = {
+  type: "npcDeath";
+  id: number;
+  kind: number;
+  x: number;
+  y: number;
+  z: number;
 };
 
 // Client -> server: one dig hit on a block (blocks have HP).
@@ -376,7 +426,9 @@ export type ServerStreamMessage =
   | DeathMessage
   | SwingMessage
   | SkinChangeMessage
-  | ArmorChangeMessage;
+  | ArmorChangeMessage
+  | NpcHurtMessage
+  | NpcDeathMessage;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -512,6 +564,26 @@ export function parseServerStreamMessage(value: unknown): ServerStreamMessage | 
   }
   if (value.type === "leave" && typeof value.id === "string") {
     return { type: "leave", id: value.id };
+  }
+  if (value.type === "npcHurt" && Number.isInteger(value.id)) {
+    return { type: "npcHurt", id: value.id as number };
+  }
+  if (
+    value.type === "npcDeath" &&
+    Number.isInteger(value.id) &&
+    Number.isInteger(value.kind) &&
+    isFiniteNumber(value.x) &&
+    isFiniteNumber(value.y) &&
+    isFiniteNumber(value.z)
+  ) {
+    return {
+      type: "npcDeath",
+      id: value.id as number,
+      kind: value.kind as number,
+      x: value.x,
+      y: value.y,
+      z: value.z,
+    };
   }
   return undefined;
 }

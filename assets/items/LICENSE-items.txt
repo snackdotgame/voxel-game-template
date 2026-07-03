@@ -6,5 +6,6 @@ originals: default_tool_steelpick, default_tool_steelaxe,
 default_tool_steelshovel, default_clay_lump, default_snowball.
 
 hand.png, arrow.png, bow.png, feather.png, plank.png, stick.png,
-string.png, helmet.png, chestplate.png, leggings.png, and boots.png are
-original art made for this project.
+string.png, helmet.png, chestplate.png, leggings.png, boots.png,
+stone_sword.png, diamond_sword.png, porkchop.png, beef.png, and
+rotten_flesh.png are original art made for this project.

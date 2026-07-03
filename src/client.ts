@@ -57,8 +57,10 @@ import {
   BOW,
   BOW_DRAW_MS,
   BOW_MIN_CHARGE,
+  BEEF,
   BLOCK_REACH,
   CHESTPLATE,
+  DIAMOND_SWORD,
   FEATHER,
   HAND,
   HELMET,
@@ -69,15 +71,20 @@ import {
   MELEE_RANGE,
   PICKAXE,
   PLANK,
+  PORKCHOP,
   ROCK,
+  ROTTEN_FLESH,
   SHOVEL,
   SNOWBALL,
   STICK,
   STRING,
+  SWORD,
   armorPiece,
   blockToItem,
+  foodHeal,
   hitDamage,
   isArmorIndex,
+  isFood,
   isThrowable,
   itemName,
   itemToBlock,
@@ -88,6 +95,7 @@ import {
   unpackArmor,
   type InvSlot,
 } from "./shared/items.js";
+import { NPC_NAMES, NPC_SPIDER, NPC_ZOMBIE, npcKindFromTag } from "./shared/npcs.js";
 import { CRAFT_GRID_BASE, craftCellOf, isCraftSlot, matchRecipe } from "./shared/recipes.js";
 import {
   type CharInput,
@@ -1974,46 +1982,55 @@ function applyEntityViews(
  *      chunk loading, handled by the same seen-set despawn as projectiles.
  */
 
-type ChickenView = {
+type NpcView = {
   entityId: number;
   mesh: Group;
+  kind: number;
   target: ProjectileSnapshot;
   faceY: number;
   waddle: number;
+  hurtUntil: number;
+  // every material in the mesh, for the hurt flash
+  materials: MeshLambertMaterial[];
 };
 
-const chickenViews = new Map<number, ChickenView>();
+const npcViews = new Map<number, NpcView>();
 
-function chickenMaterial(name: string, hex: number): MeshLambertMaterial {
+function npcMaterial(name: string, hex: number): MeshLambertMaterial {
   const material = noa.rendering.makeStandardMaterial(name);
   material.color = new Color(hex);
   return material;
 }
 
-// A small low-poly chicken built from boxes, origin at the feet (so it sits on
-// the entity's base position) and facing +z.
-function buildChickenMesh(name: string): Group {
+// Box-model builders, one per NPC kind. All meshes have their origin at the
+// feet (so they sit on the entity's base position) and face +z.
+type BoxAdder = (
+  w: number,
+  h: number,
+  d: number,
+  x: number,
+  y: number,
+  z: number,
+  material: MeshLambertMaterial,
+) => Mesh;
+
+function npcRoot(name: string): { root: Group; addBox: BoxAdder } {
   const root = new Group();
   root.name = name;
-  const white = chickenMaterial(`${name}-body`, 0xf5f5f5);
-  const red = chickenMaterial(`${name}-comb`, 0xd83a3a);
-  const yellow = chickenMaterial(`${name}-beak`, 0xf2a93b);
-
-  const addBox = (
-    w: number,
-    h: number,
-    d: number,
-    x: number,
-    y: number,
-    z: number,
-    material: MeshLambertMaterial,
-  ): Mesh => {
+  const addBox: BoxAdder = (w, h, d, x, y, z, material) => {
     const mesh = new Mesh(new BoxGeometry(w, h, d), material);
     mesh.position.set(x, y, z);
     root.add(mesh);
     return mesh;
   };
+  return { root, addBox };
+}
 
+function buildChickenMesh(name: string): Group {
+  const { root, addBox } = npcRoot(name);
+  const white = npcMaterial(`${name}-body`, 0xf5f5f5);
+  const red = npcMaterial(`${name}-comb`, 0xd83a3a);
+  const yellow = npcMaterial(`${name}-beak`, 0xf2a93b);
   addBox(0.38, 0.34, 0.5, 0, 0.42, 0, white); // body
   addBox(0.26, 0.28, 0.26, 0, 0.66, 0.26, white); // head
   addBox(0.1, 0.12, 0.18, 0, 0.8, 0.28, red); // comb
@@ -2024,6 +2041,87 @@ function buildChickenMesh(name: string): Group {
   addBox(0.07, 0.25, 0.07, 0.1, 0.13, 0.05, yellow); // right leg
   return root;
 }
+
+function buildPigMesh(name: string): Group {
+  const { root, addBox } = npcRoot(name);
+  const pink = npcMaterial(`${name}-body`, 0xe8a2ac);
+  const snout = npcMaterial(`${name}-snout`, 0xd07d8a);
+  addBox(0.6, 0.5, 0.95, 0, 0.55, -0.05, pink); // body
+  addBox(0.44, 0.42, 0.4, 0, 0.6, 0.6, pink); // head
+  addBox(0.2, 0.14, 0.08, 0, 0.52, 0.84, snout); // snout
+  addBox(0.16, 0.3, 0.16, -0.18, 0.15, 0.28, pink); // front legs
+  addBox(0.16, 0.3, 0.16, 0.18, 0.15, 0.28, pink);
+  addBox(0.16, 0.3, 0.16, -0.18, 0.15, -0.34, pink); // back legs
+  addBox(0.16, 0.3, 0.16, 0.18, 0.15, -0.34, pink);
+  return root;
+}
+
+function buildCowMesh(name: string): Group {
+  const { root, addBox } = npcRoot(name);
+  const brown = npcMaterial(`${name}-body`, 0x6e4a33);
+  const cream = npcMaterial(`${name}-muzzle`, 0xd9cbb8);
+  addBox(0.7, 0.6, 1.15, 0, 0.85, -0.05, brown); // body
+  addBox(0.42, 0.4, 0.4, 0, 1.05, 0.7, brown); // head
+  addBox(0.3, 0.16, 0.1, 0, 0.92, 0.92, cream); // muzzle
+  addBox(0.1, 0.1, 0.14, -0.24, 1.26, 0.68, cream); // horns
+  addBox(0.1, 0.1, 0.14, 0.24, 1.26, 0.68, cream);
+  addBox(0.18, 0.55, 0.18, -0.22, 0.28, 0.36, brown); // front legs
+  addBox(0.18, 0.55, 0.18, 0.22, 0.28, 0.36, brown);
+  addBox(0.18, 0.55, 0.18, -0.22, 0.28, -0.44, brown); // back legs
+  addBox(0.18, 0.55, 0.18, 0.22, 0.28, -0.44, brown);
+  return root;
+}
+
+function buildZombieMesh(name: string): Group {
+  const { root, addBox } = npcRoot(name);
+  const skin = npcMaterial(`${name}-skin`, 0x6a9e5b);
+  const shirt = npcMaterial(`${name}-shirt`, 0x2e6157);
+  const pants = npcMaterial(`${name}-pants`, 0x3a3f52);
+  addBox(0.5, 0.68, 0.28, 0, 1.06, 0, shirt); // torso
+  addBox(0.42, 0.42, 0.42, 0, 1.62, 0, skin); // head
+  // the classic outstretched arms, reaching toward whatever it hunts
+  addBox(0.14, 0.14, 0.55, -0.2, 1.28, 0.36, skin);
+  addBox(0.14, 0.14, 0.55, 0.2, 1.28, 0.36, skin);
+  addBox(0.2, 0.72, 0.24, -0.13, 0.36, 0, pants); // legs
+  addBox(0.2, 0.72, 0.24, 0.13, 0.36, 0, pants);
+  return root;
+}
+
+function buildSpiderMesh(name: string): Group {
+  const { root, addBox } = npcRoot(name);
+  const black = npcMaterial(`${name}-body`, 0x2a2723);
+  const red = npcMaterial(`${name}-eyes`, 0xc03030);
+  addBox(0.62, 0.42, 0.75, 0, 0.42, -0.3, black); // abdomen
+  addBox(0.46, 0.36, 0.45, 0, 0.38, 0.3, black); // head
+  addBox(0.08, 0.08, 0.06, -0.12, 0.46, 0.53, red); // eyes
+  addBox(0.08, 0.08, 0.06, 0.12, 0.46, 0.53, red);
+  for (let i = 0; i < 4; i++) {
+    const z = 0.28 - i * 0.19;
+    const left = addBox(0.55, 0.06, 0.08, -0.45, 0.35, z, black);
+    left.rotation.z = 0.55;
+    const right = addBox(0.55, 0.06, 0.08, 0.45, 0.35, z, black);
+    right.rotation.z = -0.55;
+  }
+  return root;
+}
+
+// Indexed by NPC kind (see shared/npcs.ts): mesh builder, then the collision
+// box (width, height) passed to ents.add, then the aim-corridor center height
+// used by melee targeting.
+const NPC_BUILDERS: readonly ((name: string) => Group)[] = [
+  buildChickenMesh,
+  buildPigMesh,
+  buildCowMesh,
+  buildZombieMesh,
+  buildSpiderMesh,
+];
+const NPC_BOX: readonly [number, number][] = [
+  [0.5, 0.6],
+  [0.7, 0.9],
+  [0.75, 1.4],
+  [0.6, 1.85],
+  [0.9, 0.7],
+];
 
 // Shortest-path angle interpolation so a chicken turns the short way around.
 function angleLerp(from: number, to: number, t: number): number {
@@ -2037,22 +2135,49 @@ function angleLerp(from: number, to: number, t: number): number {
   return from + delta * t;
 }
 
-function applyChickenViews(snapshots: ProjectileSnapshot[]): void {
+function applyNpcViews(snapshots: ProjectileSnapshot[]): void {
   const seen = new Set<number>();
   for (const snap of snapshots) {
     seen.add(snap.id);
-    const existing = chickenViews.get(snap.id);
+    const existing = npcViews.get(snap.id);
     if (existing) {
       existing.target = snap;
       continue;
     }
-    const mesh = buildChickenMesh(`chicken-${snap.id}`);
-    const entityId = ents.add([snap.x, snap.y, snap.z], 0.5, 0.6, mesh, [0, 0, 0], false, false);
-    chickenViews.set(snap.id, { entityId, mesh, target: snap, faceY: 0, waddle: 0 });
+    // `item` carries the NPC kind; unknown kinds (older client vs newer
+    // server) fall back to the chicken so nothing turns invisible
+    const kind = snap.item < NPC_BUILDERS.length ? snap.item : 0;
+    const mesh = NPC_BUILDERS[kind](`npc-${NPC_NAMES[kind]}-${snap.id}`);
+    const [width, height] = NPC_BOX[kind];
+    const entityId = ents.add(
+      [snap.x, snap.y, snap.z],
+      width,
+      height,
+      mesh,
+      [0, 0, 0],
+      false,
+      false,
+    );
+    const materials: MeshLambertMaterial[] = [];
+    mesh.traverse((child) => {
+      if (child instanceof Mesh) {
+        materials.push(child.material as MeshLambertMaterial);
+      }
+    });
+    npcViews.set(snap.id, {
+      entityId,
+      mesh,
+      kind,
+      target: snap,
+      faceY: 0,
+      waddle: 0,
+      hurtUntil: 0,
+      materials,
+    });
   }
-  for (const [id, view] of chickenViews) {
+  for (const [id, view] of npcViews) {
     if (!seen.has(id)) {
-      chickenViews.delete(id);
+      npcViews.delete(id);
       ents.deleteEntity(view.entityId, true);
     }
   }
@@ -2676,8 +2801,9 @@ noa.on("beforeRender", () => {
     view.mesh.rotation.y += dtSec * 1.6;
   }
 
-  // chickens: ease toward broadcast positions, turn to face travel, waddle
-  for (const view of chickenViews.values()) {
+  // NPCs: ease toward broadcast positions, turn to face travel, waddle.
+  // Spiders scuttle (fast, flat bob); zombies lumber (slow, upright).
+  for (const view of npcViews.values()) {
     const current = ents.getPosition(view.entityId);
     const nx = current[0] + (view.target.x - current[0]) * pt;
     const ny = current[1] + (view.target.y - current[1]) * pt;
@@ -2687,11 +2813,19 @@ noa.on("beforeRender", () => {
     const dz = nz - current[2];
     const speed = Math.hypot(dx, dz);
     if (speed > 0.0006) {
-      view.faceY = angleLerp(view.faceY, Math.atan2(dx, dz), 0.3);
-      view.waddle += dtSec * 12;
+      // render space negates Z vs world (same PI - heading convention the
+      // player rigs use), so a plain atan2(dx, dz) faces the mesh backwards
+      // whenever travel has a z component
+      view.faceY = angleLerp(view.faceY, Math.PI - Math.atan2(dx, dz), 0.3);
+      view.waddle += dtSec * (view.kind === NPC_SPIDER ? 20 : view.kind === NPC_ZOMBIE ? 7 : 12);
     }
     view.mesh.rotation.y = view.faceY;
-    view.mesh.rotation.z = speed > 0.0006 ? Math.sin(view.waddle) * 0.12 : 0;
+    const sway = view.kind === NPC_ZOMBIE ? 0.06 : 0.12;
+    view.mesh.rotation.z = speed > 0.0006 ? Math.sin(view.waddle) * sway : 0;
+    const flash = now < view.hurtUntil;
+    for (const material of view.materials) {
+      material.emissive.copy(flash ? HURT_FLASH : NO_FLASH);
+    }
   }
 
   // remote players: interpolate between buffered snapshots, rendered
@@ -2844,6 +2978,11 @@ const ITEM_ICON_FILES: Record<number, string> = {
   [CHESTPLATE]: "/assets/items/chestplate.png",
   [LEGGINGS]: "/assets/items/leggings.png",
   [BOOTS]: "/assets/items/boots.png",
+  [SWORD]: "/assets/items/stone_sword.png",
+  [DIAMOND_SWORD]: "/assets/items/diamond_sword.png",
+  [PORKCHOP]: "/assets/items/porkchop.png",
+  [BEEF]: "/assets/items/beef.png",
+  [ROTTEN_FLESH]: "/assets/items/rotten_flesh.png",
 };
 
 function makeIconElement(item: number): Node {
@@ -3360,6 +3499,37 @@ function findAttackTarget(): string | null {
   return best;
 }
 
+// Same aim corridor as findAttackTarget, but over NPC views. The corridor is
+// a little tighter (mob boxes are smaller than player rigs).
+function findNpcTarget(): number | null {
+  const dir = cameraForward();
+  const ox = predicted.x;
+  const oy = predicted.y + 1.5;
+  const oz = predicted.z;
+  let best: number | null = null;
+  let bestDist = MELEE_RANGE;
+  for (const [id, view] of npcViews) {
+    const cx = view.target.x - ox;
+    const cy = view.target.y + NPC_BOX[view.kind][1] * 0.5 - oy;
+    const cz = view.target.z - oz;
+    const dist = Math.hypot(cx, cy, cz);
+    if (dist > MELEE_RANGE || dist >= bestDist) {
+      continue;
+    }
+    const along = cx * dir.x + cy * dir.y + cz * dir.z;
+    if (along <= 0) {
+      continue;
+    }
+    const offAxis = Math.hypot(cx - dir.x * along, cy - dir.y * along, cz - dir.z * along);
+    if (offAxis > 0.8) {
+      continue;
+    }
+    best = id;
+    bestDist = dist;
+  }
+  return best;
+}
+
 // the targeting ray is camera-based (long, to cover third-person zoom), so
 // block interactions get their own limit: block center within reach of the
 // character's eye line
@@ -3379,6 +3549,11 @@ function primaryAction(fromHold: boolean): void {
   const target = findAttackTarget();
   if (target) {
     void client.streams.send({ type: "attack", target }).catch(() => {});
+    return;
+  }
+  const npcTarget = findNpcTarget();
+  if (npcTarget !== null) {
+    void client.streams.send({ type: "attackNpc", id: npcTarget }).catch(() => {});
     return;
   }
   if (!noa.targetedBlock) {
@@ -3447,10 +3622,22 @@ noa.inputs.down.on("alt-fire", () => {
     return;
   }
   swingT = 1;
+  // right-click with food equipped eats it (heals; the hp echo arrives in the
+  // next snapshot)
+  const held = heldStack();
+  if (held && isFood(held.item)) {
+    if (myHp >= MAX_HP) {
+      showNotice("Already at full health");
+      return;
+    }
+    playSound("impactSoft_medium", 0.5);
+    showNotice(`Ate ${itemName(held.item)} (+${foodHeal(held.item) / 2} ♥)`);
+    void client.streams.send({ type: "eat", item: held.item, slot: selectedSlot }).catch(() => {});
+    return;
+  }
   if (!target) {
     return;
   }
-  const held = heldStack();
   if (!held || !isBlockItem(held.item)) {
     showNotice("Hold a block to place it — dig some, then grab it from a slot");
     return;
@@ -3815,12 +4002,25 @@ function handleStreamEvent(event: { bytes: Uint8Array; json<T = unknown>(): T })
           playSoundAt("impactPunch_medium", remote.target.x, remote.target.y, remote.target.z, 0.8);
         }
       }
+    } else if (message.type === "npcHurt") {
+      const view = npcViews.get(message.id);
+      if (view) {
+        view.hurtUntil = performance.now() + 200;
+        playSoundAt("impactSoft_medium", view.target.x, view.target.y, view.target.z, 0.8);
+      }
+    } else if (message.type === "npcDeath") {
+      playSoundAt("impactSoft_heavy", message.x, message.y, message.z, 0.9);
     } else if (message.type === "death") {
       lastDeath = { victim: message.victim, attacker: message.attacker };
+      const attackerNpcKind = npcKindFromTag(message.attacker);
       const victimName =
         message.victim === myId ? "You" : (playerNames.get(message.victim) ?? "Player");
       const attackerName =
-        message.attacker === myId ? "you" : (playerNames.get(message.attacker) ?? "a player");
+        message.attacker === myId
+          ? "you"
+          : attackerNpcKind !== null
+            ? `a ${NPC_NAMES[attackerNpcKind]}`
+            : (playerNames.get(message.attacker) ?? "a player");
       showNotice(
         // a victim who is their own attacker died to the world; the cause
         // says how (drowned vs the default, a hard landing)
@@ -3914,7 +4114,7 @@ function handleDatagramEvent(event: { bytes: Uint8Array }): void {
     }
     const npcs = decodeNpcs(event.bytes);
     if (npcs) {
-      applyChickenViews(npcs);
+      applyNpcViews(npcs);
       return;
     }
     const players = decodeSnapshots(event.bytes);
@@ -3997,6 +4197,7 @@ declare global {
       hp(): number;
       lastDeath(): { victim: string; attacker: string } | null;
       attack(target: string): void;
+      attackNpc(id: number): void;
       swing(): number;
       suspendInput(ms: number): void;
       remoteSwingsSeen(): number;
@@ -4006,8 +4207,8 @@ declare global {
       serverDebug(): Record<string, unknown> | null;
       projectileCount(): number;
       dropCount(): number;
-      chickenCount(): number;
-      chickens(): { id: number; x: number; y: number; z: number; faceY: number }[];
+      npcCount(): number;
+      npcs(): { id: number; kind: number; x: number; y: number; z: number; faceY: number }[];
       inventory(): Record<string, number>;
       slots(): ({ item: number; count: number } | null)[];
       selectedSlot(): number;
@@ -4054,6 +4255,9 @@ window.__voxels = {
   attack: (target) => {
     void client.streams.send({ type: "attack", target }).catch(() => {});
   },
+  attackNpc: (id) => {
+    void client.streams.send({ type: "attackNpc", id }).catch(() => {});
+  },
   swing: () => swingT,
   suspendInput: (ms) => {
     inputSuspendedUntil = performance.now() + ms;
@@ -4067,11 +4271,11 @@ window.__voxels = {
   serverDebug: () => lastServerDebug,
   projectileCount: () => projectileViews.size,
   dropCount: () => dropViews.size,
-  chickenCount: () => chickenViews.size,
-  chickens: () =>
-    [...chickenViews.entries()].map(([id, view]) => {
+  npcCount: () => npcViews.size,
+  npcs: () =>
+    [...npcViews.entries()].map(([id, view]) => {
       const [x, y, z] = ents.getPosition(view.entityId);
-      return { id, x, y, z, faceY: view.faceY };
+      return { id, kind: view.kind, x, y, z, faceY: view.faceY };
     }),
   inventory: () => {
     const totals: Record<string, number> = {};

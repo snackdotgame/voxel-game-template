@@ -11,6 +11,7 @@ import {
   BOW,
   blockToItem,
   CHESTPLATE,
+  DIAMOND_SWORD,
   FEATHER,
   HELMET,
   LEGGINGS,
@@ -21,8 +22,16 @@ import {
   SNOWBALL,
   STICK,
   STRING,
+  SWORD,
 } from "./items.js";
-import { CRAFTING_TABLE_ID, IRON_ORE_ID, LOG_ID, SNOW_ID, STONE_ID } from "./terrain.js";
+import {
+  CRAFTING_TABLE_ID,
+  DIAMOND_ORE_ID,
+  IRON_ORE_ID,
+  LOG_ID,
+  SNOW_ID,
+  STONE_ID,
+} from "./terrain.js";
 
 // invMove slot indices: 0..35 are inventory, CRAFT_GRID_BASE..+8 are the
 // (up to) nine crafting-grid cells. Keeps the two address spaces disjoint.
@@ -42,6 +51,7 @@ const STONE_ITEM = blockToItem(STONE_ID);
 const SNOW_ITEM = blockToItem(SNOW_ID);
 const TABLE_ITEM = blockToItem(CRAFTING_TABLE_ID);
 const IRON_ITEM = blockToItem(IRON_ORE_ID);
+const DIAMOND_ITEM = blockToItem(DIAMOND_ORE_ID);
 
 // Shaped patterns are the recipe's bounding box (no empty border rows/cols);
 // 0 marks an interior empty cell. Patterns match anywhere in the grid and are
@@ -107,6 +117,20 @@ export const RECIPES: readonly Recipe[] = [
     kind: "shaped",
     pattern: [[PLANK], [STICK], [STICK]],
     out: SHOVEL,
+    count: 1,
+  },
+  // Swords — blade over a stick grip, like Minecraft's shape (three tall, so
+  // both need the 3x3 table). Stone for the early fight, diamond for endgame.
+  {
+    kind: "shaped",
+    pattern: [[ROCK], [ROCK], [STICK]],
+    out: SWORD,
+    count: 1,
+  },
+  {
+    kind: "shaped",
+    pattern: [[DIAMOND_ITEM], [DIAMOND_ITEM], [STICK]],
+    out: DIAMOND_SWORD,
     count: 1,
   },
   // Bow — three sticks bent into the limbs, three string for the bowstring

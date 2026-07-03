@@ -31,6 +31,11 @@ export const ITEMS = [
   "Chestplate",
   "Leggings",
   "Boots",
+  "Stone Sword",
+  "Diamond Sword",
+  "Porkchop",
+  "Raw Beef",
+  "Rotten Flesh",
 ] as const;
 
 export const HAND = 0;
@@ -54,6 +59,13 @@ export const HELMET = 12;
 export const CHESTPLATE = 13;
 export const LEGGINGS = 14;
 export const BOOTS = 15;
+// Swords: pure melee weapons — not throwable, don't stack, best-in-slot damage.
+export const SWORD = 16;
+export const DIAMOND_SWORD = 17;
+// Food, dropped by animals (and zombies); eat with right-click to heal.
+export const PORKCHOP = 18;
+export const BEEF = 19;
+export const ROTTEN_FLESH = 20;
 
 // Block items occupy ids 64+blockId so a u8 covers both kinds.
 export const BLOCK_ITEM_BASE = 64;
@@ -219,6 +231,12 @@ export function meleeDamage(item: number): number {
   if (isBlockItem(item)) {
     return 2;
   }
+  if (item === SWORD) {
+    return 6;
+  }
+  if (item === DIAMOND_SWORD) {
+    return 9;
+  }
   return MELEE_DAMAGE[item] ?? 1;
 }
 
@@ -273,6 +291,30 @@ export function arrowLaunch(charge: number): ArrowLaunch {
 }
 
 /*
+ *      Food
+ *
+ *  Eating (right-click with food equipped) heals; there is no hunger bar.
+ *  Server-authoritative: the client sends an eat message, the server
+ *  validates, consumes the item and raises hp (capped at MAX_HP).
+ */
+
+export function foodHeal(item: number): number {
+  switch (item) {
+    case PORKCHOP:
+    case BEEF:
+      return 4;
+    case ROTTEN_FLESH:
+      return 2;
+    default:
+      return 0;
+  }
+}
+
+export function isFood(item: number): boolean {
+  return foodHeal(item) > 0;
+}
+
+/*
  *      Slot inventory
  *
  *  Minecraft-style storage: a fixed array of slots, each empty or holding a
@@ -286,9 +328,15 @@ export const INV_SLOTS = 36;
 
 export type InvSlot = { item: number; count: number } | null;
 
-// tools and armor don't stack; everything else stacks like Minecraft
+// tools, weapons and armor don't stack; everything else stacks like Minecraft
 export function stackLimit(item: number): number {
-  return item === PICKAXE || item === AXE || item === SHOVEL || item === BOW || isArmorItem(item)
+  return item === PICKAXE ||
+    item === AXE ||
+    item === SHOVEL ||
+    item === BOW ||
+    item === SWORD ||
+    item === DIAMOND_SWORD ||
+    isArmorItem(item)
     ? 1
     : 64;
 }
