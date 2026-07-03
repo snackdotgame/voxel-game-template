@@ -215,7 +215,10 @@ type Npc = {
   id: number;
   kind: number;
   char: CharState;
+  // the body's current facing; movement follows it, and it goes on the wire
   heading: number;
+  // where the AI wants to face — heading turns toward it at NPC_TURN_RATE
+  wantHeading: number;
   hp: number;
   // idle/walk alternate on a timer (the wander); flee runs from a recent hit
   // until its timer expires; chase hunts targetId until it dies out of range
@@ -368,6 +371,12 @@ const NPC_MELEE_KNOCKBACK = 4;
 // give up a chase beyond aggroRange times this (hysteresis so a target on the
 // edge doesn't flicker aggro on and off)
 const DEAGGRO_FACTOR = 1.6;
+// How fast a mob can rotate its body (radians/second), and the remaining-turn
+// angle beyond which it pivots in place instead of walking. Bounding the turn
+// makes direction changes read as "turn, then walk" — an instant heading snap
+// under a slowly-turning mesh reads as strafing sideways.
+const NPC_TURN_RATE = 7;
+const NPC_PIVOT_RAD = 1.1;
 
 export async function main() {
   // every session generates a fresh world: one random seed, picked before
@@ -494,7 +503,14 @@ export async function main() {
           Math.abs(chunkCoord(npc.char.z) - pcz),
         );
         if (dist <= NPC_VIEW_RADIUS) {
-          visible.push({ id: npc.id, item: npc.kind, x: npc.char.x, y: npc.char.y, z: npc.char.z });
+          visible.push({
+            id: npc.id,
+            item: npc.kind,
+            x: npc.char.x,
+            y: npc.char.y,
+            z: npc.char.z,
+            heading: npc.heading,
+          });
         }
       }
       if (visible.length === 0 && !player.sawNpcs) {
@@ -1889,11 +1905,13 @@ function spawnNpc(world: World, kind: number, x: number, z: number): boolean {
   char.x = x;
   char.y = y;
   char.z = z;
+  const heading = worldRand(world) * Math.PI * 2;
   world.npcs.set(id, {
     id,
     kind,
     char,
-    heading: worldRand(world) * Math.PI * 2,
+    heading,
+    wantHeading: heading,
     hp: NPC_CONFIG[kind].hp,
     mode: "idle",
     modeMsLeft: 0,
@@ -2111,10 +2129,11 @@ function stepNpcs(world: World, loadedChunks: Set<string>): Npc[] {
       npc.rng = nextRng(npc.rng);
       if (npc.rng / 0x100000000 < NPC_IDLE_CHANCE) {
         npc.mode = "idle";
+        npc.wantHeading = npc.heading;
       } else {
         npc.mode = "walk";
         npc.rng = nextRng(npc.rng);
-        npc.heading = (npc.rng / 0x100000000) * Math.PI * 2;
+        npc.wantHeading = (npc.rng / 0x100000000) * Math.PI * 2;
       }
       npc.rng = nextRng(npc.rng);
       npc.modeMsLeft =
@@ -2123,7 +2142,7 @@ function stepNpcs(world: World, loadedChunks: Set<string>): Npc[] {
 
     let moving = npc.mode !== "idle";
     let sprint = npc.mode === "flee" || (npc.mode === "chase" && cfg.sprints);
-    let desired = npc.heading;
+    let desired = npc.wantHeading;
 
     if (npc.mode === "chase") {
       const target = npc.targetId ? world.players.get(npc.targetId) : undefined;
@@ -2138,11 +2157,15 @@ function stepNpcs(world: World, loadedChunks: Set<string>): Npc[] {
         const dy = target.char.y - npc.char.y;
         const dz = target.char.z - npc.char.z;
         desired = Math.atan2(dx, dz);
-        // in reach: stand and swing on a cooldown instead of shoving through
+        npc.wantHeading = desired;
+        // in reach: stand and swing on a cooldown instead of shoving through.
+        // Standing still doesn't stop the turn below, so it keeps facing a
+        // target that circles it.
         if (Math.hypot(dx, dz) <= cfg.attackReach && Math.abs(dy) < 2) {
           moving = false;
           if (now - npc.lastAttackAt >= NPC_ATTACK_COOLDOWN_MS && npc.targetId) {
             npc.lastAttackAt = now;
+            server.streams.broadcast({ type: "npcSwing", id: npc.id });
             damagePlayer(
               world,
               npc.targetId,
@@ -2191,8 +2214,19 @@ function stepNpcs(world: World, loadedChunks: Set<string>): Npc[] {
         }
       }
     }
-    if (moving) {
-      npc.heading = desired;
+    // turn the body toward the desired direction at a bounded rate; movement
+    // follows the body, so direction changes arc instead of strafing. Big
+    // turns pivot in place first, and a body still pointed at a hazard
+    // mid-turn waits for the turn instead of walking into it.
+    const delta = angleDeltaRad(npc.heading, desired);
+    const maxTurn = (NPC_TURN_RATE * SIM_TICK_MS) / 1000;
+    npc.heading += Math.abs(delta) <= maxTurn ? delta : Math.sign(delta) * maxTurn;
+    if (
+      moving &&
+      !inWater &&
+      (Math.abs(delta) > NPC_PIVOT_RAD || headingHazard(world, npc.char, npc.heading))
+    ) {
+      moving = false;
     }
 
     const input: CharInput = {
@@ -2210,6 +2244,18 @@ function stepNpcs(world: World, loadedChunks: Set<string>): Npc[] {
     active.push(npc);
   }
   return active;
+}
+
+// shortest signed angle from `from` to `to`, in [-PI, PI]
+function angleDeltaRad(from: number, to: number): number {
+  let delta = (to - from) % (Math.PI * 2);
+  if (delta > Math.PI) {
+    delta -= Math.PI * 2;
+  }
+  if (delta < -Math.PI) {
+    delta += Math.PI * 2;
+  }
+  return delta;
 }
 
 // Shared damage path for melee and projectiles vs NPCs: knockback, hurt
@@ -2262,7 +2308,7 @@ function damageNpc(
     // the knockback direction already points away from the attacker
     npc.mode = "flee";
     npc.targetId = null;
-    npc.heading = Math.atan2(kbx / h, kbz / h);
+    npc.wantHeading = Math.atan2(kbx / h, kbz / h);
     npc.rng = nextRng(npc.rng);
     npc.modeMsLeft =
       NPC_FLEE_MIN_MS + (npc.rng / 0x100000000) * (NPC_FLEE_MAX_MS - NPC_FLEE_MIN_MS);

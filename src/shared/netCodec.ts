@@ -48,6 +48,9 @@ export type ProjectileSnapshot = {
   x: number;
   y: number;
   z: number;
+  // world movement heading (radians), quantized to a byte on the wire.
+  // NPCs use it to face the way their AI points; projectiles/drops ignore it.
+  heading?: number;
 };
 
 const MAGIC_V = 0x56;
@@ -56,7 +59,7 @@ const MAGIC_S = 0x53;
 const MAGIC_P = 0x50;
 const MAGIC_D = 0x44;
 const MAGIC_N = 0x4e;
-export const NET_CODEC_VERSION = 5;
+export const NET_CODEC_VERSION = 6;
 
 const INPUT_HEADER_BYTES = 4;
 const INPUT_RECORD_BYTES = 13;
@@ -214,11 +217,13 @@ export function encodeSnapshots(
 /*
  *      Projectiles
  *
- *  Packet 'VP': header (4 bytes: magic, version, count u8), then 15-byte
- *  records: id u16, item u8, x/y/z f32. Render-only, so f32 is plenty.
+ *  Packet 'VP': header (4 bytes: magic, version, count u8), then 16-byte
+ *  records: id u16, item u8, x/y/z f32, heading u8 (256ths of a full turn).
+ *  Render-only, so f32 and a byte of heading are plenty.
  */
 
-const PROJ_RECORD_BYTES = 15;
+const PROJ_RECORD_BYTES = 16;
+const TWO_PI = Math.PI * 2;
 
 export function encodeProjectiles(
   projectiles: readonly ProjectileSnapshot[],
@@ -274,6 +279,8 @@ function encodeEntityPackets(
       view.setFloat32(offset + 3, proj.x, true);
       view.setFloat32(offset + 7, proj.y, true);
       view.setFloat32(offset + 11, proj.z, true);
+      const heading = (((proj.heading ?? 0) % TWO_PI) + TWO_PI) % TWO_PI;
+      bytes[offset + 15] = Math.round((heading / TWO_PI) * 256) % 256;
       offset += PROJ_RECORD_BYTES;
     }
     packets.push(bytes);
@@ -302,6 +309,7 @@ function decodeEntityPackets(magic: number, bytes: Uint8Array): ProjectileSnapsh
       x: view.getFloat32(offset + 3, true),
       y: view.getFloat32(offset + 7, true),
       z: view.getFloat32(offset + 11, true),
+      heading: (bytes[offset + 15] / 256) * TWO_PI,
     });
     offset += PROJ_RECORD_BYTES;
   }

@@ -1990,6 +1990,10 @@ type NpcView = {
   faceY: number;
   waddle: number;
   hurtUntil: number;
+  // attack animation phase, 1 -> 0 after an npcSwing broadcast
+  swingT: number;
+  // meshes named "arm" by the builder (the zombie's), animated on swings
+  arms: Mesh[];
   // every material in the mesh, for the hurt flash
   materials: MeshLambertMaterial[];
 };
@@ -2079,9 +2083,17 @@ function buildZombieMesh(name: string): Group {
   const pants = npcMaterial(`${name}-pants`, 0x3a3f52);
   addBox(0.5, 0.68, 0.28, 0, 1.06, 0, shirt); // torso
   addBox(0.42, 0.42, 0.42, 0, 1.62, 0, skin); // head
-  // the classic outstretched arms, reaching toward whatever it hunts
-  addBox(0.14, 0.14, 0.55, -0.2, 1.28, 0.36, skin);
-  addBox(0.14, 0.14, 0.55, 0.2, 1.28, 0.36, skin);
+  // the classic outstretched arms, reaching toward whatever it hunts. The
+  // geometry is shifted so each arm pivots at its shoulder — the swing
+  // animation rotates them there (meshes named "arm" get animated).
+  for (const side of [-0.2, 0.2]) {
+    const geometry = new BoxGeometry(0.14, 0.14, 0.55);
+    geometry.translate(0, 0, 0.24);
+    const arm = new Mesh(geometry, skin);
+    arm.position.set(side, 1.28, 0.12);
+    arm.name = "arm";
+    root.add(arm);
+  }
   addBox(0.2, 0.72, 0.24, -0.13, 0.36, 0, pants); // legs
   addBox(0.2, 0.72, 0.24, 0.13, 0.36, 0, pants);
   return root;
@@ -2159,9 +2171,13 @@ function applyNpcViews(snapshots: ProjectileSnapshot[]): void {
       false,
     );
     const materials: MeshLambertMaterial[] = [];
+    const arms: Mesh[] = [];
     mesh.traverse((child) => {
       if (child instanceof Mesh) {
         materials.push(child.material as MeshLambertMaterial);
+        if (child.name === "arm") {
+          arms.push(child);
+        }
       }
     });
     npcViews.set(snap.id, {
@@ -2169,9 +2185,12 @@ function applyNpcViews(snapshots: ProjectileSnapshot[]): void {
       mesh,
       kind,
       target: snap,
-      faceY: 0,
+      // spawn already facing the server heading instead of spinning in from 0
+      faceY: Math.PI - (snap.heading ?? 0),
       waddle: 0,
       hurtUntil: 0,
+      swingT: 0,
+      arms,
       materials,
     });
   }
@@ -2801,27 +2820,33 @@ noa.on("beforeRender", () => {
     view.mesh.rotation.y += dtSec * 1.6;
   }
 
-  // NPCs: ease toward broadcast positions, turn to face travel, waddle.
-  // Spiders scuttle (fast, flat bob); zombies lumber (slow, upright).
+  // NPCs: ease toward broadcast positions, face the server's AI heading
+  // (PI - heading, the render convention player rigs use), waddle while
+  // moving. Spiders scuttle (fast, flat bob); zombies lumber (slow, upright),
+  // and chop their arms on an attack swing.
   for (const view of npcViews.values()) {
     const current = ents.getPosition(view.entityId);
     const nx = current[0] + (view.target.x - current[0]) * pt;
     const ny = current[1] + (view.target.y - current[1]) * pt;
     const nz = current[2] + (view.target.z - current[2]) * pt;
     ents.setPosition(view.entityId, nx, ny, nz);
-    const dx = nx - current[0];
-    const dz = nz - current[2];
-    const speed = Math.hypot(dx, dz);
+    const speed = Math.hypot(nx - current[0], nz - current[2]);
+    view.faceY = angleLerp(view.faceY, Math.PI - (view.target.heading ?? 0), 0.35);
     if (speed > 0.0006) {
-      // render space negates Z vs world (same PI - heading convention the
-      // player rigs use), so a plain atan2(dx, dz) faces the mesh backwards
-      // whenever travel has a z component
-      view.faceY = angleLerp(view.faceY, Math.PI - Math.atan2(dx, dz), 0.3);
       view.waddle += dtSec * (view.kind === NPC_SPIDER ? 20 : view.kind === NPC_ZOMBIE ? 7 : 12);
     }
     view.mesh.rotation.y = view.faceY;
     const sway = view.kind === NPC_ZOMBIE ? 0.06 : 0.12;
     view.mesh.rotation.z = speed > 0.0006 ? Math.sin(view.waddle) * sway : 0;
+    if (view.swingT > 0) {
+      view.swingT = Math.max(0, view.swingT - dtSec * 3.1);
+    }
+    for (let i = 0; i < view.arms.length; i++) {
+      // walking swings the arms alternately; an attack chops both overhead
+      const walkSwing = speed > 0.0006 ? Math.sin(view.waddle) * 0.25 * (i === 0 ? 1 : -1) : 0;
+      const chop = Math.sin(view.swingT * Math.PI) * 1.2;
+      view.arms[i].rotation.x = walkSwing - chop;
+    }
     const flash = now < view.hurtUntil;
     for (const material of view.materials) {
       material.emissive.copy(flash ? HURT_FLASH : NO_FLASH);
@@ -4029,6 +4054,15 @@ function handleStreamEvent(event: { bytes: Uint8Array; json<T = unknown>(): T })
       if (view) {
         view.hurtUntil = performance.now() + 200;
         playSoundAt("impactSoft_medium", view.target.x, view.target.y, view.target.z, 0.8);
+      }
+    } else if (message.type === "npcSwing") {
+      const view = npcViews.get(message.id);
+      if (view) {
+        view.swingT = 1;
+        const dist = Math.hypot(view.target.x - predicted.x, view.target.z - predicted.z);
+        if (dist < 16) {
+          playWhoosh(0.14 * Math.max(0, 1 - dist / 16));
+        }
       }
     } else if (message.type === "npcDeath") {
       playSoundAt("impactSoft_heavy", message.x, message.y, message.z, 0.9);

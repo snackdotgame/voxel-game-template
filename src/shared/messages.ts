@@ -153,6 +153,12 @@ export type NpcHurtMessage = {
   id: number;
 };
 
+// Server -> clients: a hostile NPC swung at its target (animation only).
+export type NpcSwingMessage = {
+  type: "npcSwing";
+  id: number;
+};
+
 // Server -> clients: an NPC died. Position lets clients play an effect where
 // it fell (the entity itself just vanishes from the next NPC packet).
 export type NpcDeathMessage = {
@@ -444,6 +450,7 @@ export type ServerStreamMessage =
   | SkinChangeMessage
   | ArmorChangeMessage
   | NpcHurtMessage
+  | NpcSwingMessage
   | NpcDeathMessage;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -583,6 +590,9 @@ export function parseServerStreamMessage(value: unknown): ServerStreamMessage | 
   }
   if (value.type === "npcHurt" && Number.isInteger(value.id)) {
     return { type: "npcHurt", id: value.id as number };
+  }
+  if (value.type === "npcSwing" && Number.isInteger(value.id)) {
+    return { type: "npcSwing", id: value.id as number };
   }
   if (
     value.type === "npcDeath" &&
