@@ -23,8 +23,12 @@
  *  icons, not words — SVG paths inlined from Lucide (https://lucide.dev,
  *  ISC license) so no icon dependency is added.
  *
- *  Fullscreen: requests real fullscreen on the first tap (reclaims the address
- *  bar on Android) and sizes the game to the dynamic viewport. The controls are
+ *  Fullscreen: an explicit button in the left column (never auto-requested —
+ *  Android answers requestFullscreen with a modal "Viewing full screen / Got
+ *  it" education sheet that silently eats EVERY touch until dismissed, so an
+ *  auto-request on the first tap made the game feel dead at session start;
+ *  see setupFullscreenButton) and sizes the game to the dynamic viewport. The
+ *  controls are
  *  pinned to the visible rect via the visualViewport API + safe-area insets, so
  *  the browser's bottom toolbar in portrait can't cover them. We deliberately do
  *  NOT force landscape (unlike the fps template).
@@ -86,6 +90,12 @@ const ICON_BACKPACK =
 const ICON_MOVE =
   '<path d="M12 2v20"/><path d="m15 19-3 3-3-3"/><path d="m19 9 3 3-3 3"/>' +
   '<path d="M2 12h20"/><path d="m5 9-3 3 3 3"/><path d="m9 5 3-3 3 3"/>';
+const ICON_MAXIMIZE =
+  '<path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/>' +
+  '<path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/>';
+const ICON_MINIMIZE =
+  '<path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M21 8h-3a2 2 0 0 1-2-2V3"/>' +
+  '<path d="M3 16h3a2 2 0 0 1 2 2v3"/><path d="M16 21v-3a2 2 0 0 1 2-2h3"/>';
 
 function svgIcon(paths: string, size: number): string {
   return (
@@ -179,18 +189,6 @@ function sizeGameToVisibleViewport(): void {
   style.textContent = "#noa-container { height: 100dvh !important; bottom: auto !important; }";
   document.head.appendChild(style);
 
-  // real fullscreen on the first user gesture (Android: hides the address bar
-  // and bottom toolbar entirely; iOS Safari ignores it and falls back to the
-  // dvh sizing + safe-area insets + visualViewport pinning below).
-  let triedFullscreen = false;
-  const goFullscreen = (): void => {
-    if (triedFullscreen) {
-      return;
-    }
-    triedFullscreen = true;
-    void document.documentElement.requestFullscreen?.().catch(() => {});
-  };
-  window.addEventListener("touchend", goFullscreen, { once: true, passive: true });
   // entering/leaving fullscreen changes the canvas size — let noa re-measure
   document.addEventListener("fullscreenchange", () => {
     window.dispatchEvent(new Event("resize"));
@@ -520,6 +518,40 @@ function setupActionButtons(noa: Engine, root: HTMLElement, opts: MobileControlO
     pos: "top: calc(60px + env(safe-area-inset-top)); left: calc(12px + env(safe-area-inset-left));",
   });
   onTap(viewBtn, opts.toggleView);
+
+  setupFullscreenButton(root);
+}
+
+/*
+ *      Fullscreen button
+ *
+ *  Fullscreen must be a deliberate opt-in, never auto-requested. Android
+ *  answers requestFullscreen with a modal "Viewing full screen — Got it"
+ *  education sheet that swallows every touch until the player finds its
+ *  button; auto-requesting on the first tap therefore made every session
+ *  start with dead controls (verified in an Android emulator against the
+ *  production shell). Tapping a labeled button instead makes the OS sheet
+ *  an expected step, and the player dismisses it knowingly.
+ */
+function setupFullscreenButton(root: HTMLElement): void {
+  const btn = makeButton(root, {
+    icon: ICON_MAXIMIZE,
+    label: "Toggle fullscreen",
+    bg: "rgba(20,20,28,0.55)",
+    size: 56,
+    pos: "top: calc(196px + env(safe-area-inset-top)); left: calc(12px + env(safe-area-inset-left));",
+  });
+  onTap(btn, () => {
+    if (document.fullscreenElement) {
+      void document.exitFullscreen().catch(() => {});
+    } else {
+      void document.documentElement.requestFullscreen?.({ navigationUI: "hide" }).catch(() => {});
+    }
+  });
+  document.addEventListener("fullscreenchange", () => {
+    const icon = document.fullscreenElement ? ICON_MINIMIZE : ICON_MAXIMIZE;
+    btn.innerHTML = svgIcon(icon, Math.round(56 * 0.45));
+  });
 }
 
 /*
