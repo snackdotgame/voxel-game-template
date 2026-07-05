@@ -67,7 +67,7 @@ function smooth(t: number): number {
 }
 
 // value noise sampled at (x/scale, z/scale), output 0..1
-function noise2(x: number, z: number, scale: number, seed: number): number {
+export function noise2(x: number, z: number, scale: number, seed: number): number {
   const fx = x / scale;
   const fz = z / scale;
   const x0 = Math.floor(fx);
@@ -177,6 +177,11 @@ function column(x: number, z: number): Column {
 
 export function terrainHeight(x: number, z: number): number {
   return column(x, z).height;
+}
+
+// Reads biome from the cached terrain column.
+export function biomeAt(x: number, z: number): Biome {
+  return column(x, z).biome;
 }
 
 /*

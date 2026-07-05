@@ -86,17 +86,20 @@ import {
 } from "./shared/sim.js";
 import { encodeChunkState, maxRecordsForPayload } from "./shared/chunkCodec.js";
 import {
+  type Biome,
   CRAFTING_TABLE_ID,
   LEAVES_ID,
   LOG_ID,
   WATER_ID,
   baseVoxelID,
+  biomeAt,
   chunkCoord,
   chunkKey,
   editKey,
   getWorldSeed,
   makeIsFluid,
   makeIsSolid,
+  noise2,
   setWorldSeed,
 } from "./shared/terrain.js";
 
@@ -132,6 +135,8 @@ const MELEE_KNOCKBACK = 5;
 const RESPAWN_PROTECTION_MS = 2_000;
 // regen 1 hp/s once this long has passed without taking damage
 const REGEN_AFTER_MS = 8_000;
+// Per-session "no hostiles" switch from snack.json's serverConfigSchema.
+const CREATOR_MODE = server.config.creatorMode === true;
 
 const MAX_DROPS = 512;
 const DROP_TTL_MS = 120_000;
@@ -229,14 +234,20 @@ type Npc = {
   rng: number;
 };
 
-// Per-kind stats. `count` is the population cap the slow respawn tick refills
-// to. Hostiles chase players inside aggroRange and melee inside attackReach;
-// sprinters chase at sprint speed (5.6 — a sprinting player can't shake them),
-// walkers at walk speed (4.3 — sprinting outruns them).
+// Per-kind stats. `count` is the deliberately thinned population cap the slow
+// respawn tick refills to. `biomes`, `territory`, and `group` make the lower
+// population appear as habitat patches and small herds/nests instead of a
+// uniform sprinkle around players. Hostiles chase players inside aggroRange
+// and melee inside attackReach; sprinters chase at sprint speed (5.6 — a
+// sprinting player can't shake them), walkers at walk speed (4.3 — sprinting
+// outruns them).
 type NpcKindConfig = {
   hp: number;
   count: number;
   hostile: boolean;
+  biomes: readonly Biome[];
+  territory: number;
+  group: number;
   damage: number;
   aggroRange: number;
   attackReach: number;
@@ -247,12 +258,17 @@ type NpcKindConfig = {
   drops: readonly { item: number; min: number; max: number }[];
 };
 
+// Caps are intentionally low; habitat, territory, and group settings make
+// those fewer NPCs read as regional herds/nests instead of evenly spread mobs.
 const NPC_CONFIG: readonly NpcKindConfig[] = [
   // chicken — the classic feather source, one arrow volley fells it
   {
     hp: 4,
-    count: 6,
+    count: 4,
     hostile: false,
+    biomes: ["plains", "forest"],
+    territory: 0.55,
+    group: 3,
     damage: 0,
     aggroRange: 0,
     attackReach: 0,
@@ -262,8 +278,11 @@ const NPC_CONFIG: readonly NpcKindConfig[] = [
   // pig
   {
     hp: 10,
-    count: 4,
+    count: 3,
     hostile: false,
+    biomes: ["plains", "forest"],
+    territory: 0.55,
+    group: 2,
     damage: 0,
     aggroRange: 0,
     attackReach: 0,
@@ -273,8 +292,11 @@ const NPC_CONFIG: readonly NpcKindConfig[] = [
   // cow
   {
     hp: 12,
-    count: 4,
+    count: 3,
     hostile: false,
+    biomes: ["plains"],
+    territory: 0.55,
+    group: 2,
     damage: 0,
     aggroRange: 0,
     attackReach: 0,
@@ -284,8 +306,11 @@ const NPC_CONFIG: readonly NpcKindConfig[] = [
   // zombie — tanky but shambles: even walking away works
   {
     hp: 20,
-    count: 4,
+    count: 3,
     hostile: true,
+    biomes: ["forest", "mountains"],
+    territory: 0.6,
+    group: 1,
     damage: 2,
     aggroRange: 14,
     attackReach: 1.8,
@@ -295,8 +320,11 @@ const NPC_CONFIG: readonly NpcKindConfig[] = [
   // spider — quicker than a zombie but fragile; its string feeds the bow/arrow economy
   {
     hp: 12,
-    count: 3,
+    count: 2,
     hostile: true,
+    biomes: ["forest", "mountains", "desert"],
+    territory: 0.6,
+    group: 1,
     damage: 2,
     aggroRange: 12,
     attackReach: 1.7,
@@ -304,6 +332,11 @@ const NPC_CONFIG: readonly NpcKindConfig[] = [
     drops: [{ item: STRING, min: 1, max: 2 }],
   },
 ];
+
+function kindCap(kind: number): number {
+  const cfg = NPC_CONFIG[kind];
+  return CREATOR_MODE && cfg.hostile ? 0 : cfg.count;
+}
 
 type Parked = {
   char: CharState;
@@ -726,11 +759,14 @@ function handleStream(world: World, event: StreamEvent) {
         z: Math.round(player.char.z * 10) / 10,
       });
     }
+    const counts = npcKindCounts(world);
     server.streams.send(event.connection.id, {
       type: "debugState",
+      creatorMode: CREATOR_MODE,
       players,
       connections: server.connections.length,
       drops: world.drops.size,
+      npcs: counts,
       projectiles: world.projectiles.size,
     });
     return;
@@ -1927,14 +1963,29 @@ function spawnNpc(world: World, kind: number, x: number, z: number): boolean {
   return true;
 }
 
+// Per-kind low-frequency "territory" noise carves patches of the map where
+// that kind can spawn, so herds/nests have home regions instead of a uniform
+// sprinkle around players. The biome list keeps zombies out of open plains:
+// the spawn meadow is plains, so fresh players meet hostiles only after
+// crossing into forest/mountains.
+function suitsNpcHabitat(kind: number, x: number, z: number): boolean {
+  const cfg = NPC_CONFIG[kind];
+  const ix = Math.floor(x);
+  const iz = Math.floor(z);
+  return cfg.biomes.includes(biomeAt(ix, iz)) && noise2(ix, iz, 96, 1100 + kind) >= cfg.territory;
+}
+
 // One placement attempt set for a kind. Passives cluster around an anchor
 // (a random player, or the origin before anyone joins); hostiles spawn on a
 // ring that keeps a minimum gap from every player, so nothing materializes
 // in someone's face.
-function trySpawnKind(world: World, kind: number): void {
+function trySpawnKind(world: World, kind: number, budget: number): number {
+  if (budget <= 0) {
+    return 0;
+  }
   const cfg = NPC_CONFIG[kind];
   const players = [...world.players.values()];
-  for (let attempt = 0; attempt < 8; attempt++) {
+  for (let attempt = 0; attempt < 16; attempt++) {
     const anchor =
       players.length > 0
         ? players[Math.floor(worldRand(world) * players.length)].char
@@ -1951,16 +2002,38 @@ function trySpawnKind(world: World, kind: number): void {
     ) {
       continue;
     }
+    if (!suitsNpcHabitat(kind, x, z)) {
+      continue;
+    }
     if (spawnNpc(world, kind, x, z)) {
-      return;
+      let spawned = 1;
+      const companions = Math.min(cfg.group, budget) - 1;
+      for (let i = 0; i < companions; i++) {
+        const companionAngle = worldRand(world) * Math.PI * 2;
+        const companionDist = 2 + worldRand(world) * 5;
+        if (
+          spawnNpc(
+            world,
+            kind,
+            x + Math.cos(companionAngle) * companionDist,
+            z + Math.sin(companionAngle) * companionDist,
+          )
+        ) {
+          spawned += 1;
+        }
+      }
+      return spawned;
     }
   }
+  return 0;
 }
 
 function spawnInitialNpcs(world: World) {
   for (let kind = 0; kind < NPC_KIND_COUNT; kind++) {
-    for (let i = 0; i < NPC_CONFIG[kind].count; i++) {
-      trySpawnKind(world, kind);
+    const cap = kindCap(kind);
+    let spawned = 0;
+    for (let calls = 0; spawned < cap && calls < cap; calls++) {
+      spawned += trySpawnKind(world, kind, cap - spawned);
     }
   }
 }
@@ -1969,6 +2042,14 @@ function spawnInitialNpcs(world: World) {
 // cycle), so hunted animals and slain zombies return over time. Skipped on an
 // empty server — populations only matter while someone is playing.
 let npcRespawnMs = 0;
+
+function npcKindCounts(world: World): number[] {
+  const counts = Array.from({ length: NPC_KIND_COUNT }, () => 0);
+  for (const npc of world.npcs.values()) {
+    counts[npc.kind] += 1;
+  }
+  return counts;
+}
 
 function tickNpcRespawns(world: World) {
   npcRespawnMs += SIM_TICK_MS;
@@ -1979,13 +2060,11 @@ function tickNpcRespawns(world: World) {
   if (world.players.size === 0) {
     return;
   }
-  const counts = Array.from({ length: NPC_KIND_COUNT }, () => 0);
-  for (const npc of world.npcs.values()) {
-    counts[npc.kind] += 1;
-  }
+  const counts = npcKindCounts(world);
   for (let kind = 0; kind < NPC_KIND_COUNT; kind++) {
-    if (counts[kind] < NPC_CONFIG[kind].count) {
-      trySpawnKind(world, kind);
+    const budget = kindCap(kind) - counts[kind];
+    if (budget > 0) {
+      trySpawnKind(world, kind, budget);
     }
   }
 }

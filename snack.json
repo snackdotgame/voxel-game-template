@@ -16,6 +16,14 @@
       "upperLimit": 16,
       "default": 16
     },
+    "serverConfigSchema": {
+      "creatorMode": {
+        "type": "boolean",
+        "default": false,
+        "label": "Creator mode",
+        "description": "Peaceful building: hostile mobs (zombies and spiders) never spawn."
+      }
+    },
     "name": "Voxel Adventure",
     "visibility": "private",
     "slug": "noa-voxels",
