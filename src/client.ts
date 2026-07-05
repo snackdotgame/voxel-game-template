@@ -18,7 +18,7 @@ import {
 import { client } from "snack:client";
 import { Engine } from "./noa/index.js";
 import { disposeObject3D } from "./noa/lib/rendering.js";
-import { setupMobileControls } from "./mobile.js";
+import { isTouchDevice, setupMobileControls } from "./mobile.js";
 import {
   type BlockEdit,
   type PlayerSnapshot,
@@ -3211,7 +3211,9 @@ function updateHud(): void {
 const invBackdrop = document.createElement("div");
 invBackdrop.style.cssText =
   "position: fixed; inset: 0; z-index: 20; display: none; align-items: center;" +
-  "justify-content: center; background: rgba(0,0,0,0.45); pointer-events: auto;";
+  "justify-content: center; background: rgba(0,0,0,0.45); pointer-events: auto;" +
+  "box-sizing: border-box; padding: 56px 20px 16px; touch-action: none;" +
+  "overscroll-behavior: contain;";
 document.body.appendChild(invBackdrop);
 
 const invPanel = document.createElement("div");
@@ -3222,12 +3224,32 @@ invBackdrop.appendChild(invPanel);
 
 const invTitle = document.createElement("div");
 invTitle.textContent = "Inventory";
-invTitle.style.cssText = `font: ${UI_FONT}; font-size: 13px; color: #fff; margin-bottom: 10px;`;
-invPanel.appendChild(invTitle);
+invTitle.style.cssText = `font: ${UI_FONT}; font-size: 13px; color: #fff;`;
+const invHeader = document.createElement("div");
+invHeader.style.cssText =
+  "display: flex; align-items: center; justify-content: space-between; gap: 12px;" +
+  "margin-bottom: 10px;";
+invHeader.appendChild(invTitle);
+const invClose = document.createElement("div");
+invClose.role = "button";
+invClose.ariaLabel = "Close inventory";
+invClose.textContent = "✕";
+invClose.style.cssText =
+  "width: 32px; height: 32px; display: flex; align-items: center; justify-content: center;" +
+  "font: 20px system-ui, sans-serif; line-height: 1; color: rgba(255,255,255,0.7);" +
+  "background: transparent; border: 0; cursor: pointer; touch-action: none;" +
+  "user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;";
+invClose.addEventListener("pointerdown", (ev) => {
+  ev.preventDefault();
+  ev.stopPropagation();
+  setInventoryOpen(false);
+});
+invHeader.appendChild(invClose);
+invPanel.appendChild(invHeader);
 
 // crafting: a square grid (2x2 in the inventory, 3x3 at a table) feeding a
 // result slot. Grid cells use slot indices CRAFT_GRID_BASE+cell so the
-// existing inventory drag system moves items in and out via invMove; clicking
+// existing inventory drag system moves items in and out via invMove; pressing
 // the result crafts (shift-click crafts as many as the grid allows).
 const craftSlots2: Slot[] = [];
 const craftSlots3: Slot[] = [];
@@ -3270,7 +3292,10 @@ craftSection.appendChild(craftArrow);
 const resultTile = makeSlot(craftSection, "");
 resultTile.root.style.cursor = "pointer";
 resultTile.root.style.borderColor = "rgba(120,220,120,0.55)";
-resultTile.root.addEventListener("click", (ev) => {
+resultTile.root.addEventListener("pointerdown", (ev) => {
+  if (ev.button !== 0) {
+    return;
+  }
   void client.streams.send({ type: "craftTake", all: ev.shiftKey }).catch(() => {});
 });
 
@@ -3338,6 +3363,22 @@ function updateInventoryPanel(): void {
   const recipe = craftSize > 0 ? matchRecipe(craftCells(), craftSize) : null;
   setSlotContent(resultTile, recipe ? { item: recipe.out, count: recipe.count } : null);
   invTitle.textContent = show3 ? "Crafting Table" : "Inventory";
+  // the crafting section appears/resizes with the server's craft echo, so
+  // refit whenever the panel contents change, not just on open
+  fitInventoryPanel();
+}
+
+function fitInventoryPanel(): void {
+  const vv = window.visualViewport;
+  const width = vv?.width ?? window.innerWidth;
+  const height = vv?.height ?? window.innerHeight;
+  const naturalWidth = invPanel.offsetWidth;
+  const naturalHeight = invPanel.offsetHeight;
+  const scale =
+    naturalWidth > 0 && naturalHeight > 0
+      ? Math.min(1, (width - 40) / naturalWidth, (height - 72) / naturalHeight)
+      : 1;
+  invPanel.style.transform = `scale(${scale})`;
 }
 
 // after the panel closes, a fire that arrives while the pointer is still
@@ -3377,6 +3418,13 @@ function setInventoryOpen(
     fireSuppressedUntil = performance.now() + 1500;
   }
 }
+
+window.visualViewport?.addEventListener("resize", () => {
+  if (inventoryOpen) {
+    fitInventoryPanel();
+  }
+  fitCreatorPanel();
+});
 
 function fireSuppressed(): boolean {
   return (
@@ -3437,8 +3485,15 @@ function moveItem(from: number, to: number, one: boolean): void {
 // drag and drop: pick a stack up on pointerdown, float its icon under the
 // cursor, drop it on the slot under the pointer. right-button drag moves a
 // single item (so one stack can be spread across crafting-grid cells).
+// A tap — press and release on the same slot — picks the stack up "carried"
+// instead, Minecraft-style: it stays on the cursor and the next tap places
+// it (tap the source slot again to put it back, or tap the world around the
+// panel to toss it). Dragging is awkward on touch screens, where the finger
+// hides the item it's dragging.
 let dragFrom = -1;
 let dragOne = false;
+let dragCarried = false;
+let dragFromEl: HTMLElement | null = null;
 let dragGhost: HTMLDivElement | null = null;
 
 function endDrag(ev: PointerEvent | null): void {
@@ -3449,7 +3504,16 @@ function endDrag(ev: PointerEvent | null): void {
     const under = document.elementFromPoint(ev.clientX, ev.clientY);
     const slotEl = under?.closest?.("[data-inv-slot]") as HTMLElement | null;
     if (slotEl?.dataset.invSlot !== undefined) {
-      moveItem(dragFrom, Number(slotEl.dataset.invSlot), dragOne);
+      const target = Number(slotEl.dataset.invSlot);
+      if (!dragCarried && target === dragFrom) {
+        // released where it was picked up: a tap, not a drag. Keep the stack
+        // carried (outline the source slot) and let the next press place it.
+        dragCarried = true;
+        dragFromEl?.style.setProperty("outline", "2px solid rgba(255,255,255,0.8)");
+        dragFromEl?.style.setProperty("outline-offset", "-2px");
+        return;
+      }
+      moveItem(dragFrom, target, dragOne);
     } else if (!under || !invPanel.contains(under)) {
       // released outside the inventory panel (the world around it): toss the
       // stack out. The server tosses it a couple of blocks ahead.
@@ -3458,6 +3522,10 @@ function endDrag(ev: PointerEvent | null): void {
   }
   dragFrom = -1;
   dragOne = false;
+  dragCarried = false;
+  dragFromEl?.style.removeProperty("outline");
+  dragFromEl?.style.removeProperty("outline-offset");
+  dragFromEl = null;
   dragGhost?.remove();
   dragGhost = null;
 }
@@ -3482,11 +3550,31 @@ function dropItem(from: number, one: boolean): void {
 
 invBackdrop.addEventListener("contextmenu", (ev) => ev.preventDefault());
 
+// CSS touch-action does not stop iOS edge navigation by itself; preventing the
+// touchstart default blocks that and Android pull-to-refresh inside inventory.
+invBackdrop.addEventListener("touchstart", (ev) => ev.preventDefault(), { passive: false });
+invBackdrop.addEventListener("touchmove", (ev) => ev.preventDefault(), { passive: false });
+
 invBackdrop.addEventListener("pointerdown", (ev) => {
-  // a drag still armed here lost its pointerup (context menu, window
-  // blur): cancel it instead of letting this click complete it
+  // an armed drag here is either a carried (tapped) stack waiting for its
+  // destination, or a drag whose pointerup got lost (context menu, window
+  // blur): either way, resolve it against wherever this press landed
   if (dragFrom !== -1 || dragGhost) {
-    endDrag(null);
+    ev.preventDefault();
+    // on touch the space around the panel doubles as "tap to close", so a
+    // carried stack is put back rather than tossed out — tossing stays on
+    // the drag-out gesture (and on desktop clicks, like Minecraft)
+    if (dragCarried && isTouchDevice() && ev.target === invBackdrop) {
+      endDrag(null);
+    } else {
+      endDrag(ev);
+    }
+    return;
+  }
+  if (isTouchDevice() && ev.target === invBackdrop) {
+    ev.preventDefault();
+    setInventoryOpen(false);
+    return;
   }
   // left button drags the whole stack; right button drags a single item
   if (ev.button !== 0 && ev.button !== 2) {
@@ -3500,6 +3588,7 @@ invBackdrop.addEventListener("pointerdown", (ev) => {
   }
   ev.preventDefault();
   dragFrom = index;
+  dragFromEl = slotEl;
   dragOne = ev.button === 2;
   dragGhost = document.createElement("div");
   dragGhost.style.cssText =
@@ -3817,17 +3906,21 @@ function drawDoll(canvas: HTMLCanvasElement, look: number, back = false): void {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
 }
 
+// flex + margin:auto (not align/justify center) so when the panel is taller
+// than a short landscape phone the backdrop scrolls instead of clipping the
+// top edge — with center alignment the Play button could end up off-screen
+// with no way to reach it
 const creatorBackdrop = document.createElement("div");
 creatorBackdrop.style.cssText =
-  "position: fixed; inset: 0; z-index: 30; display: flex; align-items: center;" +
-  "justify-content: center; background: rgba(0,0,0,0.55); pointer-events: auto;";
+  "position: fixed; inset: 0; z-index: 30; display: flex; overflow: auto;" +
+  "background: rgba(0,0,0,0.55); pointer-events: auto;";
 document.body.appendChild(creatorBackdrop);
 
 const creatorPanel = document.createElement("div");
 creatorPanel.style.cssText =
   "background: rgba(18,20,28,0.94); border: 1px solid rgba(255,255,255,0.15);" +
   "border-radius: 10px; padding: 16px 18px; box-shadow: 0 12px 40px rgba(0,0,0,0.5);" +
-  "max-width: min(92vw, 560px); text-align: center;";
+  "max-width: min(92vw, 560px); text-align: center; margin: auto;";
 creatorBackdrop.appendChild(creatorPanel);
 
 const creatorTitle = document.createElement("div");
@@ -3994,6 +4087,30 @@ playButton.addEventListener("click", () => {
   fireSuppressedUntil = performance.now() + 1500;
 });
 creatorPanel.appendChild(playButton);
+
+// scale the creator to fit short screens (landscape phones), like the
+// inventory panel — the scrollable backdrop stays as a fallback. The origin
+// is the top edge because the overflowing layout box is top-anchored
+// (margin: auto with no free space), so scaling around the center would
+// push the bottom edge back off-screen.
+function fitCreatorPanel(): void {
+  if (creatorBackdrop.style.display === "none") {
+    return;
+  }
+  const vv = window.visualViewport;
+  const width = vv?.width ?? window.innerWidth;
+  const height = vv?.height ?? window.innerHeight;
+  const naturalWidth = creatorPanel.offsetWidth;
+  const naturalHeight = creatorPanel.offsetHeight;
+  const scale =
+    naturalWidth > 0 && naturalHeight > 0
+      ? Math.min(1, (width - 24) / naturalWidth, (height - 24) / naturalHeight)
+      : 1;
+  creatorPanel.style.transformOrigin = "top center";
+  creatorPanel.style.transform = `scale(${scale})`;
+}
+
+fitCreatorPanel();
 
 /*
  *      Networking

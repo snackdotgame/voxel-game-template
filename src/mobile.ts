@@ -167,7 +167,7 @@ export function setupMobileControls(opts: MobileControlOptions): boolean {
   // hotbar before the buttons so the corner buttons stack above it
   attachHotbar(root, opts);
   setupActionButtons(noa, root, opts);
-  setupInventoryButton(opts);
+  setupInventoryButton(root, opts);
   return true;
 }
 
@@ -186,7 +186,9 @@ function sizeGameToVisibleViewport(): void {
   // noa pins its container with top/bottom:0 + height:100%, which on mobile
   // resolves to the *large* viewport (behind the address bar). Switch it to the
   // dynamic viewport so the canvas + centered crosshair fit what's on screen.
-  style.textContent = "#noa-container { height: 100dvh !important; bottom: auto !important; }";
+  style.textContent =
+    "html, body { overscroll-behavior: none; }" +
+    "#noa-container { height: 100dvh !important; bottom: auto !important; }";
   document.head.appendChild(style);
 
   // entering/leaving fullscreen changes the canvas size — let noa re-measure
@@ -287,6 +289,9 @@ function setupSurface(noa: Engine, root: HTMLElement): void {
   const surface = document.createElement("div");
   surface.style.cssText = "position: absolute; inset: 0; pointer-events: auto; touch-action: none;";
   root.appendChild(surface);
+  // CSS touch-action does not stop iOS edge navigation by itself; preventing
+  // touchstart keeps left-edge look drags from pulling the page away.
+  surface.addEventListener("touchstart", (ev) => ev.preventDefault(), { passive: false });
 
   const joybase = document.createElement("div");
   joybase.style.cssText =
@@ -586,24 +591,19 @@ function attachHotbar(root: HTMLElement, opts: MobileControlOptions): void {
 /*
  *      Inventory button
  *
- *  Lives ABOVE the inventory backdrop (z 20) — unlike the rest of the overlay,
- *  which sits below it — so the same button opens and closes the inventory.
+ *  Lives in the same viewport-tracked overlay as the rest of the touch controls
+ *  so the inventory backdrop (z 20) covers and dims it while the panel is open.
+ *  The panel close button and backdrop tap handle closing on phones.
  */
-function setupInventoryButton(opts: MobileControlOptions): void {
-  const el = document.createElement("div");
-  el.role = "button";
-  el.ariaLabel = "Inventory";
-  el.innerHTML = svgIcon(ICON_BACKPACK, 25);
+function setupInventoryButton(root: HTMLElement, opts: MobileControlOptions): void {
   // stacked under the VIEW button in the left column (which itself sits below
   // the host shell's top-left menu strip)
-  el.style.cssText =
-    "position: fixed; z-index: 25; top: calc(128px + env(safe-area-inset-top));" +
-    "left: calc(12px + env(safe-area-inset-left)); width: 56px; height: 56px;" +
-    "border-radius: 50%; display: flex; align-items: center; justify-content: center;" +
-    "color: #fff; background: rgba(20,20,28,0.55);" +
-    "border: 2px solid rgba(255,255,255,0.32); box-shadow: 0 2px 6px rgba(0,0,0,0.4);" +
-    "pointer-events: auto; touch-action: none; user-select: none; -webkit-user-select: none;" +
-    "-webkit-touch-callout: none;";
-  document.body.appendChild(el);
+  const el = makeButton(root, {
+    icon: ICON_BACKPACK,
+    label: "Inventory",
+    bg: "rgba(20,20,28,0.55)",
+    size: 56,
+    pos: "top: calc(128px + env(safe-area-inset-top)); left: calc(12px + env(safe-area-inset-left));",
+  });
   onTap(el, opts.openInventory);
 }
