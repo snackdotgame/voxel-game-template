@@ -29,7 +29,12 @@
     "slug": "noa-voxels",
     "titleImage": "assets/noa-voxels-cover.webp",
     "genre": "adventure",
-    "platforms": ["desktop", "phone", "tablet"],
-    "id": "bab1be3c-4113-4942-a2cd-9e62f690850a"
+    "platforms": [
+      "desktop",
+      "phone",
+      "tablet"
+    ],
+    "id": "bab1be3c-4113-4942-a2cd-9e62f690850a",
+    "versionId": "df4af5c0-e33d-4973-8e1a-8e90523e5fa9"
   }
 }
