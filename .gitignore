@@ -3,6 +3,8 @@ node_modules
 .snack/deploy
 .turbo
 dist
+!vendor/aabb-3d/dist/
+!vendor/aabb-3d/dist/**
 .playtest-shots/
 .DS_Store
 .env
