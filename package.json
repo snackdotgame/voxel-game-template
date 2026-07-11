@@ -38,7 +38,7 @@
     "voxel-physics-engine": "file:vendor/voxel-physics-engine"
   },
   "devDependencies": {
-    "@snack-game/cli": "^0.1.14",
+    "@snack-game/cli": "^0.1.17",
     "@typescript/native-preview": "7.0.0-dev.20260513.1",
     "esbuild": "0.27.3",
     "oxfmt": "0.47.0",
